@@ -11,29 +11,42 @@ func (v *Vol) Set(key, value []byte) (err error) {
 		return err
 	}
 
-	// make data chunk
 	ck := &Chunk{}
 	err = ck.Set(key, value)
 	if err != nil {
 		return err
 	}
 
-	// process data write position
 	binLenOnDisk := ck.GetBinaryLength()
 	if v.WritePos+binLenOnDisk > v.Length {
 		log.Printf("data write overflowed, start from dataOffset. set: writePos: %d, dataOffset: %d, len(value): %d", v.WritePos, v.DataOffset, len(value))
+		v.aggBufFlush(true)
 		v.WritePos = v.DataOffset
 	}
-	writeOffset := v.WritePos
-	v.WritePos += binLenOnDisk
 
-	// set dir
-	_, err = v.Dm.Set(key, writeOffset, int(binLenOnDisk))
+	// big file direct write to disk
+	if binLenOnDisk >= AggHighWaterMark {
+		v.aggBufFlush(true)
 
-	// write to disk
-	err = ck.WriteAt(v.Fp, int64(writeOffset))
-	if err != nil {
-		return err
+		writeOffset := v.WritePos
+		v.WritePos += binLenOnDisk
+
+		v.Dm.Set(key, writeOffset, int(binLenOnDisk))
+		err = ck.WriteAt(v.Fp, int64(writeOffset))
+		if err != nil {
+			return err
+		}
+	} else {
+		v.aggWriteBuffer.mutex.Lock()
+		defer v.aggWriteBuffer.mutex.Unlock()
+		v.Dm.Set(key, v.WritePos+Offset(v.aggWriteBuffer.bufferPos), int(binLenOnDisk))
+		err = ck.WriteAt(v.aggWriteBuffer, int64(v.aggWriteBuffer.bufferPos))
+		if err != nil {
+			return err
+		}
+		if v.aggWriteBuffer.bufferPos >= AggHighWaterMark {
+			v.aggBufFlush(false)
+		}
 	}
 	return nil
 }
@@ -49,7 +62,6 @@ func (v *Vol) checkSetRequest(key, value []byte) (err error) {
 }
 
 func (v *Vol) Get(key []byte) (hit bool, value []byte, err error) {
-	//log.Printf("DEBUG: get key: %s", key)
 	err = v.checkGetRequest(key)
 	if err != nil {
 		return false, nil, err
@@ -65,15 +77,24 @@ func (v *Vol) Get(key []byte) (hit bool, value []byte, err error) {
 	readOffset := d.offset()
 	approxSize := d.approxSize()
 
+	rt := v.Fp
+	v.aggWriteBuffer.mutex.RLock()
+	defer v.aggWriteBuffer.mutex.RUnlock()
+	if v.dirAggBufValid(d) {
+		// load from aggregation buffer
+		rt = v.aggWriteBuffer
+		readOffset = readOffset - uint64(v.WritePos)
+	}
+
 	ck := &Chunk{}
-	err = ck.ReadAt(v.Fp, int64(readOffset), int64(approxSize))
+	err = ck.ReadAt(rt, int64(readOffset), int64(approxSize))
 	if err != nil {
 		log.Printf("warning: failed to read data chunk. key: %s, offset: %d, approxSize: %d, err: %s", key, readOffset, approxSize, err)
 		return false, nil, err
 	}
 	ckKey, ckData := ck.GetKeyData()
 	if string(ckKey) != string(key) {
-		//log.Printf("warning: key mismatch. key: %s, ckKey: %s", key, ckKey)
+		log.Printf("warning: key mismatch. key: %s, ckKey: %s", key, ckKey)
 		return false, nil, nil
 	}
 
@@ -85,4 +106,44 @@ func (v *Vol) checkGetRequest(key []byte) (err error) {
 		return ErrChunkKeyTooLarge
 	}
 	return nil
+}
+
+func (v *Vol) aggBufFlush(lock bool) {
+	if lock {
+		v.aggWriteBuffer.mutex.Lock()
+		defer v.aggWriteBuffer.mutex.Unlock()
+	}
+	if v.aggWriteBuffer.Empty() {
+		return
+	}
+
+	n, err := v.aggWriteBuffer.Flush(int64(v.WritePos))
+	if err != nil || n != v.aggWriteBuffer.bufferPos {
+		log.Printf("flush to disk error, clear aggWriteBuffer dir")
+		// delete dir
+		v.dirAggBufDel()
+	} else {
+		v.WritePos += Offset(n)
+	}
+	v.aggWriteBuffer.Reset()
+	// v.flushMetaToFp()
+}
+
+func (v *Vol) dirAggBufValid(d Dir) bool {
+	return d.offset() >= uint64(v.WritePos) &&
+		d.offset() < (uint64(v.WritePos)+uint64(v.aggWriteBuffer.bufferPos))
+}
+
+func (v *Vol) dirAggBufDel() {
+	v.aggWriteBuffer.mutex.Lock()
+	defer v.aggWriteBuffer.mutex.Unlock()
+
+	data := make([]byte, ChunkHeaderSizeFixed)
+	for off := 0; off < v.aggWriteBuffer.bufferPos; {
+		v.aggWriteBuffer.ReadAt(data, int64(off))
+		ckHeader := &ChunkHeader{}
+		ckHeader.UnmarshalBinary(data)
+		v.Dm.Delete(ckHeader.Key[:])
+		off += ChunkHeaderSizeFixed + int(ckHeader.DataLength)
+	}
 }
