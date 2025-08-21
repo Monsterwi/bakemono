@@ -2,6 +2,7 @@ package bakemono
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -75,6 +76,10 @@ func TestDirManager_Marshal_Unmarshal(t *testing.T) {
 	dm.Init(123457)
 	dm.InitEmptyDirs()
 
+	for seg := segId(0); Offset(seg) < dm.SegmentsNum; seg++ {
+		dm.DirFreeStart[seg] = 2
+	}
+
 	// marshal
 	data, err := dm.MarshalBinary()
 	if err != nil {
@@ -86,6 +91,12 @@ func TestDirManager_Marshal_Unmarshal(t *testing.T) {
 	err = dm2.UnmarshalBinary(data)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	for seg := segId(0); Offset(seg) < dm.SegmentsNum; seg++ {
+		if dm.DirFreeStart[seg] != dm2.DirFreeStart[seg] {
+			t.Fatal("free start not match")
+		}
 	}
 
 	// check if dm2 is equal to dm
@@ -147,6 +158,38 @@ func TestDirManager_FreeChainDelete(t *testing.T) {
 		}
 		t.Logf("dir free chain length: %d", counter)
 		if Offset(counter) != (dm.SegmentsNum*dm.BucketsNumPerSegment*(DirDepth-1) - 3) {
+			t.Error("dir free chain not match")
+		}
+	}
+}
+
+func TestDirManager_FreeChainSet(t *testing.T) {
+	dm := &DirManager{}
+	dm.Init(123457)
+	dm.InitEmptyDirs()
+
+	{
+		// delete
+		seg := segId(0)
+		index := dm.DirFreeStart[seg]
+		t.Logf("to delete index: %d", index)
+		dm.freeChainDelete(seg, Offset(index))
+		counter, err := countDirFreeInChain(dm)
+		if err != nil {
+			t.Error(err)
+		}
+		t.Logf("dir free chain length: %d before set", counter)
+		if Offset(counter) != (dm.SegmentsNum*dm.BucketsNumPerSegment*(DirDepth-1) - 1) {
+			t.Error("dir free chain not match")
+		}
+		// set
+		dm.freeChainSet(seg, Offset(index))
+		counter, err = countDirFreeInChain(dm)
+		if err != nil {
+			t.Error(err)
+		}
+		t.Logf("dir free chain length: %d after set", counter)
+		if Offset(counter) != (dm.SegmentsNum * dm.BucketsNumPerSegment * (DirDepth - 1)) {
 			t.Error("dir free chain not match")
 		}
 	}
@@ -224,7 +267,7 @@ func TestDirManager_Probe(t *testing.T) {
 		}
 		_ = linkEmptyDirs(dirs)
 
-		hit, pos, _ := dirProbe(1, 0, dirs)
+		hit, pos, _, _ := dirProbe(1, 0, dirs)
 		if hit {
 			t.Error("should not hit")
 		}
@@ -232,7 +275,7 @@ func TestDirManager_Probe(t *testing.T) {
 			t.Error("pos should be 0")
 		}
 
-		hit, pos, _ = dirProbe(1, 1, dirs)
+		hit, pos, _, _ = dirProbe(1, 1, dirs)
 		if hit {
 			t.Error("should not hit")
 		}
@@ -251,7 +294,7 @@ func TestDirManager_Probe(t *testing.T) {
 
 		dirs[0].setOffset(1)
 		dirs[0].setTag(1)
-		hit, pos, _ := dirProbe(1, 0, dirs)
+		hit, pos, _, _ := dirProbe(1, 0, dirs)
 		if !hit {
 			t.Error("should hit")
 		}
@@ -261,7 +304,7 @@ func TestDirManager_Probe(t *testing.T) {
 
 		dirs[4].setOffset(1)
 		dirs[4].setTag(1)
-		hit, pos, _ = dirProbe(1, 1, dirs)
+		hit, pos, _, _ = dirProbe(1, 1, dirs)
 		if !hit {
 			t.Error("should hit")
 		}
@@ -285,7 +328,7 @@ func TestDirManager_Probe(t *testing.T) {
 		dirs[1].setTag(2)
 		dirs[1].setNext(0)
 
-		hit, pos, _ := dirProbe(3, 0, dirs)
+		hit, pos, _, _ := dirProbe(3, 0, dirs)
 		if hit {
 			t.Error("should not hit")
 		}
@@ -307,7 +350,7 @@ func TestDirManager_Probe(t *testing.T) {
 		dirs[1].setOffset(1)
 		dirs[1].setTag(2)
 		dirs[1].setNext(0)
-		hit, pos, _ := dirProbe(2, 0, dirs)
+		hit, pos, _, _ := dirProbe(2, 0, dirs)
 		if !hit {
 			t.Error("should not hit")
 		}
@@ -324,7 +367,7 @@ func TestDirManager_Probe(t *testing.T) {
 		dirs[6].setOffset(1)
 		dirs[6].setTag(3)
 		dirs[6].setNext(0)
-		hit, pos, _ = dirProbe(2, 1, dirs)
+		hit, pos, _, _ = dirProbe(2, 1, dirs)
 		if !hit {
 			t.Error("should not hit")
 		}
@@ -456,6 +499,108 @@ func TestDirManager_GetSet(t *testing.T) {
 
 		if d.approxSize() == 0 {
 			t.Error("approxSize should be > 0")
+		}
+	}
+}
+
+func TestDirManager_Delete(t *testing.T) {
+	dm := &DirManager{}
+	dm.Init(20)
+	dm.InitEmptyDirs()
+
+	// all keys hash to bucket 0
+	keys := []string{
+		"key-2",  // tag=3020
+		"key-13", // tag=3804
+		"key-14", // tag=3945
+		"key-20", // tag=2230
+		"key-22", // tag=3825
+		"key-23", // tag=2386
+		"key-27", // tag=1768
+		"key-28", // tag=3923
+		"key-30", // tag=1428
+		"key-31", // tag=1700
+	}
+	// delete head of bucket
+	{
+		pos, _ := dm.Set([]byte(keys[0]), 100, 200)
+		t.Logf("pos: %v", pos)
+		_, err := dm.Delete([]byte(keys[0]))
+		if err != nil && !errors.Is(err, ErrDelHeadOfBucket) {
+			t.Fatal(err)
+		}
+		hit, _, _ := dm.Get([]byte(keys[0]))
+		if !hit {
+			t.Fatal("should hit")
+		}
+	}
+
+	// delete middle
+	{
+		pos, err := dm.Set([]byte(keys[1]), 100, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("pos: %v", pos)
+		pos2, err := dm.Set([]byte(keys[2]), 100, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("pos2: %v", pos2)
+		pos3, err := dm.Delete([]byte(keys[1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("pos3: %v", pos3)
+		if pos3 != pos {
+			t.Error("pos should be same")
+		}
+		hit, _, _ := dm.Get([]byte(keys[1]))
+		if hit {
+			t.Fatal("should miss")
+		}
+
+		// check key is still in the dir manager
+		for _, key := range []string{keys[0], keys[2]} {
+			hit, _, _ = dm.Get([]byte(key))
+			if !hit {
+				t.Fatal("should hit")
+			}
+		}
+	}
+
+	// delete tail
+	{
+		pos, err := dm.Set([]byte(keys[3]), 100, 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("pos: %v", pos)
+		hit, pos2, _ := dm.Get([]byte(keys[3]))
+		if !hit {
+			t.Fatal("should hit")
+		}
+		t.Logf("pos2: %v", pos2)
+
+		pos3, err := dm.Delete([]byte(keys[3]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("pos3: %v", pos3)
+		if pos3 != pos {
+			t.Error("pos should be same")
+		}
+
+		hit, _, _ = dm.Get([]byte(keys[3]))
+		if hit {
+			t.Fatal("should miss")
+		}
+		// check key is still in the dir manager
+		for _, key := range []string{keys[0], keys[2]} {
+			hit, _, _ = dm.Get([]byte(key))
+			if !hit {
+				t.Fatal("should hit")
+			}
 		}
 	}
 }

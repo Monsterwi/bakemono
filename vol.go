@@ -17,6 +17,7 @@ type segId uint64
 var (
 	HeaderSize = binary.Size(&VolHeaderFooter{})
 	DirSize    = binary.Size(&Dir{})
+	DirIDSize  = binary.Size(uint16(0))
 )
 
 // Vol is a volume represents a file on disk.
@@ -44,6 +45,8 @@ type Vol struct {
 
 	closeCh chan struct{}
 	flushCh chan struct{}
+
+	aggWriteBuffer *AggregateWriteBuffer
 }
 
 // VolOptions to init a Vol.
@@ -98,6 +101,9 @@ func (v *Vol) Init(cfg *VolOptions) (corrupted bool, err error) {
 		return false, err
 	}
 
+	// aggregate buffer
+	v.aggWriteBuffer = NewAggregateWriteBuffer(cfg.Fp.(*os.File))
+
 	// channel init
 	v.closeCh = make(chan struct{})
 	v.flushCh = make(chan struct{})
@@ -145,6 +151,7 @@ func (v *Vol) SyncFlushLoop(interval time.Duration) {
 			close(v.flushCh)
 			return
 		case <-time.After(interval):
+			// TODO flush when receive signal
 			err := v.flushMetaToFp()
 			if err != nil {
 				log.Printf("error: flush meta to fp failed, err: %v", err)
@@ -165,17 +172,19 @@ func (v *Vol) prepareOffsets(cfg *VolOptions) {
 	// Meta_A(header, dirs, footer) + Meta_B(header, dirs, footer) + Data(Chunks)
 	HeaderFooterSize := Offset(HeaderSize)
 	DirSize := Offset(binary.Size(&Dir{}))
+	// dmSize(dirs + dirFreeStart)
+	DmSize := v.ChunksMaxNum*DirSize + v.Dm.SegmentsNum*Offset(DirIDSize)
 	// TotalChunk init by DirManager
 	//TotalChunks := (cfg.FileSize - 4*HeaderFooterSize) / (cfg.ChunkAvgSize + 2*DirSize)
-	MetaSize := 2 * (2*HeaderFooterSize + v.ChunksMaxNum*DirSize)
+	MetaSize := 2 * (2*HeaderFooterSize + DmSize)
 	DataSize := cfg.FileSize - MetaSize
 	log.Printf("initing vol: ChunksMaxNum: %d, MetaSize: %d, DataSize: %d, VolLength: %d", v.ChunksMaxNum, MetaSize, DataSize, v.Length)
 
 	// calculate offsets
 	v.HeaderAOffset = 0
-	v.FooterAOffset = HeaderFooterSize + v.ChunksMaxNum*DirSize
+	v.FooterAOffset = HeaderFooterSize + DmSize
 	v.HeaderBOffset = v.FooterAOffset + HeaderFooterSize
-	v.FooterBOffset = v.HeaderBOffset + HeaderFooterSize + v.ChunksMaxNum*DirSize
+	v.FooterBOffset = v.HeaderBOffset + HeaderFooterSize + DmSize
 	v.DataOffset = MetaSize
 	v.DirAOffset = v.HeaderAOffset + HeaderFooterSize
 
@@ -209,7 +218,7 @@ func (v *Vol) buildMetaFromFp() error {
 	}
 	v.Header = h
 
-	DirSize := Offset(binary.Size(&Dir{})) * v.ChunksMaxNum
+	DirSize := Offset(binary.Size(&Dir{}))*v.ChunksMaxNum + Offset(DirIDSize)*v.Dm.SegmentsNum
 	dirsRaw := make([]byte, DirSize)
 	_, err = v.Fp.ReadAt(dirsRaw, int64(v.DirAOffset))
 	if err != nil {
@@ -232,6 +241,8 @@ func (v *Vol) buildMetaFromFp() error {
 
 // flushMetaToFp flushes metadata to io.
 func (v *Vol) flushMetaToFp() error {
+	v.aggBufFlush(true)
+
 	v.Header.Magic = MagicBocchi
 	v.Header.MajorVersion = MajorVersion
 	v.Header.MinorVersion = MinorVersion
@@ -271,7 +282,7 @@ func (v *Vol) flushHeaderFooterToFp() error {
 
 func (v *Vol) flushDirRawToFp(data []byte) error {
 	// check if data size is correct
-	DirSize := Offset(binary.Size(&Dir{})) * v.ChunksMaxNum
+	DirSize := Offset(binary.Size(&Dir{}))*v.ChunksMaxNum + v.Dm.SegmentsNum*Offset(DirIDSize)
 	if DirSize < Offset(len(data)) {
 		return errors.New("invalid dir data size")
 	}

@@ -140,6 +140,19 @@ func freeChainDelete(dirs []*Dir, dirOffset Offset) (isFirst bool, freeListHead 
 	return
 }
 
+// freeChainSet set a free dir to the chain
+func (dm *DirManager) freeChainSet(segmentId segId, dirOffset Offset) {
+	if dm.Dirs[segmentId][dirOffset].offset() != 0 {
+		// TODO: remove panic once stable
+		panic("dir is not empty")
+	}
+	index := dm.DirFreeStart[segmentId]
+
+	dm.Dirs[segmentId][index].setPrev(uint16(dirOffset))
+	dm.Dirs[segmentId][dirOffset].setNext(index)
+	dm.DirFreeStart[segmentId] = uint16(dirOffset)
+}
+
 // Get returns
 // HIT: the offset of the dir entry with the given key,
 // MISS: the offset of last dir entry in the bucket
@@ -148,8 +161,8 @@ func (dm *DirManager) Get(key []byte) (hit bool, dirOffset Offset, d Dir) {
 
 	dm.SegMutexes[segmentId].RLock()
 	defer dm.SegMutexes[segmentId].RUnlock()
-
-	return dirProbe(keyInt12, bucketId, dm.Dirs[segmentId])
+	hit, dirOffset, _, d = dirProbe(keyInt12, bucketId, dm.Dirs[segmentId])
+	return hit, dirOffset, d
 }
 
 func calcDirHashPosition(key []byte, SegmentsNum, BucketsNumPerSegment Offset) (keyInt12 uint16, segmentId segId, bucketId Offset) {
@@ -164,8 +177,9 @@ func calcDirHashPosition(key []byte, SegmentsNum, BucketsNumPerSegment Offset) (
 	return keyInt12, segmentId, bucketId
 }
 
-func dirProbe(key uint16, bucketId Offset, dirs []*Dir) (hit bool, dirOffset Offset, d Dir) {
+func dirProbe(key uint16, bucketId Offset, dirs []*Dir) (hit bool, dirOffset, prevDirOffset Offset, d Dir) {
 	index := bucketId * DirDepth
+	prevIndex := Offset(0)
 	counter := 0
 
 	// do...while
@@ -176,16 +190,17 @@ func dirProbe(key uint16, bucketId Offset, dirs []*Dir) (hit bool, dirOffset Off
 			panic("dirProbe: counter>10000")
 		}
 		if dirs[index].offset() == 0 {
-			return false, index, d
+			return false, index, prevIndex, d
 		}
 		dirKey := dirs[index].tag()
 		if dirKey == key {
-			return true, index, *dirs[index]
+			return true, index, prevIndex, *dirs[index]
 		}
+		prevIndex = index
 		index = Offset(dirs[index].next())
 	}
 
-	return false, index, d
+	return false, index, prevIndex, d
 }
 
 func (dm *DirManager) Set(key []byte, off Offset, size int) (dirOffset Offset, err error) {
@@ -208,7 +223,7 @@ func (dm *DirManager) Set(key []byte, off Offset, size int) (dirOffset Offset, e
 }
 
 func (dm *DirManager) dirInsert(key uint16, segmentId segId, bucketId Offset, dir Dir) (dirOffset Offset, err error) {
-	hit, dirOffset, dOld := dirProbe(key, bucketId, dm.Dirs[segmentId])
+	hit, dirOffset, _, dOld := dirProbe(key, bucketId, dm.Dirs[segmentId])
 	if hit {
 		// Note: set manually is dangerous, need to keep the next chain
 		dOld.setOffset(dir.offset())
@@ -249,6 +264,40 @@ func (dm *DirManager) dirInsert(key uint16, segmentId segId, bucketId Offset, di
 	//	panic(err)
 	//}
 	return freeDirOffset, nil
+}
+
+func (dm *DirManager) Delete(key []byte) (dirOffset Offset, err error) {
+	keyInt12, segmentId, bucketId := calcDirHashPosition(key, dm.SegmentsNum, dm.BucketsNumPerSegment)
+
+	dm.SegMutexes[segmentId].RLock()
+	defer dm.SegMutexes[segmentId].RUnlock()
+
+	offset, err := dm.dirDelete(keyInt12, segmentId, bucketId)
+	if err != nil {
+		return offset, err
+	}
+	return dm.BucketsNumPerSegment*DirDepth*Offset(segmentId) + offset, nil
+}
+
+func (dm *DirManager) dirDelete(key uint16, segmentId segId, bucketId Offset) (dirOffset Offset, err error) {
+	hit, dirOffset, prevDirOffset, _ := dirProbe(key, bucketId, dm.Dirs[segmentId])
+	if !hit {
+		return dirOffset, nil
+	}
+
+	// now not support delete head of bucket
+	if dirOffset == bucketId*DirDepth {
+		return dirOffset, ErrDelHeadOfBucket
+	}
+
+	next := dm.Dirs[segmentId][dirOffset].next()
+	dm.Dirs[segmentId][prevDirOffset].setNext(next)
+
+	dm.Dirs[segmentId][dirOffset].clear()
+
+	// link the dir to the free chain
+	dm.freeChainSet(segmentId, dirOffset)
+	return dirOffset, nil
 }
 
 func (dm *DirManager) getFreeDir(segmentId segId, bucketId Offset) (isSameBucket bool, freeDirOffset Offset) {
@@ -433,6 +482,10 @@ func (dm *DirManager) MarshalBinary() (data []byte, err error) {
 					return err
 				}
 			}
+			err = binary.Write(buf, binary.BigEndian, dm.DirFreeStart[i])
+			if err != nil {
+				return err
+			}
 			return nil
 		}()
 		if err != nil {
@@ -444,7 +497,8 @@ func (dm *DirManager) MarshalBinary() (data []byte, err error) {
 }
 
 func (dm *DirManager) UnmarshalBinary(data []byte) (err error) {
-	if len(data) != int(dm.SegmentsNum*dm.BucketsNumPerSegment*DirDepth*Offset(binary.Size(&Dir{}))) {
+	if len(data) != int(dm.SegmentsNum*dm.BucketsNumPerSegment*DirDepth*Offset(binary.Size(&Dir{}))+
+		dm.SegmentsNum*Offset(DirIDSize)) {
 		return fmt.Errorf("invalid data size")
 	}
 	buf := bytes.NewBuffer(data)
@@ -458,6 +512,12 @@ func (dm *DirManager) UnmarshalBinary(data []byte) (err error) {
 					return err
 				}
 			}
+			var dirID uint16
+			err = binary.Read(buf, binary.BigEndian, &dirID)
+			if err != nil {
+				return err
+			}
+			dm.DirFreeStart[i] = dirID
 			return nil
 		}()
 		if err != nil {
