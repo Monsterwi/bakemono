@@ -3,7 +3,6 @@ package bakemono
 import (
 	"bytes"
 	"fmt"
-	"log"
 )
 
 func (dm *DirManager) DiagHangUsedDirs() (int, error) {
@@ -82,14 +81,14 @@ func (dm *DirManager) DiagHangFreeDirs() (int, error) {
 }
 
 func (dm *DirManager) DiagDumpAllDirs() {
-	log.Printf("Dump all dirs, segments: %d, buckets: %d", dm.SegmentsNum, dm.BucketsNumPerSegment)
+	logger.Infof("Dump all dirs, segments: %d, buckets: %d", dm.SegmentsNum, dm.BucketsNumPerSegment)
 	for seg := 0; seg < int(dm.SegmentsNum); seg++ {
-		log.Printf("Segment %d", seg)
+		logger.Infof("Segment %d", seg)
 		for buck := 0; buck < int(dm.BucketsNumPerSegment); buck++ {
-			log.Printf("Bucket %d", buck)
+			logger.Infof("Bucket %d", buck)
 			index := buck * DirDepth
 			for i := 0; i < DirDepth; i++ {
-				log.Printf("Segment %d, \tBucket %d, \tDir %d, \toffset: %d, \tprev: %d, next: %d",
+				logger.Infof("Segment %d, \tBucket %d, \tDir %d, \toffset: %d, \tprev: %d, next: %d",
 					seg, buck, index, dm.Dirs[segId(seg)][index].offset(), dm.Dirs[segId(seg)][index].prev(), dm.Dirs[segId(seg)][index].next())
 				index++
 			}
@@ -119,7 +118,7 @@ func (dm *DirManager) DiagDumpAllDirsToString() string {
 func (dm *DirManager) DiagPanicHangUpDirs() error {
 	_, err := dm.DiagHangUsedDirs()
 	if err != nil {
-		log.Printf("dirInsert: DiagHangUsedDirs: %v", err)
+		logger.Errorf("dirInsert: DiagHangUsedDirs: %v", err)
 		return err
 	}
 	return nil

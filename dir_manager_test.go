@@ -560,7 +560,7 @@ func TestDirManager_Delete(t *testing.T) {
 			t.Fatal("should miss")
 		}
 
-		// check key is still in the dir manager
+		// check other keys are still in the dir manager
 		for _, key := range []string{keys[0], keys[2]} {
 			hit, _, _ = dm.Get([]byte(key))
 			if !hit {
@@ -595,7 +595,7 @@ func TestDirManager_Delete(t *testing.T) {
 		if hit {
 			t.Fatal("should miss")
 		}
-		// check key is still in the dir manager
+		// check other keys are still in the dir manager
 		for _, key := range []string{keys[0], keys[2]} {
 			hit, _, _ = dm.Get([]byte(key))
 			if !hit {

@@ -2,26 +2,11 @@ package main
 
 import (
 	"log"
-	"net/http"
 	"strconv"
 
 	"github.com/bocchi-the-cache/bakemono"
-	"github.com/minio/mux"
+	"github.com/gin-gonic/gin"
 )
-
-func maxAllowedMiddleware(n uint) mux.MiddlewareFunc {
-	sem := make(chan struct{}, n)
-	acquire := func() { sem <- struct{}{} }
-	release := func() { <-sem }
-
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			acquire()
-			defer release()
-			next.ServeHTTP(w, r)
-		})
-	}
-}
 
 func main() {
 	config, err := bakemono.ReadConfig("config.yaml")
@@ -33,43 +18,43 @@ func main() {
 	if err != nil {
 		log.Fatalf("verify config error: %s", err)
 	}
+	config.Print()
 
+	// init logger
+	logger, err := bakemono.InitLogger(config.ZapConfig)
+	if err != nil {
+		log.Fatalf("init logger error: %s", err)
+	}
+	logger.Info("logger initialized")
+
+	// init engine
 	engine := &bakemono.Engine{}
 	err = engine.Init(config)
 	if err != nil {
-		log.Fatalf("init engine error: %s", err)
+		logger.Fatalf("init engine error: %s", err)
 	}
 
-	router := mux.NewRouter()
+	// init http server
+	router := gin.New()
+	router.Use(gin.Recovery())
+	router.Use(bakemono.GetGinLog(config.AccessLogPath))
 	for _, l := range config.Location {
 		if err != nil {
-			log.Fatalf("create proxy error: %s", err)
+			logger.Fatalf("create proxy error: %s", err)
 		}
-		router.PathPrefix(l.Pattern).Handler(engine)
+		router.GET(l.Pattern+"/*path", engine.ServeHTTP)
 	}
 
-	if config.MaxAllowed > 0 {
-		router.Use(maxAllowedMiddleware(config.MaxAllowed))
-	}
-	svr := http.Server{
-		Addr:    ":" + strconv.Itoa(config.Port),
-		Handler: router,
-	}
-
-	// print config detail
-	config.Print()
-
-	// listen and serve
 	switch config.Schema {
 	case "http":
-		err := svr.ListenAndServe()
+		err := router.Run(":" + strconv.Itoa(config.Port))
 		if err != nil {
-			log.Fatalf("listen and serve error: %s", err)
+			logger.Fatalf("listen and serve error: %s", err)
 		}
 	case "https":
-		err := svr.ListenAndServeTLS(config.SSLCertificate, config.SSLCertificateKey)
+		err := router.RunTLS(":"+strconv.Itoa(config.Port), config.SSLCertificate, config.SSLCertificateKey)
 		if err != nil {
-			log.Fatalf("listen and serve error: %s", err)
+			logger.Fatalf("listen and serve error: %s", err)
 		}
 	}
 }

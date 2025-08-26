@@ -25,7 +25,6 @@ package bakemono
 // }
 import (
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -35,6 +34,7 @@ import (
 	"time"
 
 	"github.com/bocchi-the-cache/bakemono/balancer"
+	"github.com/go-resty/resty/v2"
 )
 
 var (
@@ -46,6 +46,12 @@ var (
 var (
 	ReverseProxy = "Balancer-Reverse-Proxy"
 )
+
+var transport = &http.Transport{
+	MaxIdleConnsPerHost: 256,
+	MaxConnsPerHost:     0,
+	IdleConnTimeout:     90 * time.Second,
+}
 
 // HTTPProxy refers to a reverse proxy in the balancer
 type HTTPProxy struct {
@@ -110,7 +116,7 @@ func (h *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.hostMap[host].ServeHTTP(w, r)
 }
 
-func (h *HTTPProxy) Proxy(r *http.Request) (*http.Response, error) {
+func (h *HTTPProxy) Proxy(r *http.Request) (*resty.Response, error) {
 	host, err := h.lb.Balance(GetCacheKey(r))
 	if err != nil {
 		return nil, fmt.Errorf("balance error: %s", err.Error())
@@ -120,19 +126,21 @@ func (h *HTTPProxy) Proxy(r *http.Request) (*http.Response, error) {
 	defer h.lb.Done(host)
 
 	proxyURL := "http://" + host + r.URL.RequestURI()
-	req, err := http.NewRequest(r.Method, proxyURL, r.Body)
-	if err != nil {
-		return nil, err
-	}
 
+	client := resty.New().
+		SetDoNotParseResponse(true).
+		SetTransport(transport).
+		SetTimeout(30 * time.Second)
 	for k, v := range r.Header {
 		for _, vv := range v {
-			req.Header.Add(k, vv)
+			client.SetHeader(k, vv)
 		}
 	}
-	req.Host = r.Host
-	client := &http.Client{}
-	return client.Do(req)
+	client.SetHeader(XRealIP, GetIP(r))
+	client.SetHeader(XProxy, ReverseProxy)
+	client.SetHeader(XForwardedFor, GetIP(r))
+
+	return client.R().Get(proxyURL)
 }
 
 // health check start
@@ -160,11 +168,11 @@ func (h *HTTPProxy) healthCheck(host string, interval uint) {
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	for range ticker.C {
 		if !IsBackendAlive(host) && h.ReadAlive(host) {
-			log.Printf("Site unreachable, remove %s from load balancer.", host)
+			logger.Infof("Site unreachable, remove %s from load balancer.", host)
 
 			h.SetAlive(host, false)
 			h.lb.Remove(host)
-			log.Printf("Site reachable, add %s to load balancer.", host)
+			logger.Infof("Site reachable, add %s to load balancer.", host)
 		} else if IsBackendAlive(host) && !h.ReadAlive(host) {
 
 			h.SetAlive(host, true)

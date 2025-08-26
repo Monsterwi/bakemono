@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"go.uber.org/zap"
 	"gopkg.in/yaml.v2"
 )
 
@@ -18,6 +19,11 @@ ___ _ _  _ _   _ ___  ____ _    ____ _  _ ____ ____ ____
 
 // Config configuration details of balancer
 type Config struct {
+	// log config
+	AccessLogPath string     `yaml:"access_log_path"`
+	ZapConfig     zap.Config `yaml:"zap_config"`
+
+	// cache config
 	Path         string `yaml:"path"`
 	SizeMb       uint64 `yaml:"size_mb"`
 	AvgChunkSize uint64 `yaml:"avg_chunk_size"`

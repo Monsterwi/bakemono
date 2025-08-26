@@ -1,7 +1,5 @@
 package bakemono
 
-import "log"
-
 const MaxKeyLength = 4096
 
 func (v *Vol) Set(key, value []byte) (err error) {
@@ -19,7 +17,7 @@ func (v *Vol) Set(key, value []byte) (err error) {
 
 	binLenOnDisk := ck.GetBinaryLength()
 	if v.WritePos+binLenOnDisk > v.Length {
-		log.Printf("data write overflowed, start from dataOffset. set: writePos: %d, dataOffset: %d, len(value): %d", v.WritePos, v.DataOffset, len(value))
+		logger.Infof("data write overflowed, start from dataOffset. set: writePos: %d, dataOffset: %d, len(value): %d", v.WritePos, v.DataOffset, len(value))
 		v.aggBufFlush(true)
 		v.WritePos = v.DataOffset
 	}
@@ -89,12 +87,12 @@ func (v *Vol) Get(key []byte) (hit bool, value []byte, err error) {
 	ck := &Chunk{}
 	err = ck.ReadAt(rt, int64(readOffset), int64(approxSize))
 	if err != nil {
-		log.Printf("warning: failed to read data chunk. key: %s, offset: %d, approxSize: %d, err: %s", key, readOffset, approxSize, err)
-		return false, nil, err
+		logger.Warnf("failed to read data chunk. key: %s, offset: %d, approxSize: %d, err: %s", key, readOffset, approxSize, err)
+		return false, nil, nil
 	}
 	ckKey, ckData := ck.GetKeyData()
 	if string(ckKey) != string(key) {
-		log.Printf("warning: key mismatch. key: %s, ckKey: %s", key, ckKey)
+		logger.Warnf("key mismatch. key: %s, ckKey: %s", key, ckKey)
 		return false, nil, nil
 	}
 
@@ -119,7 +117,7 @@ func (v *Vol) aggBufFlush(lock bool) {
 
 	n, err := v.aggWriteBuffer.Flush(int64(v.WritePos))
 	if err != nil || n != v.aggWriteBuffer.bufferPos {
-		log.Printf("flush to disk error, clear aggWriteBuffer dir")
+		logger.Errorf("flush to disk error, clear aggWriteBuffer dir")
 		// delete dir
 		v.dirAggBufDel()
 	} else {

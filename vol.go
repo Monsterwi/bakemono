@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
-	"log"
 	"os"
 	"time"
 )
@@ -62,12 +61,12 @@ type VolOptions struct {
 // NewDefaultVolOptions creates a VolOptions with a file path.
 // Note: It will create a file if not exists, and truncate it to the given sizeInternal.
 func NewDefaultVolOptions(path string, fileSize, avgChunkSize uint64) (*VolOptions, error) {
-	log.Printf("creating vol options with file truncate, path: %s, fileSize: %d, avgChunkSize: %d", path, fileSize, avgChunkSize)
+	logger.Infof("creating vol options with file truncate, path: %s, fileSize: %d, avgChunkSize: %d", path, fileSize, avgChunkSize)
 	fp, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return nil, err
 	}
-	log.Printf("file opened, try to truncate to sizeInternal: %d", fileSize)
+	logger.Infof("file opened, try to truncate to sizeInternal: %d", fileSize)
 	err = fp.Truncate(int64(fileSize))
 	if err != nil {
 		return nil, err
@@ -95,7 +94,7 @@ func (cfg *VolOptions) Check() error {
 }
 
 func (v *Vol) Init(cfg *VolOptions) (corrupted bool, err error) {
-	log.Printf("initing vol, config: %+v", cfg)
+	logger.Infof("initing vol, config: %+v", cfg)
 	err = cfg.Check()
 	if err != nil {
 		return false, err
@@ -121,7 +120,7 @@ func (v *Vol) Init(cfg *VolOptions) (corrupted bool, err error) {
 
 	err = v.buildMetaFromFp()
 	if err != nil {
-		log.Printf("warn: build meta from fp failed, file may corrupted, err: %v", err)
+		logger.Warnf("warn: build meta from fp failed, file may corrupted, err: %v", err)
 		corrupted = true
 		v.initEmptyMeta()
 	}
@@ -132,7 +131,7 @@ func (v *Vol) Init(cfg *VolOptions) (corrupted bool, err error) {
 	// start sync flush thread
 	go v.SyncFlushLoop(cfg.FlushMetaInterval)
 
-	log.Printf("init vol done, corrupted: %v, err: %v", corrupted, err)
+	logger.Infof("init vol done, corrupted: %v, err: %v", corrupted, err)
 	return corrupted, nil
 }
 
@@ -154,9 +153,9 @@ func (v *Vol) SyncFlushLoop(interval time.Duration) {
 			// TODO flush when receive signal
 			err := v.flushMetaToFp()
 			if err != nil {
-				log.Printf("error: flush meta to fp failed, err: %v", err)
+				logger.Errorf("error: flush meta to fp failed, err: %v", err)
 			} else {
-				log.Printf("info: flush meta to fp done")
+				logger.Infof("info: flush meta to fp done")
 			}
 		}
 	}
@@ -178,7 +177,7 @@ func (v *Vol) prepareOffsets(cfg *VolOptions) {
 	//TotalChunks := (cfg.FileSize - 4*HeaderFooterSize) / (cfg.ChunkAvgSize + 2*DirSize)
 	MetaSize := 2 * (2*HeaderFooterSize + DmSize)
 	DataSize := cfg.FileSize - MetaSize
-	log.Printf("initing vol: ChunksMaxNum: %d, MetaSize: %d, DataSize: %d, VolLength: %d", v.ChunksMaxNum, MetaSize, DataSize, v.Length)
+	logger.Infof("initing vol: ChunksMaxNum: %d, MetaSize: %d, DataSize: %d, VolLength: %d", v.ChunksMaxNum, MetaSize, DataSize, v.Length)
 
 	// calculate offsets
 	v.HeaderAOffset = 0
@@ -188,7 +187,7 @@ func (v *Vol) prepareOffsets(cfg *VolOptions) {
 	v.DataOffset = MetaSize
 	v.DirAOffset = v.HeaderAOffset + HeaderFooterSize
 
-	log.Printf("initing vol: ActualLength: %d, ChunksMaxNum: %d", v.Length, v.ChunksMaxNum)
+	logger.Infof("initing vol: ActualLength: %d, ChunksMaxNum: %d", v.Length, v.ChunksMaxNum)
 }
 
 // buildMetaFromFp builds new empty metadata.
@@ -226,7 +225,7 @@ func (v *Vol) buildMetaFromFp() error {
 	}
 
 	DirsCheckSum := crc32.ChecksumIEEE(dirsRaw)
-	log.Printf("DirsCheckSum: %d, v.Header.DirsChecksum: %d", DirsCheckSum, v.Header.DirsChecksum)
+	logger.Infof("DirsCheckSum: %d, v.Header.DirsChecksum: %d", DirsCheckSum, v.Header.DirsChecksum)
 	if DirsCheckSum != v.Header.DirsChecksum {
 		return errors.New("invalid dir checksum")
 	}
