@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
 	"sync"
 )
@@ -43,7 +42,7 @@ func (dm *DirManager) Init(dirNum Offset) Offset {
 	}
 
 	dm.InitEmptyDirs()
-	log.Printf("initing dir manager: ChunksMaxNum: %d, BucketsNum: %d, SegmentsNum: %d, BucketsNumPerSegment: %d", dm.ChunksNum, dm.BucketsNum, dm.SegmentsNum, dm.BucketsNumPerSegment)
+	logger.Infof("initing dir manager: ChunksMaxNum: %d, BucketsNum: %d, SegmentsNum: %d, BucketsNumPerSegment: %d", dm.ChunksNum, dm.BucketsNum, dm.SegmentsNum, dm.BucketsNumPerSegment)
 	return dm.ChunksNum
 }
 
@@ -67,7 +66,7 @@ func (dm *DirManager) InitEmptyDirs() {
 		err := linkEmptyDirs(dirs)
 		if err != nil {
 			// should not happen
-			log.Fatal(err)
+			logger.Fatal(err)
 		}
 
 		dm.Dirs[segId(seg)] = dirs
@@ -186,7 +185,7 @@ func dirProbe(key uint16, bucketId Offset, dirs []*Dir) (hit bool, dirOffset, pr
 	for index != 0 || counter == 0 {
 		counter++
 		if counter > 10000 {
-			log.Printf("dirProbe: counter: %d, index: %d", counter, index)
+			logger.Errorf("dirProbe: counter: %d, index: %d", counter, index)
 			panic("dirProbe: counter>10000")
 		}
 		if dirs[index].offset() == 0 {
@@ -323,7 +322,7 @@ FindFreeDir:
 	loop++
 	if loop > 49 {
 		purgedNum := dm.purgeRandom100(segmentId, whileListBucketId)
-		log.Printf("dirFreeChainPop: loop too much, purge 100: %d dirs", purgedNum)
+		logger.Errorf("dirFreeChainPop: loop too much, purge 100: %d dirs", purgedNum)
 	}
 	if loop > 50 {
 		// should not happen after many purge
@@ -497,15 +496,19 @@ func (dm *DirManager) MarshalBinary() (data []byte, err error) {
 }
 
 func (dm *DirManager) UnmarshalBinary(data []byte) (err error) {
-	if len(data) != int(dm.SegmentsNum*dm.BucketsNumPerSegment*DirDepth*Offset(binary.Size(&Dir{}))+
-		dm.SegmentsNum*Offset(DirIDSize)) {
+	metaSizePerSegment := int(dm.BucketsNumPerSegment*DirDepth*Offset(DirSize)) + int(DirIDSize)
+	if len(data) != int(dm.SegmentsNum)*metaSizePerSegment {
 		return fmt.Errorf("invalid data size")
 	}
-	buf := bytes.NewBuffer(data)
+	var wg sync.WaitGroup
+	errChan := make(chan error, dm.SegmentsNum)
 	for i := segId(0); Offset(i) < dm.SegmentsNum; i++ {
-		err := func() error {
+		wg.Add(1)
+		f := func(i segId) error {
+			defer wg.Done()
 			dm.SegMutexes[i].Lock()
 			defer dm.SegMutexes[i].Unlock()
+			buf := bytes.NewBuffer(data[int(i)*metaSizePerSegment : int(i+1)*metaSizePerSegment])
 			for j := 0; j < int(dm.BucketsNumPerSegment*DirDepth); j++ {
 				err = binary.Read(buf, binary.BigEndian, &dm.Dirs[i][j].raw)
 				if err != nil {
@@ -519,10 +522,17 @@ func (dm *DirManager) UnmarshalBinary(data []byte) (err error) {
 			}
 			dm.DirFreeStart[i] = dirID
 			return nil
-		}()
+		}
+		go func(i segId) {
+			errChan <- f(i)
+		}(i)
+	}
+	wg.Wait()
+	close(errChan)
+	for err := range errChan {
 		if err != nil {
 			return err
 		}
 	}
-	return
+	return nil
 }

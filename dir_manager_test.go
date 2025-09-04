@@ -9,6 +9,7 @@ import (
 )
 
 func TestNewDirManager(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(123457)
 	if dm.ChunksNum != 123456 {
@@ -56,6 +57,7 @@ func countDirFreeInChain(dm *DirManager) (int, error) {
 }
 
 func TestDirManager_InitEmptyDirs(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(123457)
 	dm.InitEmptyDirs()
@@ -72,12 +74,13 @@ func TestDirManager_InitEmptyDirs(t *testing.T) {
 }
 
 func TestDirManager_Marshal_Unmarshal(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(123457)
 	dm.InitEmptyDirs()
 
 	for seg := segId(0); Offset(seg) < dm.SegmentsNum; seg++ {
-		dm.DirFreeStart[seg] = 2
+		dm.DirFreeStart[seg] = uint16(seg)
 	}
 
 	// marshal
@@ -107,6 +110,7 @@ func TestDirManager_Marshal_Unmarshal(t *testing.T) {
 }
 
 func TestDirManager_FreeChainDelete(t *testing.T) {
+	initTestingLogger()
 	// NOTE: only free dir has `prev`. Panic if `prev` is not 0.
 	dm := &DirManager{}
 	dm.Init(123457)
@@ -164,6 +168,7 @@ func TestDirManager_FreeChainDelete(t *testing.T) {
 }
 
 func TestDirManager_FreeChainSet(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(123457)
 	dm.InitEmptyDirs()
@@ -196,6 +201,7 @@ func TestDirManager_FreeChainSet(t *testing.T) {
 }
 
 func TestDirManager_FreeChainRebuild(t *testing.T) {
+	initTestingLogger()
 	// NOTE: only free dir has `prev`. Panic if `prev` is not 0.
 	dm := &DirManager{}
 	dm.Init(123457)
@@ -259,6 +265,7 @@ func TestDirManager_FreeChainRebuild(t *testing.T) {
 }
 
 func TestDirManager_Probe(t *testing.T) {
+	initTestingLogger()
 	// 1 miss head bucket dir
 	{
 		dirs := make([]*Dir, 12)
@@ -378,6 +385,7 @@ func TestDirManager_Probe(t *testing.T) {
 }
 
 func TestDirManager_PurgeRandom10WhenFull(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(123457)
 	dm.InitEmptyDirs()
@@ -419,6 +427,7 @@ func TestDirManager_PurgeRandom10WhenFull(t *testing.T) {
 }
 
 func TestDirManager_FreeChainPop(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(123457)
 	dm.InitEmptyDirs()
@@ -460,6 +469,7 @@ func TestDirManager_FreeChainPop(t *testing.T) {
 }
 
 func TestDirManager_GetSet(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(20)
 	dm.InitEmptyDirs()
@@ -504,6 +514,7 @@ func TestDirManager_GetSet(t *testing.T) {
 }
 
 func TestDirManager_Delete(t *testing.T) {
+	initTestingLogger()
 	dm := &DirManager{}
 	dm.Init(20)
 	dm.InitEmptyDirs()
