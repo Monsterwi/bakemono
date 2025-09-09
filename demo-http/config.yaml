@@ -6,7 +6,7 @@
 path: /tmp/bakemono-test.vol
 size_mb: 4096
 avg_chunk_size: 8000
-
+ram_cache_entries: 1000000 # ~1GB 
 schema: http                        # support http and https
 port: 80                            # port for balancer
 ssl_certificate:

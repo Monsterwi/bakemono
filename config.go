@@ -24,9 +24,10 @@ type Config struct {
 	ZapConfig     zap.Config `yaml:"zap_config"`
 
 	// cache config
-	Path         string `yaml:"path"`
-	SizeMb       uint64 `yaml:"size_mb"`
-	AvgChunkSize uint64 `yaml:"avg_chunk_size"`
+	Path            string `yaml:"path"`
+	SizeMb          uint64 `yaml:"size_mb"`
+	AvgChunkSize    uint64 `yaml:"avg_chunk_size"`
+	RamCacheEntries uint64 `yaml:"ram_cache_entries"`
 
 	SSLCertificateKey string `yaml:"ssl_certificate_key"`
 	Location          []struct {

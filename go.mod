@@ -1,14 +1,15 @@
 module github.com/bocchi-the-cache/bakemono
 
-go 1.23.0
+go 1.24
 
-toolchain go1.23.1
+toolchain go1.24.7
 
 require (
 	github.com/gin-contrib/zap v1.1.5
 	github.com/gin-gonic/gin v1.10.1
 	github.com/go-resty/resty/v2 v2.16.5
 	github.com/lafikl/consistent v0.0.0-20220512074542-bdd3606bfc3e
+	github.com/maypok86/otter/v2 v2.2.1
 	github.com/smartystreets/goconvey v1.8.1
 	go.uber.org/zap v1.27.0
 	golang.org/x/sync v0.16.0

@@ -18,7 +18,7 @@ type Engine struct {
 }
 
 func (e *Engine) Init(cfg *Config) error {
-	opts, err := NewDefaultVolOptions(cfg.Path, cfg.SizeMb*1<<20, cfg.AvgChunkSize)
+	opts, err := NewDefaultVolOptions(cfg.Path, cfg.SizeMb*1<<20, cfg.AvgChunkSize, cfg.RamCacheEntries)
 	if err != nil {
 		return err
 	}

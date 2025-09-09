@@ -46,6 +46,9 @@ func (v *Vol) Set(key, value []byte) (err error) {
 			v.aggBufFlush(false)
 		}
 	}
+
+	// write to ram cache
+	v.RamCache.Put(key, value)
 	return nil
 }
 
@@ -63,6 +66,12 @@ func (v *Vol) Get(key []byte) (hit bool, value []byte, err error) {
 	err = v.checkGetRequest(key)
 	if err != nil {
 		return false, nil, err
+	}
+
+	// load from ram cache
+	value, err = v.RamCache.Get(key)
+	if value != nil {
+		return true, value, nil
 	}
 
 	hit, _, d := v.Dm.Get(key)

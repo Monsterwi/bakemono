@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"strconv"
 
 	"github.com/bocchi-the-cache/bakemono"
@@ -38,11 +39,21 @@ func main() {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(bakemono.GetGinLog(config.AccessLogPath))
+
+	router.GET("/ramcache_stats", func(c *gin.Context) {
+		c.IndentedJSON(http.StatusOK, engine.Volume.RamCache.Stats())
+	})
+
 	for _, l := range config.Location {
-		if err != nil {
-			logger.Fatalf("create proxy error: %s", err)
+		pattern := l.Pattern
+		if pattern == "/" {
+			router.NoRoute(engine.ServeHTTP)
+		} else {
+			if pattern[len(pattern)-1] == '/' {
+				pattern = pattern[:len(pattern)-1]
+			}
+			router.GET(pattern+"/*path", engine.ServeHTTP)
 		}
-		router.GET(l.Pattern+"/*path", engine.ServeHTTP)
 	}
 
 	switch config.Schema {
