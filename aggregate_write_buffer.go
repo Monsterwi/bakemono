@@ -2,16 +2,14 @@ package bakemono
 
 import (
 	"os"
-	"sync"
 )
 
 const (
-	AggBufferSize    = 8 * 1024 * 1024
-	AggHighWaterMark = AggBufferSize / 2
+	AggHighWaterMark = ChunkDataSize
+	AggBufferSize    = AggHighWaterMark * 2
 )
 
 type AggregateWriteBuffer struct {
-	mutex     sync.RWMutex
 	buffer    []byte
 	bufferPos int
 	fp        *os.File

@@ -11,7 +11,14 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+var debug = true
 var logger *zap.SugaredLogger
+
+func init() {
+	if debug {
+		initTestingLogger()
+	}
+}
 
 func InitLogger(zapCfg zap.Config) (*zap.SugaredLogger, error) {
 	for _, path := range append(zapCfg.OutputPaths, zapCfg.ErrorOutputPaths...) {

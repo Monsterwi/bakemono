@@ -5,6 +5,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -45,8 +46,9 @@ type Vol struct {
 	closeCh chan struct{}
 	flushCh chan struct{}
 
+	mutex          sync.RWMutex
 	aggWriteBuffer *AggregateWriteBuffer
-	RamCache       *RamCacheOtter
+	RamCache       *RamCache
 }
 
 // VolOptions to init a Vol.
@@ -55,13 +57,13 @@ type VolOptions struct {
 	Fp                OffsetReaderWriterCloser
 	FileSize          Offset
 	ChunkAvgSize      Offset
-	RamCacheEntries   uint64
+	RamCacheSizeMb    uint64
 	FlushMetaInterval time.Duration
 }
 
 // NewDefaultVolOptions creates a VolOptions with a file path.
 // Note: It will create a file if not exists, and truncate it to the given sizeInternal.
-func NewDefaultVolOptions(path string, fileSize, avgChunkSize, ramCacheEntries uint64) (*VolOptions, error) {
+func NewDefaultVolOptions(path string, fileSize, avgChunkSize, ramCacheSizeMb uint64) (*VolOptions, error) {
 	logger.Infof("creating vol options with file truncate, path: %s, fileSize: %d, avgChunkSize: %d", path, fileSize, avgChunkSize)
 	fp, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
@@ -76,7 +78,7 @@ func NewDefaultVolOptions(path string, fileSize, avgChunkSize, ramCacheEntries u
 		Fp:                fp,
 		FileSize:          Offset(fileSize),
 		ChunkAvgSize:      Offset(avgChunkSize),
-		RamCacheEntries:   ramCacheEntries,
+		RamCacheSizeMb:    ramCacheSizeMb,
 		FlushMetaInterval: 60 * time.Second,
 	}, nil
 }
@@ -103,7 +105,7 @@ func (v *Vol) Init(cfg *VolOptions) (corrupted bool, err error) {
 	}
 
 	// aggregate buffer
-	v.RamCache = NewRamCacheOtter(cfg.RamCacheEntries)
+	v.RamCache = NewRamCache(cfg.RamCacheSizeMb * 1 << 20)
 	v.aggWriteBuffer = NewAggregateWriteBuffer(cfg.Fp.(*os.File))
 
 	// channel init
@@ -125,6 +127,7 @@ func (v *Vol) Init(cfg *VolOptions) (corrupted bool, err error) {
 	if err != nil {
 		logger.Warnf("warn: build meta from fp failed, file may corrupted, err: %v", err)
 		corrupted = true
+		// TODO: too slow, need to optimize
 		v.initEmptyMeta()
 	}
 
@@ -243,7 +246,9 @@ func (v *Vol) buildMetaFromFp() error {
 
 // flushMetaToFp flushes metadata to io.
 func (v *Vol) flushMetaToFp() error {
-	v.aggBufFlush(true)
+	v.mutex.Lock()
+	v.aggBufFlush()
+	v.mutex.Unlock()
 
 	v.Header.Magic = MagicBocchi
 	v.Header.MajorVersion = MajorVersion

@@ -6,7 +6,6 @@ import (
 )
 
 func CreateTestingVol(path string, fileSize, chunkSize uint64) (*Vol, bool, error) {
-	initTestingLogger()
 	cfg, err := NewDefaultVolOptions(path, fileSize, chunkSize, 10000)
 	if err != nil {
 		panic(err)

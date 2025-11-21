@@ -21,6 +21,7 @@ type DirManager struct {
 	Dirs         map[segId][]*Dir
 	DirFreeStart map[segId]uint16
 
+	// XXX: remove this
 	// rw mutex for each segment
 	SegMutexes map[segId]*sync.RWMutex
 }
@@ -500,6 +501,37 @@ func (dm *DirManager) UnmarshalBinary(data []byte) (err error) {
 	if len(data) != int(dm.SegmentsNum)*metaSizePerSegment {
 		return fmt.Errorf("invalid data size")
 	}
+	buf := bytes.NewBuffer(data)
+	for i := segId(0); Offset(i) < dm.SegmentsNum; i++ {
+		err := func() error {
+			dm.SegMutexes[i].Lock()
+			defer dm.SegMutexes[i].Unlock()
+			for j := 0; j < int(dm.BucketsNumPerSegment*DirDepth); j++ {
+				err = binary.Read(buf, binary.BigEndian, &dm.Dirs[i][j].raw)
+				if err != nil {
+					return err
+				}
+			}
+			var dirID uint16
+			err = binary.Read(buf, binary.BigEndian, &dirID)
+			if err != nil {
+				return err
+			}
+			dm.DirFreeStart[i] = dirID
+			return nil
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (dm *DirManager) UnmarshalBinaryConcurrency(data []byte) (err error) {
+	metaSizePerSegment := int(dm.BucketsNumPerSegment*DirDepth*Offset(DirSize)) + int(DirIDSize)
+	if len(data) != int(dm.SegmentsNum)*metaSizePerSegment {
+		return fmt.Errorf("invalid data size")
+	}
 	var wg sync.WaitGroup
 	errChan := make(chan error, dm.SegmentsNum)
 	for i := segId(0); Offset(i) < dm.SegmentsNum; i++ {
@@ -520,7 +552,7 @@ func (dm *DirManager) UnmarshalBinary(data []byte) (err error) {
 			if err != nil {
 				return err
 			}
-			dm.DirFreeStart[i] = dirID
+			dm.DirFreeStart[i] = dirID // This line causes concurrent map writes!
 			return nil
 		}
 		go func(i segId) {

@@ -21,7 +21,7 @@ const (
 const (
 	ChunkHeaderSizeFixed = 8 * 1 << 10 // 8KB
 	ChunkKeyMaxSize      = 3000
-	ChunkDataSize        = 1 * 1 << 20 // 1MB
+	ChunkDataSize        = 4 * 1 << 20 // 4MB
 )
 
 const BlockSize = 1 << 12

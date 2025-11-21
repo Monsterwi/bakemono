@@ -3,10 +3,14 @@
 # license that can be found in the LICENSE file.
 
 # storage
-path: /tmp/bakemono-test.vol
-size_mb: 4096
+storage:
+  - path: /tmp/bakemono-test.vol
+    size_mb: 4096
+  - path: /tmp/bakemono-test2.vol
+    size_mb: 4096
+
 avg_chunk_size: 8000
-ram_cache_entries: 1000000 # ~1GB 
+ram_cache_size_mb: 1024
 schema: http                        # support http and https
 port: 80                            # port for balancer
 ssl_certificate:

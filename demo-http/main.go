@@ -3,13 +3,19 @@ package main
 import (
 	"log"
 	"net/http"
+	"runtime"
 	"strconv"
 
 	"github.com/bocchi-the-cache/bakemono"
 	"github.com/gin-gonic/gin"
+
+	_ "net/http/pprof"
 )
 
 func main() {
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+
 	config, err := bakemono.ReadConfig("config.yaml")
 	if err != nil {
 		log.Fatalf("read config error: %s", err)
@@ -41,7 +47,11 @@ func main() {
 	router.Use(bakemono.GetGinLog(config.AccessLogPath))
 
 	router.GET("/ramcache_stats", func(c *gin.Context) {
-		c.IndentedJSON(http.StatusOK, engine.Volume.RamCache.Stats())
+		stats := make(map[string]interface{})
+		for p, v := range engine.Volumes {
+			stats[p] = v.RamCache.Stats()
+		}
+		c.IndentedJSON(http.StatusOK, stats)
 	})
 
 	for _, l := range config.Location {
@@ -55,6 +65,9 @@ func main() {
 			router.GET(pattern+"/*path", engine.ServeHTTP)
 		}
 	}
+
+	// pprof
+	go http.ListenAndServe(":8080", nil)
 
 	switch config.Schema {
 	case "http":

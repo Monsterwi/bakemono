@@ -6,31 +6,43 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/lafikl/consistent"
 	"golang.org/x/sync/singleflight"
 )
 
 type Engine struct {
-	// TODO support multi Volumes
-	Volume *Vol
-	Proxy  *HTTPProxy
+	Volumes map[string]*Vol
+	ch      *consistent.Consistent
 
+	Proxy *HTTPProxy
 	group singleflight.Group
 }
 
 func (e *Engine) Init(cfg *Config) error {
-	opts, err := NewDefaultVolOptions(cfg.Path, cfg.SizeMb*1<<20, cfg.AvgChunkSize, cfg.RamCacheEntries)
-	if err != nil {
-		return err
+	e.Volumes = make(map[string]*Vol)
+	e.ch = consistent.New()
+
+	var totalSize uint64
+	for _, storage := range cfg.Storage {
+		totalSize += storage.SizeMb
 	}
-	v := &Vol{}
-	corrupted, err := v.Init(opts)
-	if err != nil {
-		return err
+	for _, storage := range cfg.Storage {
+		factor := float64(storage.SizeMb) / float64(totalSize)
+		opts, err := NewDefaultVolOptions(storage.Path, storage.SizeMb*1<<20, cfg.AvgChunkSize, uint64(float64(cfg.RamCacheSizeMb)*factor))
+		if err != nil {
+			return err
+		}
+		v := &Vol{}
+		corrupted, err := v.Init(opts)
+		if err != nil {
+			return err
+		}
+		if corrupted {
+			logger.Warn("vol is corrupted, but fixed. ignore this if first time running.")
+		}
+		e.Volumes[storage.Path] = v
+		e.ch.Add(storage.Path)
 	}
-	if corrupted {
-		logger.Warn("vol is corrupted, but fixed. ignore this if first time running.")
-	}
-	e.Volume = v
 
 	httpProxy, err := NewHTTPProxy(cfg.Upstream.ProxyPass, cfg.Upstream.BalanceMode)
 	if err != nil {
@@ -45,9 +57,16 @@ func (e *Engine) Init(cfg *Config) error {
 
 func (e *Engine) ServeHTTP(c *gin.Context) {
 	cacheKey := GetCacheKey(c.Request)
-	hit, value, err := e.Volume.Get([]byte(cacheKey))
+	volumePath, err := e.ch.Get(cacheKey)
 	if err != nil {
-		logger.Errorf("cache get error %s, err: %v", cacheKey, err)
+		logger.Errorf("%s hash to volume %v", cacheKey, err)
+		c.String(http.StatusInternalServerError, "internal server error")
+		return
+	}
+	volume := e.Volumes[volumePath]
+	hit, value, err := volume.Get([]byte(cacheKey))
+	if err != nil {
+		logger.Errorf("get cache %s, err: %v", cacheKey, err)
 	}
 
 	// set cache status for access log
@@ -84,7 +103,17 @@ func (e *Engine) ServeHTTP(c *gin.Context) {
 		}
 
 		if res.statusCode == http.StatusOK && n > 0 {
-			e.Volume.Set([]byte(GetCacheKey(c.Request)), res.body.Bytes())
+			volumePath, err := e.ch.Get(GetCacheKey(c.Request))
+			if err != nil {
+				logger.Errorf("consistent hash get error for set %s, err: %v", GetCacheKey(c.Request), err)
+				return nil, err
+			}
+			volume := e.Volumes[volumePath]
+			err = volume.Set([]byte(GetCacheKey(c.Request)), res.body.Bytes())
+			if err != nil {
+				logger.Errorf("volume set error %s, err: %v", GetCacheKey(c.Request), err)
+				return nil, err
+			}
 		}
 		return res, nil
 	})
