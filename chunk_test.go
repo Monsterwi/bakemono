@@ -1,6 +1,9 @@
 package bakemono
 
 import (
+	"bytes"
+	"crypto/md5"
+	"encoding/binary"
 	"os"
 	"reflect"
 	"testing"
@@ -18,9 +21,10 @@ func TestChunk_SetVerityGet(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	key, data := chunk.GetKeyData()
-	if string(key) != "key" {
-		t.Fatal("key is not equal to \"key\"")
+	keyHash, data := chunk.GetKeyData()
+	expectedHash := md5.Sum([]byte("key"))
+	if !bytes.Equal(keyHash, expectedHash[:]) {
+		t.Fatal("key hash is not equal to expected hash")
 	}
 	if string(data) != "value" {
 		t.Fatal("data is not equal to \"value\"")
@@ -71,11 +75,12 @@ func TestChunk_Marshal_Unmarshal_Binary(t *testing.T) {
 	}
 
 	k, v := chunk2.GetKeyData()
-	if string(k) != "key" {
-		t.Fatal("key is not equal to \"key\"")
+	expectedHash := md5.Sum([]byte("key"))
+	if !bytes.Equal(k, expectedHash[:]) {
+		t.Fatal("key hash is not equal to expected hash")
 	}
 	if string(v) != "value114514" {
-		t.Fatal("data is not equal to \"value\"")
+		t.Fatal("data is not equal to \"value114514\"")
 	}
 }
 
@@ -138,45 +143,31 @@ func TestChunk_WriteAt(t *testing.T) {
 	}
 }
 
-func TestChunkHeader_Marshal_UnmarshalBinary(t *testing.T) {
-	// create a chunk header struct
+func TestDoc_Marshal_UnmarshalBinary(t *testing.T) {
+	// create a Doc struct
 	// marshal it to binary
 	// check if the binary is equal to the expected binary
 	// if not, then the test fails
-	ch := ChunkHeader{
-		Checksum:   0xb0cc1000,
-		Key:        [ChunkKeyMaxSize]byte{0x12, 0x34, 0x56, 0x78},
-		DataLength: 0x11451419,
-		HeaderSize: 0xa928b2ef,
+	ch := Doc{
+		Magic:    MagicChunk,
+		Checksum: 0xb0cc1000,
+		KeyHash:  [16]byte{0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88},
+		Len:      0x11451419 + uint32(binary.Size(Doc{})),
+		TotalLen: 0x11451419,
 	}
 	b, err := ch.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Log(string(b))
-	ch2 := ChunkHeader{}
+	ch2 := Doc{}
 	err = ch2.UnmarshalBinary(b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Log("ChunkHeader2 is equal to ChunkHeader1")
-}
-
-func TestMaxChunkHeaderSize(t *testing.T) {
-	// calculate the chunk header struct sizeInternal using reflect
-	// and compare it with the constant ChunkHeaderSizeFixed
-	// if bigger than ChunkHeaderSizeFixed, then the test fails
-	ch := ChunkHeader{
-		Checksum:   0xb0cc1000,
-		Key:        [ChunkKeyMaxSize]byte{0x12, 0x34, 0x56, 0x78},
-		DataLength: 0x11451419,
-		HeaderSize: 0xa928b2ef,
+	equal := reflect.DeepEqual(ch, ch2)
+	if !equal {
+		t.Fatal("Doc2 is not equal to Doc1")
 	}
-	b, err := ch.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(b) > ChunkHeaderSizeFixed {
-		t.Fatal("ChunkHeaderSizeFixed is not equal to the calculated sizeInternal")
-	}
+	t.Log("Doc2 is equal to Doc1")
 }

@@ -1,0 +1,558 @@
+---
+description: Go 代码风格指南 - 基于 Uber Go Style Guide
+alwaysApply: true
+---
+
+# Go 代码风格指南
+
+本文档基于 [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md)，定义了编写 Go 代码时应遵循的约定和最佳实践。
+
+## 1. 核心原则
+
+- 所有代码应通过 `golint` 和 `go vet` 检查
+- 编辑器应配置为保存时自动运行 `goimports`
+- 代码应遵循 Go 的两个最新次要版本的标准
+
+## 2. 重要指导原则
+
+### 2.1 接口相关
+
+#### 接口指针
+- **几乎永远不需要接口的指针**。应该传递接口值，底层数据仍可以是指针
+- 接口包含两个字段：类型信息指针和数据指针
+- 如果希望接口方法修改底层数据，必须使用指针
+
+#### 验证接口实现
+在编译时验证接口实现，特别是：
+- 导出的类型需要实现特定接口作为 API 契约的一部分
+- 作为实现同一接口的类型集合的一部分
+- 违反接口会破坏用户的其他情况
+
+```go
+// 在类型定义后添加编译时检查
+var _ http.Handler = (*Handler)(nil)
+
+// 对于值接收者
+var _ http.Handler = LogHandler{}
+```
+
+#### 接收者与接口
+- 值接收者的方法可以在指针和值上调用
+- 指针接收者的方法只能在指针或可寻址值上调用
+- 存储在 map 中的值不可寻址，无法获取指针
+
+### 2.2 互斥锁
+
+**零值互斥锁是有效的**
+
+```go
+// 可以直接使用零值互斥锁
+var mu sync.Mutex
+mu.Lock()
+```
+
+### 2.3 切片和映射
+
+#### 在边界处复制切片和映射
+- 接收 map 或 slice 作为参数时，如果函数会保留对它们的引用，应进行复制
+- 返回 map 或 slice 时，如果调用者会修改它们，应返回副本
+
+### 2.4 资源清理
+
+#### 使用 defer 清理资源
+- 使用 `defer` 清理资源（文件、锁、连接等）
+- `defer` 的执行顺序是 LIFO（后进先出）
+
+### 2.5 通道
+
+#### 通道大小为一或无
+- 通道大小应为 1 或未缓冲（无大小）
+- 缓冲通道通常表示代码存在 bug 或未理解通道的语义
+
+### 2.6 枚举
+
+#### 枚举从 1 开始
+- 使用 `iota` 时，第一个值应从 1 开始，而不是 0
+- 这样可以区分零值和有效值
+
+```go
+type Operation int
+
+const (
+  Add Operation = iota + 1
+  Subtract
+  Multiply
+)
+```
+
+### 2.7 时间处理
+
+#### 使用 `time` 包处理时间
+- 使用 `time.Time` 表示瞬时时间
+- 使用 `time.Duration` 表示时间间隔
+- 不要使用 `int` 或 `float64` 表示时间
+- 使用 `time.Time` 和 `time.Duration` 与系统交互
+
+### 2.8 错误处理
+
+#### 错误类型
+- 使用 `error` 类型，而不是自定义错误类型
+- 如果调用者需要检查错误，使用 `errors.Is` 和 `errors.As`
+
+#### 错误包装
+- 使用 `fmt.Errorf` 和 `%w` 包装错误
+- 使用 `errors.Is` 检查错误，`errors.As` 提取错误
+
+#### 错误命名
+- 错误变量应命名为 `ErrXxx` 格式
+- 错误类型应命名为 `XxxError` 格式
+
+#### 只处理错误一次
+- 处理错误意味着检查错误值并做出决定
+- 不要只记录错误就忽略它
+- 不要多次处理同一个错误
+
+### 2.9 类型断言
+
+#### 处理类型断言失败
+- 使用单返回值形式进行类型断言，并检查 `ok` 值
+
+```go
+t, ok := i.(string)
+if !ok {
+  // 处理类型断言失败
+}
+```
+
+### 2.10 不要使用 panic
+
+- 在生产代码中不要使用 `panic`
+- 错误是正常的，应该通过 `error` 和多个返回值处理
+- `panic` 和 `recover` 不是错误处理策略
+
+### 2.11 原子操作
+
+#### 使用 `go.uber.org/atomic`
+- 使用 `go.uber.org/atomic` 包进行原子操作
+- 标准库的 `sync/atomic` 操作原始类型，容易出错
+
+### 2.12 避免可变全局变量
+
+- 避免使用可变全局变量
+- 优先选择依赖注入
+- 如果必须使用全局变量，应：
+  - 将所有相关变量放在一个结构体中
+  - 使用 `sync.Once` 初始化
+
+### 2.13 避免在公共结构体中嵌入类型
+
+- 避免在导出的结构体中嵌入未导出的类型
+- 避免嵌入可能导致"泄漏"实现细节的类型
+
+### 2.14 避免使用内置名称
+
+- 不要使用 Go 内置名称作为标识符
+- 这会导致作用域遮蔽和混淆
+
+### 2.15 避免使用 `init()`
+
+- 尽可能避免使用 `init()`
+- 如果必须使用，应该：
+  - 无论程序环境如何，都必须成功
+  - 避免依赖其他 `init()` 函数的顺序
+  - 避免访问或操作全局或环境状态
+
+### 2.16 在 main 中退出
+
+#### 只退出一次
+- 在 `main()` 中只调用 `os.Exit()` 或 `log.Fatal*()` 一次
+- 如果有多个退出点，将退出逻辑放在一个函数中
+
+### 2.17 结构体字段标签
+
+#### 在序列化结构体中使用字段标签
+- 为所有需要序列化的字段添加适当的标签
+
+```go
+type User struct {
+  ID    int    `json:"id" yaml:"id"`
+  Name  string `json:"name" yaml:"name"`
+}
+```
+
+### 2.18 不要使用 fire-and-forget goroutines
+
+#### 等待 goroutine 退出
+- 不要启动 goroutine 后忘记等待它退出
+- 使用 `sync.WaitGroup` 或其他同步机制
+
+#### 不要在 `init()` 中使用 goroutines
+- `init()` 函数不应启动 goroutines
+
+## 3. 性能优化
+
+### 3.1 优先使用 strconv 而不是 fmt
+
+- 将数字转换为字符串时，使用 `strconv` 而不是 `fmt`
+- `strconv` 性能更好
+
+```go
+// Bad
+str := fmt.Sprintf("%d", num)
+
+// Good
+str := strconv.Itoa(num)
+```
+
+### 3.2 避免重复的字符串到字节转换
+
+- 避免重复的 `string` 到 `[]byte` 转换
+- 在循环外进行转换
+
+### 3.3 优先指定容器容量
+
+- 如果知道切片或映射的最终大小，预先分配容量
+- 这可以减少内存分配和复制
+
+```go
+// 知道最终大小
+items := make([]Item, 0, size)
+
+// 不知道最终大小，但知道大概范围
+items := make([]Item, 0, estimatedSize)
+```
+
+## 4. 代码风格
+
+### 4.1 避免过长的行
+
+- 保持代码行长度合理（建议不超过 100-120 字符）
+- 必要时进行换行
+
+### 4.2 保持一致性
+
+- 在整个代码库中保持一致的风格
+- 如果修改现有代码，遵循该文件的风格
+
+### 4.3 分组相似声明
+
+- 将相似的声明分组在一起
+
+```go
+const (
+  minSize = 1024
+  maxSize = 4096
+)
+
+var (
+  count int
+  total int64
+)
+```
+
+### 4.4 导入分组顺序
+
+导入应按以下顺序分组：
+1. 标准库
+2. 第三方库
+3. 项目内部包
+
+每组之间用空行分隔。
+
+```go
+import (
+  "fmt"
+  "os"
+
+  "go.uber.org/zap"
+
+  "github.com/yourproject/package"
+)
+```
+
+### 4.5 包名
+
+- 包名应该是小写的单个单词
+- 不要使用下划线或混合大小写
+- 包名应该是导入路径的最后一个元素
+
+### 4.6 函数名
+
+- 函数名应该是动词或动词短语
+- 导出函数使用大写开头，未导出函数使用小写开头
+
+### 4.7 导入别名
+
+- 仅在必要时使用导入别名
+- 避免使用点导入（`.`）
+- 避免使用下划线导入（`_`），除非是初始化副作用
+
+### 4.8 函数分组和排序
+
+- 相关函数应分组在一起
+- 函数应按调用顺序排序
+
+### 4.9 减少嵌套
+
+- 通过提前返回减少嵌套
+- 使用 guard clauses 处理错误情况
+
+```go
+// Bad
+if err != nil {
+  // 处理错误
+} else {
+  // 正常逻辑
+}
+
+// Good
+if err != nil {
+  // 处理错误
+  return
+}
+// 正常逻辑
+```
+
+### 4.10 不必要的 else
+
+- 如果 `if` 块以 `return` 或 `break` 结束，则不需要 `else`
+
+### 4.11 顶层变量声明
+
+- 在顶层使用 `var` 声明变量
+- 如果变量在函数中初始化，使用短变量声明
+
+### 4.12 未导出全局变量前缀
+
+- 未导出的顶层变量和常量应以 `_` 开头
+
+### 4.13 结构体嵌入
+
+- 使用嵌入来提升字段和方法
+- 不要嵌入仅用于共享状态的类型
+
+### 4.14 局部变量声明
+
+- 如果变量被明确设置，使用短变量声明 `:=`
+- 如果变量被设置为零值，使用 `var`
+
+### 4.15 nil 是有效的切片
+
+- `nil` 是有效的零长度切片
+- 返回切片时，如果没有元素，返回 `nil` 而不是空切片
+
+### 4.16 减少变量作用域
+
+- 在尽可能小的作用域内声明变量
+- 避免在函数开始处声明所有变量
+
+### 4.17 避免裸参数
+
+- 函数调用中的布尔参数应该是常量
+- 对于多个参数，使用配置结构体或函数选项模式
+
+### 4.18 使用原始字符串字面量避免转义
+
+- 对于包含反斜杠的字符串，使用原始字符串字面量
+
+```go
+// Bad
+path := "C:\\Users\\Name\\Documents"
+
+// Good
+path := `C:\Users\Name\Documents`
+```
+
+### 4.19 初始化结构体
+
+#### 使用字段名初始化结构体
+- 初始化结构体时，应指定字段名
+
+```go
+// Good
+user := User{
+  ID:   1,
+  Name: "John",
+}
+```
+
+#### 省略结构体中的零值字段
+- 如果字段为零值，可以省略
+
+```go
+type Config struct {
+  Host string
+  Port int
+}
+
+// Good - 省略零值字段
+config := Config{
+  Host: "localhost",
+}
+```
+
+#### 使用 `var` 声明零值结构体
+- 对于零值结构体，使用 `var` 声明
+
+```go
+// Good
+var user User
+```
+
+#### 初始化结构体引用
+- 使用 `&T{}` 而不是 `new(T)` 初始化结构体指针
+
+```go
+// Good
+user := &User{
+  ID:   1,
+  Name: "John",
+}
+```
+
+### 4.20 初始化映射
+
+- 对于空映射，使用 `make(map[K]V)`
+- 对于有初始值的映射，使用字面量
+
+```go
+// 空映射
+m := make(map[string]int)
+
+// 有初始值
+m := map[string]int{
+  "a": 1,
+  "b": 2,
+}
+```
+
+### 4.21 Printf 样式函数外的格式字符串
+
+- 如果格式字符串在函数调用外，应声明为常量
+
+```go
+const msg = "unexpected value %v"
+
+fmt.Errorf(msg, value)
+```
+
+### 4.22 命名 Printf 样式函数
+
+- Printf 样式的函数名应以 `f` 结尾（如 `Errorf`, `Infof`）
+
+## 5. 模式
+
+### 5.1 测试表
+
+- 使用表驱动测试处理多个测试用例
+- 表测试应包含：
+  - 输入（`give`）
+  - 期望输出（`want`）
+  - 测试名称（`name`）
+
+```go
+func TestFunction(t *testing.T) {
+  tests := []struct {
+    name string
+    give string
+    want string
+  }{
+    {
+      name: "test case 1",
+      give: "input",
+      want: "output",
+    },
+  }
+
+  for _, tt := range tests {
+    t.Run(tt.name, func(t *testing.T) {
+      got := Function(tt.give)
+      assert.Equal(t, tt.want, got)
+    })
+  }
+}
+```
+
+#### 并行测试
+- 使用 `t.Parallel()` 时，必须在循环内显式分配循环变量
+
+```go
+for _, tt := range tests {
+  tt := tt // 用于 t.Parallel()
+  t.Run(tt.name, func(t *testing.T) {
+    t.Parallel()
+    // 测试代码
+  })
+}
+```
+
+### 5.2 函数选项模式
+
+- 使用函数选项模式处理可选参数
+- 适用于构造函数和其他需要扩展的公共 API
+- 特别是当函数已有三个或更多参数时
+
+```go
+type Option interface {
+  apply(*options)
+}
+
+type options struct {
+  cache  bool
+  logger *zap.Logger
+}
+
+func WithCache(c bool) Option {
+  return cacheOption(c)
+}
+
+func WithLogger(log *zap.Logger) Option {
+  return loggerOption{Log: log}
+}
+
+func Open(addr string, opts ...Option) (*Connection, error) {
+  options := options{
+    cache:  defaultCache,
+    logger: zap.NewNop(),
+  }
+
+  for _, o := range opts {
+    o.apply(&options)
+  }
+
+  // ...
+}
+```
+
+## 6. Linting
+
+### 6.1 推荐的基础 Linter
+
+至少使用以下 linter：
+
+- **[errcheck](https://github.com/kisielk/errcheck)**: 确保错误被处理
+- **[goimports](https://pkg.go.dev/golang.org/x/tools/cmd/goimports)**: 格式化代码和管理导入
+- **[golint](https://github.com/golang/lint)**: 指出常见的风格错误
+- **[govet](https://pkg.go.dev/cmd/vet)**: 分析代码中的常见错误
+- **[staticcheck](https://staticcheck.dev)**: 进行各种静态分析检查
+
+### 6.2 Lint Runner
+
+- 推荐使用 **[golangci-lint](https://github.com/golangci/golangci-lint)** 作为 Go 代码的 lint runner
+- 可以配置和使用多个规范的 linter
+- 项目应包含 `.golangci.yml` 配置文件
+
+### 6.3 一致性
+
+- 比任何特定的 linter 集合更重要的是：**在整个代码库中保持一致的 linting**
+
+## 7. 参考资料
+
+- [Effective Go](https://go.dev/doc/effective_go)
+- [Go Common Mistakes](https://go.dev/wiki/CommonMistakes)
+- [Go Code Review Comments](https://go.dev/wiki/CodeReviewComments)
+- [Uber Go Style Guide](https://github.com/uber-go/guide/blob/master/style.md)
+
+---
+
+**注意**: 本指南基于 Uber Go Style Guide，应根据项目实际情况进行调整和补充。

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	rand2 "math/rand"
 	"sync"
@@ -31,7 +32,7 @@ func main() {
 	}
 
 	for i := 0; i < 100000; i++ {
-		log.Printf(fmt.Sprintf("--------------------------------- start loop #%d", i))
+		log.Printf("--------------------------------- start loop #%d", i)
 		wg := &sync.WaitGroup{}
 		wg.Add(2)
 
@@ -121,7 +122,7 @@ func (rw *RW) RLoop() {
 
 		serial := rand2.Intn(LOOP)
 
-		hit, data, err := rw.v.Get([]byte(fmt.Sprintf("key-%d-%d", randomKey, serial)))
+		hit, reader, err := rw.v.Get([]byte(fmt.Sprintf("key-%d-%d", randomKey, serial)))
 		if !hit {
 			counter["miss"]++
 		} else {
@@ -138,6 +139,12 @@ func (rw *RW) RLoop() {
 		randomSize := rw.GetContentSize(randomKey, serial)
 
 		randomData := rw.GetContent(randomKey, 1024*randomSize)
+
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			log.Printf("ReadAll err: %v", err)
+			continue
+		}
 
 		if len(data) != 1024*randomSize {
 			log.Printf("data len %v", len(data))

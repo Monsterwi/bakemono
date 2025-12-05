@@ -8,23 +8,29 @@ import (
 	"hash/crc32"
 )
 
-type VolHeaderFooter struct {
+type StripeHeaderFooter struct {
 	Magic          uint32
+	Version        uint32
 	CreateUnixTime int64
 	WritePos       Offset
-	MajorVersion   uint32
-	MinorVersion   uint32
-	SyncSerial     uint64
-	DirsChecksum   uint32
+	// LastWritePos   Offset
+	// AggPos         Offset
+	// Generation  uint32
+	// Phase       uint32
+	// Cycle       uint32
+	SyncSerial  uint32
+	WriteSerial uint32
+	// Dirty       uint32
 
-	Checksum uint32
+	DirsChecksum uint32
+	Checksum     uint32
 }
 
-func (v *VolHeaderFooter) GenerateChecksum() uint32 {
-	return crc32.ChecksumIEEE([]byte(fmt.Sprintf("%v,%v,%v,%v,%v,%v", v.Magic, v.CreateUnixTime, v.WritePos, v.MajorVersion, v.MinorVersion, v.SyncSerial)))
+func (v *StripeHeaderFooter) GenerateChecksum() uint32 {
+	return crc32.ChecksumIEEE([]byte(fmt.Sprintf("%v,%v,%v,%v,%v", v.Magic, v.Version, v.CreateUnixTime, v.WritePos, v.SyncSerial)))
 }
 
-func (v *VolHeaderFooter) MarshalBinary() (data []byte, err error) {
+func (v *StripeHeaderFooter) MarshalBinary() (data []byte, err error) {
 	buf := &bytes.Buffer{}
 	v.Magic = MagicBocchi
 	v.Checksum = v.GenerateChecksum()
@@ -36,7 +42,7 @@ func (v *VolHeaderFooter) MarshalBinary() (data []byte, err error) {
 	return buf.Bytes(), nil
 }
 
-func (v *VolHeaderFooter) UnmarshalBinary(data []byte) error {
+func (v *StripeHeaderFooter) UnmarshalBinary(data []byte) error {
 	buf := bytes.NewBuffer(data)
 	err := binary.Read(buf, binary.BigEndian, v)
 	if err != nil {

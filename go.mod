@@ -1,6 +1,6 @@
 module github.com/bocchi-the-cache/bakemono
 
-go 1.24.7
+go 1.24.10
 
 require (
 	github.com/gin-contrib/zap v1.1.5

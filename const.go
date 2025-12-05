@@ -1,10 +1,10 @@
 package bakemono
 
 const (
-	MajorVersion = 0
-	MinorVersion = 1
+	Version = 0
 )
 
+// Stripe constants
 const (
 	SectorSize = 512
 )
@@ -19,9 +19,10 @@ const (
 )
 
 const (
-	ChunkHeaderSizeFixed = 8 * 1 << 10 // 8KB
-	ChunkKeyMaxSize      = 3000
-	ChunkDataSize        = 4 * 1 << 20 // 4MB
+	// ChunkHeaderSizeFixed = 4096 // 4KB
+	ChunkKeyMaxSize = 3000
+	ChunkDataSize   = 4 * 1 << 20 // 4MB
+	MaxKeyLength    = 4096
 )
 
 const BlockSize = 1 << 12

@@ -1,0 +1,85 @@
+2025-11-25T15:46:34.754+0800	INFO	bakemono/logger.go:35	log construction succeeded
+2025-11-25T15:46:34.754+0800	INFO	bakemono/logger.go:36	log construction succeeded [sugared]
+2025-11-25T15:46:34.756+0800	INFO	demo-http/main.go:35	logger initialized
+2025-11-25T15:46:34.756+0800	INFO	bakemono/vol.go:43	creating vol options with file truncate, path: /tmp/bakemono-test.vol, fileSize: 4294967296, avgChunkSize: 8000
+2025-11-25T15:46:34.756+0800	INFO	bakemono/vol.go:48	file opened, try to truncate to sizeInternal: 4294967296
+2025-11-25T15:46:34.756+0800	INFO	bakemono/vol.go:76	initing vol, config: &{Fp:0xc00006a650 FileSize:4294967296 ChunkAvgSize:8000 RamCacheSizeMb:512 FlushMetaInterval:1m0s}
+2025-11-25T15:46:34.756+0800	INFO	bakemono/vol.go:101	Splitting volume into 8 stripes of size 536870912
+2025-11-25T15:46:34.767+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.779+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.784+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.802+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.809+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.815+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.820+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.848+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.848+0800	INFO	bakemono/vol.go:118	init vol done
+2025-11-25T15:46:34.848+0800	INFO	bakemono/vol.go:43	creating vol options with file truncate, path: /tmp/bakemono-test2.vol, fileSize: 4294967296, avgChunkSize: 8000
+2025-11-25T15:46:34.849+0800	INFO	bakemono/vol.go:48	file opened, try to truncate to sizeInternal: 4294967296
+2025-11-25T15:46:34.849+0800	INFO	bakemono/vol.go:76	initing vol, config: &{Fp:0xc00006a5d0 FileSize:4294967296 ChunkAvgSize:8000 RamCacheSizeMb:512 FlushMetaInterval:1m0s}
+2025-11-25T15:46:34.849+0800	INFO	bakemono/vol.go:101	Splitting volume into 8 stripes of size 536870912
+2025-11-25T15:46:34.854+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.859+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.862+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.866+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.869+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.872+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.874+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.913+0800	INFO	bakemono/dir_manager.go:46	initing dir manager: ChunksMaxNum: 60396, BucketsNum: 15099, SegmentsNum: 1, BucketsNumPerSegment: 15099
+2025-11-25T15:46:34.914+0800	INFO	bakemono/vol.go:118	init vol done
+2025-11-25T15:47:36.938+0800	DEBUG	bakemono/engine.go:86	cache miss, fetch from upstream /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:47:36.938+0800	DEBUG	bakemono/engine.go:86	cache miss, fetch from upstream /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:47:36.939+0800	DEBUG	bakemono/engine.go:86	cache miss, fetch from upstream /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:47:36.938+0800	DEBUG	bakemono/engine.go:86	cache miss, fetch from upstream /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:47:36.938+0800	DEBUG	bakemono/engine.go:86	cache miss, fetch from upstream /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:47:37.007+0800	DEBUG	bakemono/stripe.go:157	Stripe 2 Set: key=/ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k offset=53687091 len=10241
+2025-11-25T15:47:37.008+0800	DEBUG	bakemono/engine.go:135	fetch from upstream success /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k, shared: true
+2025-11-25T15:47:37.008+0800	DEBUG	bakemono/engine.go:135	fetch from upstream success /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k, shared: true
+2025-11-25T15:47:37.008+0800	DEBUG	bakemono/engine.go:135	fetch from upstream success /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k, shared: true
+2025-11-25T15:47:37.008+0800	DEBUG	bakemono/engine.go:135	fetch from upstream success /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k, shared: true
+2025-11-25T15:47:37.008+0800	DEBUG	bakemono/engine.go:135	fetch from upstream success /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k, shared: true
+2025-11-25T15:48:23.606+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:48:23.607+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:48:23.608+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:48:23.609+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:48:23.609+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:40.308+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:40.308+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:40.308+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:40.308+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:40.309+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:41.546+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:41.547+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:41.546+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:41.547+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:51:41.548+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:26.683+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:26.683+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:26.683+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:26.684+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:26.685+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:54.725+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:54.726+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:54.726+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:54.726+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:57:54.728+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:07.853+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:07.853+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:07.853+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:07.854+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:07.854+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:33.173+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:33.173+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:33.175+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:33.176+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:33.176+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:52.371+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:52.372+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:52.373+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:52.375+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:58:52.375+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:59:05.760+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:59:05.762+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:59:05.762+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:59:05.762+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k
+2025-11-25T15:59:05.762+0800	DEBUG	bakemono/engine.go:80	cache hit, return from cache /ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?blk=16k

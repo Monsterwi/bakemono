@@ -81,9 +81,10 @@ func TestRamCacheOtter_Get(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := cache.Get(tt.key)
-			if err != nil {
-				t.Errorf("Get() error = %v, want nil", err)
+			got, found := cache.Get(tt.key)
+
+			if found != tt.wantFound {
+				t.Errorf("Get() found = %v, want %v", found, tt.wantFound)
 			}
 
 			if tt.wantFound {
@@ -107,8 +108,8 @@ func TestRamCacheOtter_Size(t *testing.T) {
 	cache := NewRamCache(100)
 
 	// Initially empty
-	if size := cache.Size(); size != 0 {
-		t.Errorf("Size() = %d, want 0", size)
+	if items := cache.Items(); items != 0 {
+		t.Errorf("Items() = %d, want 0", items)
 	}
 
 	// Add some entries
@@ -121,9 +122,11 @@ func TestRamCacheOtter_Size(t *testing.T) {
 		}
 	}
 
-	size := cache.Size()
-	if size != 5 {
-		t.Errorf("Size() = %d, want 5", size)
+	cache.CleanUp()
+
+	items := cache.Items()
+	if items != 5 {
+		t.Errorf("Items() = %d, want 5", items)
 	}
 }
 
@@ -141,9 +144,9 @@ func TestRamCacheOtter_Overwrite(t *testing.T) {
 	}
 
 	// Verify initial value
-	got, err := cache.Get(key)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
+	got, found := cache.Get(key)
+	if !found {
+		t.Fatalf("Get() not found")
 	}
 	if string(got) != string(value1) {
 		t.Errorf("Get() = %v, want %v", got, value1)
@@ -156,17 +159,19 @@ func TestRamCacheOtter_Overwrite(t *testing.T) {
 	}
 
 	// Verify new value
-	got, err = cache.Get(key)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
+	got, found = cache.Get(key)
+	if !found {
+		t.Fatalf("Get() not found")
 	}
 	if string(got) != string(value2) {
 		t.Errorf("Get() = %v, want %v", got, value2)
 	}
 
+	cache.CleanUp()
+
 	// Size should still be 1
-	if size := cache.Size(); size != 1 {
-		t.Errorf("Size() = %d, want 1", size)
+	if items := cache.Items(); items != 1 {
+		t.Errorf("Items() = %d, want 1", items)
 	}
 }
 
@@ -187,9 +192,9 @@ func TestRamCacheOtter_Eviction(t *testing.T) {
 	// Verify all entries are present
 	for i := 0; i < 3; i++ {
 		key := []byte("key" + string(rune('0'+i)))
-		got, err := cache.Get(key)
-		if err != nil {
-			t.Fatalf("Get() error = %v", err)
+		got, found := cache.Get(key)
+		if !found {
+			t.Fatalf("Get() not found for %s", key)
 		}
 		if got == nil {
 			t.Errorf("Get(%s) = nil, want value", key)
@@ -205,9 +210,9 @@ func TestRamCacheOtter_Eviction(t *testing.T) {
 
 	// Cache size should not exceed maximum
 	cache.CleanUp()
-	size := cache.Size()
-	if size > 3 {
-		t.Errorf("Size() = %d, want <= 3", size)
+	items := cache.Items()
+	if items > 3 {
+		t.Errorf("Items() = %d, want <= 3", items)
 	}
 }
 
@@ -226,9 +231,9 @@ func TestRamCacheOtter_LargeData(t *testing.T) {
 		t.Fatalf("Put() error = %v", err)
 	}
 
-	got, err := cache.Get(key)
-	if err != nil {
-		t.Fatalf("Get() error = %v", err)
+	got, found := cache.Get(key)
+	if !found {
+		t.Fatalf("Get() not found")
 	}
 
 	if len(got) != len(largeData) {

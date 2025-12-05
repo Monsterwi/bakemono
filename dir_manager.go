@@ -568,3 +568,8 @@ func (dm *DirManager) UnmarshalBinaryConcurrency(data []byte) (err error) {
 	}
 	return nil
 }
+
+func (dm *DirManager) BinarySize() int {
+	metaSizePerSegment := int(dm.BucketsNumPerSegment*DirDepth*Offset(DirSize)) + int(DirIDSize)
+	return int(dm.SegmentsNum) * metaSizePerSegment
+}

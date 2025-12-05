@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"log"
 	rand2 "math/rand"
 	"time"
@@ -29,7 +30,7 @@ func main() {
 	}
 
 	for i := 0; i < 100000; i++ {
-		log.Printf(fmt.Sprintf("--------------------------------- start loop #%d", i))
+		log.Printf("--------------------------------- start loop #%d", i)
 		CacheRWLoop(v)
 	}
 }
@@ -66,7 +67,7 @@ func CacheRWLoop(v *bakemono.Vol) {
 		if i%10000 == 0 {
 			log.Printf("-- get key-%d", i)
 		}
-		hit, data, err := v.Get([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)))
+		hit, reader, err := v.Get([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)))
 		if !hit {
 			counter["miss"]++
 		} else {
@@ -78,6 +79,11 @@ func CacheRWLoop(v *bakemono.Vol) {
 
 		if !hit {
 			continue
+		}
+
+		data, err := io.ReadAll(reader)
+		if err != nil {
+			panic(err)
 		}
 
 		if len(data) != 1024*randomSize {

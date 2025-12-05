@@ -20,12 +20,9 @@ func NewRamCache(capacity uint64) *RamCache {
 	return &RamCache{Cache: cache}
 }
 
-func (r *RamCache) Get(key []byte) ([]byte, error) {
+func (r *RamCache) Get(key []byte) ([]byte, bool) {
 	data, ok := r.GetIfPresent(string(key))
-	if !ok {
-		return nil, nil
-	}
-	return data, nil
+	return data, ok
 }
 
 func (r *RamCache) Put(key []byte, value []byte) error {
@@ -33,6 +30,14 @@ func (r *RamCache) Put(key []byte, value []byte) error {
 	return nil
 }
 
-func (r *RamCache) Size() int64 {
-	return int64(r.WeightedSize())
+func (r *RamCache) Items() int {
+	return r.EstimatedSize()
 }
+
+func (r *RamCache) Size() uint64 {
+	return r.WeightedSize()
+}
+
+// func (r *RamCache) WeightedSize() uint64 {
+// 	return r.WeightedSize()
+// }

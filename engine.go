@@ -64,23 +64,20 @@ func (e *Engine) ServeHTTP(c *gin.Context) {
 		return
 	}
 	volume := e.Volumes[volumePath]
-	hit, value, err := volume.Get([]byte(cacheKey))
+	hit, reader, err := volume.Get([]byte(cacheKey))
 	if err != nil {
 		logger.Errorf("get cache %s, err: %v", cacheKey, err)
 	}
 
-	// set cache status for access log
 	if hit {
 		c.Set("CACHE_STATUS", "HIT")
-	} else {
-		c.Set("CACHE_STATUS", "MISS")
-	}
-
-	if hit {
 		logger.Debugf("cache hit, return from cache %s", cacheKey)
-		c.Data(http.StatusOK, "application/octet-stream", value)
+		c.Header("Content-Type", "application/octet-stream")
+		http.ServeContent(c.Writer, c.Request, cacheKey, time.Now(), reader)
 		return
 	}
+
+	c.Set("CACHE_STATUS", "MISS")
 
 	logger.Debugf("cache miss, fetch from upstream %s", cacheKey)
 

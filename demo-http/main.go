@@ -49,7 +49,16 @@ func main() {
 	router.GET("/ramcache_stats", func(c *gin.Context) {
 		stats := make(map[string]interface{})
 		for p, v := range engine.Volumes {
-			stats[p] = v.RamCache.Stats()
+			var totalHits, totalMisses int64
+			for _, s := range v.Stripes {
+				st := s.RamCache.Stats()
+				totalHits += int64(st.Hits)
+				totalMisses += int64(st.Misses)
+			}
+			stats[p] = map[string]int64{
+				"hits":   totalHits,
+				"misses": totalMisses,
+			}
 		}
 		c.IndentedJSON(http.StatusOK, stats)
 	})

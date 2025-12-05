@@ -78,7 +78,7 @@ func main() {
         panic(err)
     }
     // read
-	hit, data, err := v.Get([]byte("key"))
+	hit, reader, err := v.Get([]byte("key"))
     if err != nil {
 		// note: err can be not nil when disk failure happens
 		// consider it as a MISS when err != nil, or log it to do further processing
@@ -87,6 +87,9 @@ func main() {
     if !hit {
         panic("key should be hit")
     }
+    
+    // read all
+    data, err := io.ReadAll(reader)
     if string(data) != "value" {
         panic("value should be 'value'")
     }
@@ -114,12 +117,14 @@ In this version, they are sharing several RWLocks. We will give more tuning opti
 
 ### Data Structure
 
-There are 3 data structures in `bakemono`:
+There are 4 main data structures in `bakemono`:
 
 - **`Vol`**
   - **volume**, represents a single file on disk.
-  - A `Vol` is what we finally persist on disk.
-  - We will support bare block device in the future.
+  - A `Vol` manages multiple `Stripe`s to support high concurrency.
+- **`Stripe`**
+  - **stripe**, logical partition of a volume.
+  - Each stripe has its own lock, directory, and write buffer.
 - **`Chunk`**
   - basic unit of your k-v cache data.
   - restored on disk.
@@ -205,32 +210,29 @@ Note, dirs is an array in memory.
 
 Why `segments`? We could lock, flush meta per segment.
 
-#### 🗂️ Vol
+#### 🗂️ Vol and Stripe
 `Vol` is the volume on disk. It is the final data structure we persist on disk.
+`Stripe` is a logical partition of `Vol`.
 
 ![vol](docs/vol-struct.png)
 
-**Vol offset calculation**:
+Each `Stripe` manages its own independent:
+- Lock (`sync.RWMutex`)
+- Directory Manager (`DirManager`)
+- Write Buffer (`AggregateWriteBuffer`)
+- Ram Cache (`RamCache`)
 
-init options are
-```go
-type VolOptions struct {
-	Fp        OffsetReaderWriterCloser
-	FileSize  Offset
-	ChunkAvgSize Offset
+**Stripe Concurrency**:
+Requests are routed to different stripes based on key hash (`CRC32(Key) % NumStripes`). This significantly reduces lock contention compared to a single global lock.
 
-	FlushMetaInterval time.Duration
-}
-```
-Max dirs size is nearly `FileSize/ChunkAvgSize` (There are alignment for bucket and segments). 
+**Write Buffer**:
+We use a double-buffered asynchronous aggregation write strategy. Data is first written to a memory buffer (defaults to 4MB). When full, it's flushed to disk asynchronously while the other buffer continues to accept writes.
 
-Meaning, we have max `FileSize/ChunkAvgSize` chunks in this volume.
-
-**Vol Multi meta**
-
-Meta A/B are designed to be flush alternately. To avoid data loss when power failure happens.
-
-In this version, only use meta A. Will implement multi meta in the future.
+**Read Path**:
+Tiered read strategy:
+1. **L1 RamCache**: Check LRU memory cache.
+2. **L2 Aggregation Buffer**: Check if data is in the write buffer (not yet on disk).
+3. **L3 Disk**: Read from disk.
 
 ### Write
 

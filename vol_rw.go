@@ -1,135 +1,22 @@
 package bakemono
 
-const MaxKeyLength = 4096
+import (
+	"hash/crc32"
+)
 
-func (v *Vol) Set(key, value []byte) (err error) {
-	//log.Printf("DEBUG: set key: %s, value_len: %d", key, len(value))
-	err = v.checkSetRequest(key, value)
-	if err != nil {
-		return err
-	}
-
-	ck := &Chunk{}
-	err = ck.Set(key, value)
-	if err != nil {
-		return err
-	}
-
-	binLenOnDisk := ck.GetBinaryLength()
-
-	v.mutex.Lock()
-	defer v.mutex.Unlock()
-	if v.WritePos+binLenOnDisk > v.Length {
-		logger.Infof("data write overflowed, start from dataOffset. set: writePos: %d, dataOffset: %d, len(value): %d", v.WritePos, v.DataOffset, len(value))
-		v.aggBufFlush()
-		v.WritePos = v.DataOffset
-	}
-
-	v.Dm.Set(key, v.WritePos+Offset(v.aggWriteBuffer.bufferPos), int(binLenOnDisk))
-	err = ck.WriteAt(v.aggWriteBuffer, int64(v.aggWriteBuffer.bufferPos))
-	if err != nil {
-		return err
-	}
-	if v.aggWriteBuffer.bufferPos >= AggHighWaterMark {
-		v.aggBufFlush()
-	}
-
-	v.RamCache.Put(key, value)
-	return nil
+func (v *Vol) getStripe(key []byte) *Stripe {
+	h := crc32.ChecksumIEEE(key)
+	idx := h % uint32(v.NumStripes)
+	return v.Stripes[idx]
 }
 
-func (v *Vol) Get(key []byte) (hit bool, value []byte, err error) {
-	err = v.checkGetRequest(key)
-	if err != nil {
-		return false, nil, err
-	}
-
-	v.mutex.RLock()
-	defer v.mutex.RUnlock()
-	// load from ram cache
-	value, err = v.RamCache.Get(key)
-	if value != nil {
-		return true, value, nil
-	}
-
-	hit, _, d := v.Dm.Get(key)
-
-	if !hit {
-		return false, nil, nil
-	}
-
-	// read data
-	readOffset := d.offset()
-	approxSize := d.approxSize()
-
-	rt := v.Fp
-
-	if v.dirAggBufValid(d) {
-		// load from aggregation buffer
-		rt = v.aggWriteBuffer
-		readOffset = readOffset - uint64(v.WritePos)
-	}
-
-	ck := &Chunk{}
-	err = ck.ReadAt(rt, int64(readOffset), int64(approxSize))
-	if err != nil {
-		logger.Warnf("failed to read data chunk. key: %s, offset: %d, approxSize: %d, err: %s", key, readOffset, approxSize, err)
-		return false, nil, nil
-	}
-	ckKey, ckData := ck.GetKeyData()
-	if string(ckKey) != string(key) {
-		logger.Warnf("key mismatch. key: %s, ckKey: %s", key, ckKey)
-		return false, nil, nil
-	}
-
-	return true, ckData, nil
+func (v *Vol) Set(key, value []byte) error {
+	return v.getStripe(key).Set(key, value)
 }
 
-func (v *Vol) checkSetRequest(key, value []byte) (err error) {
-	if len(key) > MaxKeyLength {
-		return ErrChunkKeyTooLarge
-	}
-	//if Offset(len(value)) > 10 * v.ChunkAvgSize {
-	//	return ErrChunkDataTooLarge
-	//}
-	return nil
+func (v *Vol) Get(key []byte) (bool, *CacheReader, error) {
+	return v.getStripe(key).Get(key)
 }
 
-func (v *Vol) checkGetRequest(key []byte) (err error) {
-	if len(key) > MaxKeyLength {
-		return ErrChunkKeyTooLarge
-	}
-	return nil
-}
-
-func (v *Vol) aggBufFlush() {
-	if v.aggWriteBuffer.Empty() {
-		return
-	}
-
-	n, err := v.aggWriteBuffer.Flush(int64(v.WritePos))
-	if err != nil || n != v.aggWriteBuffer.bufferPos {
-		logger.Errorf("flush to disk error, clear aggWriteBuffer dir")
-		v.dirAggBufDel()
-	} else {
-		v.WritePos += Offset(n)
-	}
-	v.aggWriteBuffer.Reset()
-	// v.flushMetaToFp()
-}
-
-func (v *Vol) dirAggBufValid(d Dir) bool {
-	return d.offset() >= uint64(v.WritePos) &&
-		d.offset() < (uint64(v.WritePos)+uint64(v.aggWriteBuffer.bufferPos))
-}
-
-func (v *Vol) dirAggBufDel() {
-	data := make([]byte, ChunkHeaderSizeFixed)
-	for off := 0; off < v.aggWriteBuffer.bufferPos; {
-		v.aggWriteBuffer.ReadAt(data, int64(off))
-		ckHeader := &ChunkHeader{}
-		ckHeader.UnmarshalBinary(data)
-		v.Dm.Delete(ckHeader.Key[:])
-		off += ChunkHeaderSizeFixed + int(ckHeader.DataLength)
-	}
-}
+// Deprecated/Moved methods (kept if interfaces require, otherwise removed)
+// checkSetRequest etc are now in Stripe.

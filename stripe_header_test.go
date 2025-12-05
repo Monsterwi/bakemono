@@ -6,11 +6,11 @@ import (
 )
 
 func TestVolHeaderFooterMarshal(t *testing.T) {
-	v := VolHeaderFooter{
+	v := StripeHeaderFooter{
 		Magic:          0x12345678,
 		CreateUnixTime: 0x1ab27df24eaf0924,
 		WritePos:       0xdf241ab27e924af0,
-		SyncSerial:     0xab2df2eaf0924417,
+		SyncSerial:     0x12345678,
 		//WriteSerial:    0x78934ab01256cdef,
 	}
 	b, err := v.MarshalBinary()
@@ -21,11 +21,11 @@ func TestVolHeaderFooterMarshal(t *testing.T) {
 }
 
 func TestVolHeaderFooterUnmarshal(t *testing.T) {
-	v := VolHeaderFooter{
+	v := StripeHeaderFooter{
 		Magic:          0x12345678,
 		CreateUnixTime: 0x1ab27df24eaf0924,
 		WritePos:       0xdf241ab27e924af0,
-		SyncSerial:     0xab2df2eaf0924417,
+		SyncSerial:     0x12345678,
 		//WriteSerial:    0x78934ab01256cdef,
 	}
 	b, err := v.MarshalBinary()
@@ -33,7 +33,7 @@ func TestVolHeaderFooterUnmarshal(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log(string(b))
-	var v2 VolHeaderFooter
+	var v2 StripeHeaderFooter
 	err = v2.UnmarshalBinary(b)
 	if err != nil {
 		t.Fatal(err)
