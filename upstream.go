@@ -1,4 +1,4 @@
-package bakemono
+package main
 
 // func NewUpstream(addr string) *Upstream {
 // 	return &Upstream{addr: addr}
@@ -33,7 +33,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bocchi-the-cache/bakemono/balancer"
+	"github.com/Monsterwi/razor/balancer"
+	"github.com/Monsterwi/razor/logger"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -164,17 +165,17 @@ func (h *HTTPProxy) HealthCheck(interval uint) {
 		go h.healthCheck(host, interval)
 	}
 }
+
+// healthCheck goroutine
 func (h *HTTPProxy) healthCheck(host string, interval uint) {
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	for range ticker.C {
 		if !IsBackendAlive(host) && h.ReadAlive(host) {
 			logger.Infof("Site unreachable, remove %s from load balancer.", host)
-
 			h.SetAlive(host, false)
 			h.lb.Remove(host)
-			logger.Infof("Site reachable, add %s to load balancer.", host)
 		} else if IsBackendAlive(host) && !h.ReadAlive(host) {
-
+			logger.Infof("Site reachable, add %s to load balancer.", host)
 			h.SetAlive(host, true)
 			h.lb.Add(host)
 		}

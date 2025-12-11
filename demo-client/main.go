@@ -27,7 +27,7 @@ func main() {
 				log.Printf("[Goroutine %d] New request error: %v", id, err)
 				return
 			}
-			req.Header.Set("Range", "bytes=100-200")
+			// req.Header.Set("Range", "bytes=100-200")
 			resp, err := http.DefaultClient.Do(req)
 			cost := time.Since(start)
 			if err != nil {
