@@ -206,10 +206,8 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 	copy(fullData[0:], docBytes)
 
 	// Add to AggBuffer
-	currentAggPos := w.Stripe.AggBuffer.GetBufferPos()
-	diskOffset := w.Stripe.WritePos + int64(currentAggPos)
-
-	err = w.Stripe.AggBuffer.Add(fullData, approxSize, nil)
+	// New API: Add returns the absolute disk offset where this will be written
+	diskOffset, err := w.Stripe.AggBuffer.Add(fullData, approxSize, nil)
 	if err != nil {
 		return err
 	}

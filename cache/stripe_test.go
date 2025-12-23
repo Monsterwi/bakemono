@@ -126,21 +126,21 @@ func TestStripeSaveLoad(t *testing.T) {
 			writer1 := NewCacheWriter(s1, key1)
 			writer1.Write([]byte("data1"))
 			writer1.Close()
-			err = s1.FlushAggBuffer()
+			err = s1.FlushAggBufferSync()
 			convey.So(err, convey.ShouldBeNil)
 
 			// Write second entry
 			writer2 := NewCacheWriter(s1, key2)
 			writer2.Write([]byte("data2"))
 			writer2.Close()
-			err = s1.FlushAggBuffer()
+			err = s1.FlushAggBufferSync()
 			convey.So(err, convey.ShouldBeNil)
 
 			// Write third entry
 			writer3 := NewCacheWriter(s1, key3)
 			writer3.Write([]byte("data3"))
 			writer3.Close()
-			err = s1.FlushAggBuffer()
+			err = s1.FlushAggBufferSync()
 			convey.So(err, convey.ShouldBeNil)
 
 			// Verify entries exist (they should be set by CacheWriter.Close)
@@ -218,7 +218,7 @@ func TestStripeSaveLoad(t *testing.T) {
 			convey.So(err, convey.ShouldBeNil)
 
 			// Flush and save
-			err = s1.FlushAggBuffer()
+			err = s1.FlushAggBufferSync()
 			convey.So(err, convey.ShouldBeNil)
 
 			err = s1.Save()

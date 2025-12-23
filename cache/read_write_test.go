@@ -152,7 +152,8 @@ func TestStripePersistence(t *testing.T) {
 		writer := NewCacheWriter(s1, key)
 		writer.Write([]byte("data"))
 		writer.Close()
-		s1.FlushAggBuffer()
+		err = s1.FlushAggBufferSync() // Use sync flush to ensure WritePos is updated
+		convey.So(err, convey.ShouldBeNil)
 
 		newPos := s1.WritePos
 		convey.So(newPos, convey.ShouldBeGreaterThan, startPos)

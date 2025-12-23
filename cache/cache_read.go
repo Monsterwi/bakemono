@@ -178,12 +178,18 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 		} else {
 			// Read from Disk
 			readPos := r.docOffset + int64(DocHeaderSize) + int64(r.doc.HLen) + r.offset
-			nRead, err = r.Stripe.Fd.ReadAt(p[totalBytesRead:totalBytesRead+int(toRead)], readPos)
-			if nRead == 0 && err != nil {
-				if totalBytesRead > 0 {
-					return totalBytesRead, nil
+
+			// Try reading from AggBuffer first (RWW)
+			nRead = r.Stripe.AggBuffer.ReadFromBuffer(readPos, p[totalBytesRead:totalBytesRead+int(toRead)])
+
+			if nRead == 0 {
+				nRead, err = r.Stripe.Fd.ReadAt(p[totalBytesRead:totalBytesRead+int(toRead)], readPos)
+				if nRead == 0 && err != nil {
+					if totalBytesRead > 0 {
+						return totalBytesRead, nil
+					}
+					return 0, err
 				}
-				return 0, err
 			}
 		}
 
@@ -267,9 +273,15 @@ func (r *CacheReader) loadFragment(idx int) error {
 	// 2. Check Disk
 	if r.Stripe.DirMgr != nil {
 		hit, _, d := r.Stripe.DirMgr.Get(currentKey)
+		// fmt.Printf("Read LoadFragment: Key=%x Hit=%v Off=%d\n", currentKey, hit, off)
 		if !hit {
+			fmt.Printf("DirMgr Miss for key %x. DirMgr Ptr: %p\n", currentKey, r.Stripe.DirMgr)
 			return io.EOF
 		}
+
+		// Check if we need to evacuate this object
+		r.checkEvacuation(d, currentKey)
+
 		r.docOffset = int64(d.offset())
 
 		if r.Stripe.Fd == nil {
@@ -277,8 +289,12 @@ func (r *CacheReader) loadFragment(idx int) error {
 		}
 
 		headerBuf := make([]byte, DocHeaderSize)
-		if _, err := r.Stripe.Fd.ReadAt(headerBuf, r.docOffset); err != nil {
-			return err
+		// Try AggBuffer first
+		if n := r.Stripe.AggBuffer.ReadFromBuffer(r.docOffset, headerBuf); n < DocHeaderSize {
+			// Read from Disk
+			if _, err := r.Stripe.Fd.ReadAt(headerBuf, r.docOffset); err != nil {
+				return err
+			}
 		}
 
 		tempDoc := &Doc{}
@@ -288,11 +304,13 @@ func (r *CacheReader) loadFragment(idx int) error {
 
 		// Verify Magic
 		if tempDoc.Magic != DocMagic {
+			fmt.Printf("Magic mismatch at %d: %x != %x\n", r.docOffset, tempDoc.Magic, DocMagic)
 			return fmt.Errorf("invalid doc magic at offset %d: %x", r.docOffset, tempDoc.Magic)
 		}
 
 		// Verify Key (To detect hash collision in DirMgr)
 		if !bytes.Equal(tempDoc.Key[:], keyPadded[:]) {
+			fmt.Printf("Key mismatch at %d\n", r.docOffset)
 			return fmt.Errorf("doc key mismatch at offset %d: expected %x, got %x", r.docOffset, keyPadded, tempDoc.Key)
 		}
 
@@ -341,4 +359,13 @@ func (r *CacheReader) loadDocAndInfoLocked() error {
 func (r *CacheReader) readFromRam(p []byte) (n int, err error) {
 	// Should be handled in Read loop now
 	return 0, nil
+}
+
+func (r *CacheReader) checkEvacuation(d Dir, key []byte) {
+	objOff := int64(d.offset())
+
+	// Check if within hit evacuate window (aligned with ATS within_hit_evacuate_window)
+	if r.Stripe.withinHitEvacuateWindow(objOff) {
+		r.Stripe.EvacMgr.Register(key, objOff, int(d.approxSize()))
+	}
 }
