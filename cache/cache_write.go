@@ -219,7 +219,12 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 
 	// Update Directory (Fragment)
 	if w.Stripe.DirMgr != nil {
-		_, err := w.Stripe.DirMgr.Set(thisKey, Offset(diskOffset), approxSize)
+		// Get current phase from Stripe
+		w.Stripe.mu.RLock()
+		phase := w.Stripe.Phase
+		w.Stripe.mu.RUnlock()
+
+		_, err := w.Stripe.DirMgr.Set(thisKey, Offset(diskOffset), approxSize, phase)
 		if err != nil {
 			return fmt.Errorf("failed to update dir for fragment %d: %v", idx, err)
 		}

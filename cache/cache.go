@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"crypto/md5"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -130,25 +131,19 @@ func (c *Cache) OpenWrite(key []byte, opts int) (*CacheVC, error) {
 
 // FragmentKey generates a key for the Nth fragment.
 // idx 0 is the base key.
-func FragmentKey(base []byte, idx int) []byte {
+// firstKey is the First Key (Earliest Key) of the object.
+func FragmentKey(firstKey []byte, idx int) []byte {
 	if idx == 0 {
-		return base
+		return firstKey
 	}
-	// Create a new key based on base + idx
-	// In ATS: key[0] might be modified.
-	// Here we append index to hash or modify last bytes.
-	// Simple impl: use hashing or modify.
-	// Let's modify the first 4 bytes (uint32) by adding idx.
-	// Assuming key is at least 16 bytes.
 
-	fk := make([]byte, len(base))
-	copy(fk, base)
+	// Use robust hash combination (aligned with ATS MD5(key, idx))
+	h := md5.New()
+	h.Write(firstKey)
 
-	if len(fk) >= 4 {
-		// Mix idx into the key
-		// Just adding to first uint32 is simple deterministic way
-		val := binary.BigEndian.Uint32(fk[:4])
-		binary.BigEndian.PutUint32(fk[:4], val+uint32(idx))
-	}
-	return fk
+	idxBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(idxBytes, uint64(idx))
+	h.Write(idxBytes)
+
+	return h.Sum(nil)
 }

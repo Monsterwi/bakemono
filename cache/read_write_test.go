@@ -102,14 +102,15 @@ func TestCacheDiskPersistence(t *testing.T) {
 		convey.So(n, convey.ShouldEqual, len(data))
 		convey.So(string(buf[:n]), convey.ShouldEqual, string(data))
 
-		// Verify Metadata was present (Doc loaded)
-		convey.So(reader.doc, convey.ShouldNotBeNil)
+		// Verify Metadata was present (buffer should have data)
+		convey.So(len(reader.buf), convey.ShouldBeGreaterThan, 0)
 	})
 }
 
 func TestCacheWriterFlush(t *testing.T) {
 	convey.Convey("CacheWriter Flush", t, func() {
 		stripe := NewStripe("test_stripe_flush", 1024*1024, 0)
+		defer os.Remove("test_stripe_flush")
 		stripe.Init(1024 * 1024 / 512)
 		stripe.Open() // Need to open to have Fd
 		defer stripe.Close()

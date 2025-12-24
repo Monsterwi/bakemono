@@ -217,10 +217,35 @@ func (b *AggregateWriteBuffer) Reset() {
 	b.writeCursor = 0
 }
 
-// TODO rename CopyFrom
-// ReadFromBuffer attempts to read data from the buffer if it contains the range.
+// DirAggBufValid checks if the directory entry is within the aggregation buffer.
+// Aligned with ATS Stripe::dir_agg_buf_valid.
+func (b *AggregateWriteBuffer) DirAggBufValid(dirOffset int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// Check Active Buffer
+	startActive := b.writeCursor - int64(b.bufferPos[b.activeIdx])
+	if dirOffset >= startActive && dirOffset < b.writeCursor {
+		return true
+	}
+
+	// Check Flushing Buffer (if any)
+	if b.isFlushing {
+		flushIdx := (b.activeIdx + 1) % 2
+		lenFlush := b.bufferPos[flushIdx]
+		startFlush := startActive - int64(lenFlush)
+
+		if dirOffset >= startFlush && dirOffset < startActive {
+			return true
+		}
+	}
+
+	return false
+}
+
+// CopyFrom attempts to copy data from the buffer
 // Returns n bytes read, or 0 if range is not in buffer.
-func (b *AggregateWriteBuffer) ReadFromBuffer(diskOffset int64, p []byte) int {
+func (b *AggregateWriteBuffer) CopyFrom(diskOffset int64, p []byte) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

@@ -61,6 +61,9 @@ func NewCacheVCRead(stripe *Stripe, key []byte) (*CacheVC, error) {
 	if vc.reader == nil {
 		// Disk/Ram
 		vc.reader = NewCacheReader(stripe, key)
+		if vc.reader == nil {
+			return nil, fmt.Errorf("no reader found for key: %s", key)
+		}
 	}
 
 	// We should probably try to load the header immediately to verify existence?
@@ -128,22 +131,6 @@ func (vc *CacheVC) SetHTTPInfo(info *CacheHTTPInfo) {
 		vc.writer.Info = info
 		vc.Info = info
 	}
-}
-
-// GetHTTPInfo gets the HTTP metadata.
-func (vc *CacheVC) GetHTTPInfo() (*CacheHTTPInfo, error) {
-	if vc.reading && vc.reader != nil {
-		info, err := vc.reader.LoadHTTPInfo()
-		if err != nil {
-			return nil, err
-		}
-		vc.Info = info
-		return info, nil
-	}
-	if vc.writing && vc.writer != nil {
-		return vc.writer.Info, nil
-	}
-	return nil, fmt.Errorf("no active operation")
 }
 
 // LoadHTTPInfo loads the HTTP metadata from disk or RamCache if not already loaded.

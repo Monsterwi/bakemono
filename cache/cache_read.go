@@ -11,7 +11,9 @@ import (
 // It supports reading from memory (RamCache), Write Buffer (RWW), and Disk.
 type CacheReader struct {
 	Stripe *Stripe
-	Key    []byte
+
+	Key, FirstKey []byte
+	Dir           Dir
 
 	// Metadata
 	Info *CacheHTTPInfo
@@ -22,21 +24,40 @@ type CacheReader struct {
 
 	// Multi-fragment state
 	fragmentIndex int
-	totalRead     int64 // Total payload bytes read across all fragments
-	currentDocLen int64 // Length of data in current fragment
+	totalRead     int64  // Total payload bytes read across all fragments
+	totalLen      uint64 // Total length from Fragment 0's Doc (cached)
 
 	// Internal
-	doc       *Doc
-	docOffset int64  // Offset of Doc on disk
-	ramData   []byte // Data from RamCache
+	buf []byte // Buffer for reading data (contains [DocHeader][Info][Data])
 
 	mutex sync.Mutex
 }
 
+// parseDocFromBuf parses Doc from r.buf. This is a helper to avoid storing Doc as state.
+func (r *CacheReader) parseDocFromBuf() (*Doc, error) {
+	if len(r.buf) < DocHeaderSize {
+		return nil, fmt.Errorf("buffer too small for doc header")
+	}
+
+	doc := &Doc{}
+	if err := doc.UnmarshalBinary(r.buf[:DocHeaderSize]); err != nil {
+		return nil, err
+	}
+
+	return doc, nil
+}
+
 func NewCacheReader(s *Stripe, key []byte) *CacheReader {
+	// Initialize with Key. Dir lookup is done lazily or in loadFragment.
+	// But per ATS requirement, we should init these if possible.
+	// However, usually we need to lock to lookup.
+	// Let's copy key.
+	k := make([]byte, len(key))
+	copy(k, key)
 	return &CacheReader{
-		Stripe: s,
-		Key:    key,
+		Stripe:   s,
+		Key:      k,
+		FirstKey: k,
 	}
 }
 
@@ -63,45 +84,28 @@ func (r *CacheReader) LoadHTTPInfo() (*CacheHTTPInfo, error) {
 		return r.writer.Info, nil
 	}
 
-	// Use loadFragment(0) to consistently load everything including Doc, Info, and currentDocLen
 	if err := r.loadFragment(0); err != nil {
 		return nil, err
 	}
 
-	// Info should be populated by loadFragment -> parse Doc
-	// Wait, loadFragment parses Doc, but does it parse Info?
-	// loadFragment in previous implementation only parsed Doc Header.
-	// We need to ensure it parses Info too if requested, or we parse it here.
+	// Parse Doc to get HLen
+	doc, err := r.parseDocFromBuf()
+	if err != nil {
+		return nil, err
+	}
 
-	// loadFragment logic:
-	// It reads DocHeader.
-	// It DOES NOT currently read Info explicitly into r.Info.
-	// But it has the data (ramData or can read disk).
-
-	// Let's enhance loadFragment to optionally load Info, or parse it here.
-	// Since r.doc is set, we can parse Info.
-
-	if r.doc != nil && r.doc.HLen > 0 {
-		if r.ramData != nil {
-			// Parse from Ram
-			// [DocHeader][Info][Data]
-			if len(r.ramData) >= DocHeaderSize+int(r.doc.HLen) {
-				r.Info = NewCacheHTTPInfo()
-				infoBytes := r.ramData[DocHeaderSize : DocHeaderSize+int(r.doc.HLen)]
-				if err := r.Info.UnmarshalBinary(infoBytes); err != nil {
-					return nil, err
-				}
-			}
-		} else if r.Stripe.Fd != nil {
-			// Parse from Disk
-			infoBuf := make([]byte, r.doc.HLen)
-			if _, err := r.Stripe.Fd.ReadAt(infoBuf, r.docOffset+int64(DocHeaderSize)); err != nil {
-				return nil, err
-			}
+	// Parse Info from r.buf
+	// r.buf contains [DocHeader][Info][Data]
+	if doc.HLen > 0 {
+		infoStart := DocHeaderSize
+		infoEnd := DocHeaderSize + int(doc.HLen)
+		if len(r.buf) >= infoEnd {
 			r.Info = NewCacheHTTPInfo()
-			if err := r.Info.UnmarshalBinary(infoBuf); err != nil {
+			if err := r.Info.UnmarshalBinary(r.buf[infoStart:infoEnd]); err != nil {
 				return nil, err
 			}
+		} else {
+			return nil, fmt.Errorf("buffer too small for http info")
 		}
 	} else {
 		r.Info = NewCacheHTTPInfo() // Empty
@@ -119,25 +123,22 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 		return r.readFromWriter(p)
 	}
 
-	// Ensure current doc is loaded
-	if r.doc == nil {
+	// Ensure current fragment is loaded
+	if len(r.buf) == 0 {
 		// Initial load (Fragment 0)
 		if err := r.loadFragment(0); err != nil {
 			return 0, err
 		}
+		r.fragmentIndex = 0 // Mark that we've loaded fragment 0
 	}
 
 	totalBytesRead := 0
 
 	for totalBytesRead < len(p) {
-		// Calculate available data in current fragment
-		remainingInFrag := r.currentDocLen - r.offset
-
-		if remainingInFrag <= 0 {
-			// End of this fragment.
-			// Check if there are more fragments.
-			if uint64(r.totalRead) >= r.doc.TotalLen {
-				// End of object
+		// Ensure current fragment data is available in buffer
+		if len(r.buf) == 0 {
+			// Check if we have read everything
+			if r.totalLen > 0 && uint64(r.totalRead) >= r.totalLen {
 				if totalBytesRead == 0 {
 					return 0, io.EOF
 				}
@@ -147,185 +148,197 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 			// Load next fragment
 			r.fragmentIndex++
 			if err := r.loadFragment(r.fragmentIndex); err != nil {
-				// Failed to load next fragment
 				if totalBytesRead > 0 {
-					return totalBytesRead, nil // Return what we have?
+					return totalBytesRead, nil
 				}
 				return 0, err
 			}
 			r.offset = 0 // Reset offset for new fragment
-			// Recalculate remainingInFrag for new fragment
-			remainingInFrag = r.currentDocLen
+		}
+
+		// Parse Doc to get HLen for data offset calculation
+		doc, err := r.parseDocFromBuf()
+		if err != nil {
+			if totalBytesRead > 0 {
+				return totalBytesRead, nil
+			}
+			return 0, err
+		}
+
+		// Calculate available data in current fragment (from r.buf)
+		// Data starts after DocHeader + HLen
+		dataStart := int64(DocHeaderSize) + int64(doc.HLen)
+		available := int64(len(r.buf)) - dataStart - r.offset
+
+		if available <= 0 {
+			// Current fragment exhausted, check if we've read all data before clearing buffer
+			if r.totalLen > 0 && uint64(r.totalRead) >= r.totalLen {
+				// All data read, don't clear buffer, just return what we have
+				if totalBytesRead == 0 {
+					return 0, io.EOF
+				}
+				return totalBytesRead, nil
+			}
+			// Need next fragment, clear buffer to trigger reload
+			r.buf = nil
+			continue
 		}
 
 		toRead := int64(len(p) - totalBytesRead)
-		if toRead > remainingInFrag {
-			toRead = remainingInFrag
+		if toRead > available {
+			toRead = available
 		}
 
-		// Perform Read
-		var nRead int
-		if r.ramData != nil {
-			// Read from Ram
-			// ramData contains [Header][Info][Data]
-			headerSize := int64(DocHeaderSize) + int64(r.doc.HLen)
-			if int64(len(r.ramData)) < headerSize+r.offset+toRead {
-				// Should not happen if RamCache data is valid
-				return totalBytesRead, fmt.Errorf("ram data short read")
-			}
-			src := r.ramData[headerSize+r.offset : headerSize+r.offset+toRead]
-			nRead = copy(p[totalBytesRead:], src)
-		} else {
-			// Read from Disk
-			readPos := r.docOffset + int64(DocHeaderSize) + int64(r.doc.HLen) + r.offset
-
-			// Try reading from AggBuffer first (RWW)
-			nRead = r.Stripe.AggBuffer.ReadFromBuffer(readPos, p[totalBytesRead:totalBytesRead+int(toRead)])
-
-			if nRead == 0 {
-				nRead, err = r.Stripe.Fd.ReadAt(p[totalBytesRead:totalBytesRead+int(toRead)], readPos)
-				if nRead == 0 && err != nil {
-					if totalBytesRead > 0 {
-						return totalBytesRead, nil
-					}
-					return 0, err
-				}
-			}
-		}
+		// Perform Memory Copy
+		src := r.buf[dataStart+r.offset : dataStart+r.offset+toRead]
+		nRead := copy(p[totalBytesRead:], src)
 
 		r.offset += int64(nRead)
 		r.totalRead += int64(nRead)
 		totalBytesRead += nRead
-
-		if err != nil {
-			break
-		}
 	}
 
 	return totalBytesRead, nil
 }
 
+// loadFragment performs the directory lookup and data load pipeline.
+// Logic flow aligned with ATS CacheVC::handleRead.
 func (r *CacheReader) loadFragment(idx int) error {
-	// Determine Key
-	currentKey := FragmentKey(r.Key, idx)
+	// 1. Determine Key
+	currentKey := FragmentKey(r.FirstKey, idx)
+	r.Key = currentKey
 
-	// Pad currentKey to 16 bytes for comparison with Doc.Key
-	var keyPadded [16]byte
-	copy(keyPadded[:], currentKey)
+	// 2. Lookup Dir (if not already set for idx 0)
+	// ATS typically does this before handleRead.
+	// For idx=0, we might have dir from OpenRead? But r.Dir might be empty initially.
+	// We need to lookup every time Key changes.
+	hit, _, d := r.Stripe.DirMgr.Get(r.Key)
+	if !hit {
+		return fmt.Errorf("fragment %d missing", idx)
+	}
+	r.Dir = d
 
-	// Clear current state
-	r.ramData = nil
-
-	// 1. Check RamCache
-	if r.Stripe.RamCache != nil {
-		if val, ok := r.Stripe.RamCache.Get(currentKey); ok {
-			r.ramData = val
-
-			// If this is a new fragment, we need to parse the Doc struct
-			// Only allocate new Doc if we don't have one, or reuse existing one but parse new data
-			// To rely on TotalLen from fragment 0, we should preserve the original Doc or TotalLen?
-			// ATS stores TotalLen in the First Fragment.
-			// Subsequent fragments might not have valid TotalLen or repeat it.
-			// Our CacheWriter puts TotalLen in ALL fragments now (streaming update).
-			// But wait, CacheWriter.writeFragment sets TotalLen = w.totalWritten.
-			// For intermediate fragments (1..N), w.totalWritten is cumulative SO FAR.
-			// Only the LAST fragment and Fragment 0 (written last) have the FINAL TotalLen.
-			// Reader logic relies on r.doc.TotalLen.
-			// If we load Fragment 1, and it says TotalLen=1MB (cumulative), but object is 10MB.
-			// Reader checks: `if uint64(r.totalRead) >= r.doc.TotalLen`.
-			// If we overwrite r.doc with Fragment 1's header, and it has partial TotalLen, we might stop early?
-			// Correct behavior: We should trust Fragment 0's TotalLen.
-			// So, we should only parse Doc header to get `Len` and `HLen` for the current fragment,
-			// but PRESERVE the `TotalLen` from Fragment 0?
-
-			// Let's decode into a temporary doc struct first.
-			tempDoc := &Doc{}
-
-			if len(val) >= DocHeaderSize {
-				if err := tempDoc.UnmarshalBinary(val[:DocHeaderSize]); err != nil {
-					return err
-				}
-				// Check Key
-				if !bytes.Equal(tempDoc.Key[:], keyPadded[:]) {
-					// Key Mismatch (Collision or Stale)
-					r.ramData = nil
-					// Fallback to disk
-				} else {
-					// Valid Ram Hit
-					if idx == 0 {
-						r.doc = tempDoc // First fragment is authoritative
-					} else {
-						// Update current fragment properties
-						// We trust r.doc.TotalLen from Frag 0
-						// Update r.doc.Len, HLen for calculation of data offset
-						r.doc.Len = tempDoc.Len
-						r.doc.HLen = tempDoc.HLen
-						// r.doc.Key = tempDoc.Key
-					}
-
-					r.currentDocLen = int64(tempDoc.Len) - int64(DocHeaderSize) - int64(tempDoc.HLen)
-					return nil
-				}
-			}
-		}
+	// 3. Handle Read (RAM -> Agg -> Disk)
+	if err := r.handleRead(); err != nil {
+		return err
 	}
 
-	// 2. Check Disk
-	if r.Stripe.DirMgr != nil {
-		hit, _, d := r.Stripe.DirMgr.Get(currentKey)
-		// fmt.Printf("Read LoadFragment: Key=%x Hit=%v Off=%d\n", currentKey, hit, off)
-		if !hit {
-			fmt.Printf("DirMgr Miss for key %x. DirMgr Ptr: %p\n", currentKey, r.Stripe.DirMgr)
-			return io.EOF
-		}
+	// 4. Parse Doc
+	if err := r.parseDoc(); err != nil {
+		return err
+	}
 
-		// Check if we need to evacuate this object
-		r.checkEvacuation(d, currentKey)
+	// 5. Evacuation Check
+	r.checkEvacuation(r.Dir, r.Key)
 
-		r.docOffset = int64(d.offset())
+	return nil
+}
 
-		if r.Stripe.Fd == nil {
-			return fmt.Errorf("stripe fd closed")
-		}
-
-		headerBuf := make([]byte, DocHeaderSize)
-		// Try AggBuffer first
-		if n := r.Stripe.AggBuffer.ReadFromBuffer(r.docOffset, headerBuf); n < DocHeaderSize {
-			// Read from Disk
-			if _, err := r.Stripe.Fd.ReadAt(headerBuf, r.docOffset); err != nil {
-				return err
-			}
-		}
-
-		tempDoc := &Doc{}
-		if err := tempDoc.UnmarshalBinary(headerBuf); err != nil {
-			return err
-		}
-
-		// Verify Magic
-		if tempDoc.Magic != DocMagic {
-			fmt.Printf("Magic mismatch at %d: %x != %x\n", r.docOffset, tempDoc.Magic, DocMagic)
-			return fmt.Errorf("invalid doc magic at offset %d: %x", r.docOffset, tempDoc.Magic)
-		}
-
-		// Verify Key (To detect hash collision in DirMgr)
-		if !bytes.Equal(tempDoc.Key[:], keyPadded[:]) {
-			fmt.Printf("Key mismatch at %d\n", r.docOffset)
-			return fmt.Errorf("doc key mismatch at offset %d: expected %x, got %x", r.docOffset, keyPadded, tempDoc.Key)
-		}
-
-		if idx == 0 {
-			r.doc = tempDoc
-		} else {
-			r.doc.Len = tempDoc.Len
-			r.doc.HLen = tempDoc.HLen
-		}
-
-		r.currentDocLen = int64(tempDoc.Len) - int64(DocHeaderSize) - int64(tempDoc.HLen)
+func (r *CacheReader) handleRead() error {
+	if r.loadFromRamCache() {
 		return nil
 	}
+	if r.loadFromAggregationBuffer() {
+		return nil
+	}
+	return r.loadFromDisk()
+}
 
-	return io.EOF
+func (r *CacheReader) loadFromRamCache() bool {
+	if r.Stripe.RamCache == nil {
+		return false
+	}
+	val, ok := r.Stripe.RamCache.Get(r.Key)
+	if !ok {
+		return false
+	}
+	r.buf = val
+	return true
+}
+
+func (r *CacheReader) loadFromAggregationBuffer() bool {
+	if !r.Stripe.DirAggBufValid(&r.Dir) {
+		return false
+	}
+
+	// Dir is in range, attempt to read
+	offset := int64(r.Dir.offset())
+	size := r.Dir.approxSize()
+	buf := make([]byte, size)
+	n := r.Stripe.AggBuffer.CopyFrom(offset, buf)
+	if n > 0 {
+		// We got some data. Is it complete?
+		// AggBuffer read might be partial if it spans buffers?
+		// Assuming simple case for now.
+		r.buf = buf[:n]
+		return true
+	}
+	return false
+}
+
+func (r *CacheReader) loadFromDisk() error {
+	// Read from Disk
+	// ATS uses pread with approx size
+	if r.Stripe.Fd == nil {
+		return fmt.Errorf("stripe fd closed")
+	}
+
+	offset := int64(r.Dir.offset())
+	size := r.Dir.approxSize()
+
+	// ATS: io.aiocb.aio_nbytes = stripe->skip + stripe->len - io.aiocb.aio_offset; (Clamping)
+	// We trust approxSize but should clamp to stripe bounds.
+
+	buf := make([]byte, size)
+
+	n, err := r.Stripe.Fd.ReadAt(buf, offset)
+	if err != nil && n == 0 {
+		return err
+	}
+	// Note: ReadAt might return n < size if EOF.
+	r.buf = buf[:n]
+	return nil
+}
+
+// parseDoc parses and validates the Doc header from r.buf.
+// For Fragment 0, it caches r.totalLen for subsequent fragment reads.
+func (r *CacheReader) parseDoc() error {
+	doc, err := r.parseDocFromBuf()
+	if err != nil {
+		return err
+	}
+
+	// Validation
+	if doc.Magic != DocMagic {
+		return fmt.Errorf("invalid doc magic: %x", doc.Magic)
+	}
+
+	// Verify Key
+	var keyPadded [16]byte
+	copy(keyPadded[:], r.Key)
+	if !bytes.Equal(doc.Key[:], keyPadded[:]) {
+		return fmt.Errorf("doc key mismatch")
+	}
+
+	// Verify FirstKey
+	var firstKeyPadded [16]byte
+	copy(firstKeyPadded[:], r.FirstKey)
+	if !bytes.Equal(doc.FirstKey[:], firstKeyPadded[:]) {
+		return fmt.Errorf("doc first_key mismatch")
+	}
+
+	// For Fragment 0, cache TotalLen (authoritative source)
+	// Fragment 1+ have incorrect TotalLen (cumulative at write time), so we ignore them
+	if r.fragmentIndex == 0 {
+		r.totalLen = doc.TotalLen
+	}
+
+	// Trim buffer to actual length if we read too much (approxSize > real size)
+	if int64(len(r.buf)) > int64(doc.Len) {
+		r.buf = r.buf[:doc.Len]
+	}
+
+	return nil
 }
 
 func (r *CacheReader) readFromWriter(p []byte) (n int, err error) {
@@ -349,16 +362,6 @@ func (r *CacheReader) readFromWriter(p []byte) (n int, err error) {
 	r.offset += toRead
 
 	return int(toRead), nil
-}
-
-// Deprecated/Internal helper removed in favor of loadFragment
-func (r *CacheReader) loadDocAndInfoLocked() error {
-	return r.loadFragment(0)
-}
-
-func (r *CacheReader) readFromRam(p []byte) (n int, err error) {
-	// Should be handled in Read loop now
-	return 0, nil
 }
 
 func (r *CacheReader) checkEvacuation(d Dir, key []byte) {

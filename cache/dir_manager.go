@@ -213,7 +213,7 @@ func dirProbe(key uint16, bucketId Offset, dirs []*Dir) (hit bool, dirOffset, pr
 	return false, index, prevIndex, d
 }
 
-func (dm *DirManager) Set(key []byte, off Offset, size int) (dirOffset Offset, err error) {
+func (dm *DirManager) Set(key []byte, off Offset, size int, phase bool) (dirOffset Offset, err error) {
 	keyInt12, segmentId, bucketId := calcDirHashPosition(key, dm.SegmentsNum, dm.BucketsNumPerSegment)
 
 	dir := Dir{}
@@ -221,6 +221,7 @@ func (dm *DirManager) Set(key []byte, off Offset, size int) (dirOffset Offset, e
 	dir.setApproxSize(uint64(size))
 	dir.setHead(true)
 	dir.setTag(keyInt12)
+	dir.setPhase(phase)
 
 	dm.SegMutexes[segmentId].Lock()
 	defer dm.SegMutexes[segmentId].Unlock()
@@ -240,6 +241,7 @@ func (dm *DirManager) dirInsert(key uint16, segmentId segId, bucketId Offset, di
 		dOld.setApproxSize(dir.approxSize())
 		dOld.setHead(true)
 		dOld.setTag(dir.tag())
+		dOld.setPhase(dir.phase())
 
 		dm.Dirs[segmentId][dirOffset] = &dOld
 		return dirOffset, nil

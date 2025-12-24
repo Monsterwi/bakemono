@@ -317,14 +317,14 @@ func (s *Stripe) handleFlushTask(task FlushTask) {
 		if err != nil {
 			logger.Errorf("Evacuation failed: %v", err)
 		}
-		s.requeueVictims(victims, victimsInfo)
+		s.requeueVictims(victims, victimsInfo, phase)
 	} else {
 		// Normal evacuation
 		victims, victimsInfo, err := s.collectEvacuationData(writePos, writePos+int64(bytesPending))
 		if err != nil {
 			logger.Errorf("Evacuation failed: %v", err)
 		}
-		s.requeueVictims(victims, victimsInfo)
+		s.requeueVictims(victims, victimsInfo, phase)
 	}
 
 	// 2. Write to Disk
@@ -357,12 +357,12 @@ func (s *Stripe) handleFlushTask(task FlushTask) {
 func (s *Stripe) requeueVictims(victims [][]byte, victimsInfo []struct {
 	Key  []byte
 	Size int
-}) {
+}, phase bool) {
 	for i, data := range victims {
 		info := victimsInfo[i]
 		approxSize := info.Size
 
-		go func(d []byte, sz int, k []byte) {
+		go func(d []byte, sz int, k []byte, ph bool) {
 			// 1. Add to AggBuffer
 			newOffset, err := s.AggBuffer.Add(d, sz, nil)
 			if err != nil {
@@ -375,14 +375,14 @@ func (s *Stripe) requeueVictims(victims [][]byte, victimsInfo []struct {
 				s.RamCache.Put(k, d)
 			}
 
-			// 3. Update Directory
+			// 3. Update Directory with the correct phase
 			if s.DirMgr != nil {
-				_, err := s.DirMgr.Set(k, Offset(newOffset), sz)
+				_, err := s.DirMgr.Set(k, Offset(newOffset), sz, ph)
 				if err != nil {
 					logger.Errorf("Evacuation dir update failed: %v", err)
 				}
 			}
-		}(data, approxSize, info.Key)
+		}(data, approxSize, info.Key, phase)
 	}
 }
 
@@ -497,4 +497,19 @@ func (s *Stripe) withinHitEvacuateWindow(dirOffset int64) bool {
 	}
 
 	return distance < s.hitEvacuateWindow
+}
+
+// DirAggBufValid checks if a directory entry is within the aggregation buffer.
+// Aligned with ATS Stripe::dir_agg_buf_valid.
+func (s *Stripe) DirAggBufValid(d *Dir) bool {
+	// Check phase first - if phases don't match, this is a stale entry
+	s.mu.RLock()
+	phase := s.Phase
+	s.mu.RUnlock()
+
+	if phase != d.phase() {
+		return false
+	}
+
+	return s.AggBuffer.DirAggBufValid(int64(d.offset()))
 }

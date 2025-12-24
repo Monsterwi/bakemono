@@ -102,7 +102,7 @@ func TestCacheVC(t *testing.T) {
 		readVC, err := NewCacheVCRead(stripe, key)
 		convey.So(err, convey.ShouldBeNil)
 
-		readInfo, err := readVC.GetHTTPInfo()
+		readInfo, err := readVC.LoadHTTPInfo()
 		convey.So(err, convey.ShouldBeNil)
 		convey.So(readInfo.Status, convey.ShouldEqual, 200)
 

@@ -469,12 +469,12 @@ func TestDirManager_GetSet(t *testing.T) {
 		randomKey := make([]byte, 20)
 		_, err := rand.Read(randomKey)
 
-		pos, err := dm.Set(randomKey, 100, 200)
+		pos, err := dm.Set(randomKey, 100, 200, false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("pos: %v", pos)
-		pos2, err := dm.Set(randomKey, 100, 200)
+		pos2, err := dm.Set(randomKey, 100, 200, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -523,7 +523,7 @@ func TestDirManager_Delete(t *testing.T) {
 	}
 	// delete head of bucket
 	{
-		pos, _ := dm.Set([]byte(keys[0]), 100, 200)
+		pos, _ := dm.Set([]byte(keys[0]), 100, 200, false)
 		t.Logf("pos: %v", pos)
 		_, err := dm.Delete([]byte(keys[0]))
 		if err != nil && !errors.Is(err, ErrDelHeadOfBucket) {
@@ -537,12 +537,12 @@ func TestDirManager_Delete(t *testing.T) {
 
 	// delete middle
 	{
-		pos, err := dm.Set([]byte(keys[1]), 100, 200)
+		pos, err := dm.Set([]byte(keys[1]), 100, 200, false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("pos: %v", pos)
-		pos2, err := dm.Set([]byte(keys[2]), 100, 200)
+		pos2, err := dm.Set([]byte(keys[2]), 100, 200, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -571,7 +571,7 @@ func TestDirManager_Delete(t *testing.T) {
 
 	// delete tail
 	{
-		pos, err := dm.Set([]byte(keys[3]), 100, 200)
+		pos, err := dm.Set([]byte(keys[3]), 100, 200, false)
 		if err != nil {
 			t.Fatal(err)
 		}

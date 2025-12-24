@@ -274,7 +274,7 @@ func TestStripeSaveLoad(t *testing.T) {
 
 				// Add directory entry
 				key := []byte{byte('a' + i)}
-				_, err = s.DirMgr.Set(key, Offset(s.WritePos), 1024)
+				_, err = s.DirMgr.Set(key, Offset(s.WritePos), 1024, s.Phase)
 				convey.So(err, convey.ShouldBeNil)
 
 				// Save

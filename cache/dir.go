@@ -134,7 +134,7 @@ func (d *Dir) setPhase(phase bool) {
 	if phase {
 		d.raw[2] |= 1 << 12
 	} else {
-		d.raw[2] &= 1 << 12
+		d.raw[2] &= ^uint16(1 << 12)
 	}
 }
 
