@@ -3,15 +3,12 @@ package logger
 import (
 	"os"
 	"path/filepath"
-	"time"
 
-	ginzap "github.com/gin-contrib/zap"
-	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-var debug = true
+var debug = false
 
 // Logger is the global logger instance
 var Logger *zap.SugaredLogger
@@ -22,8 +19,38 @@ func init() {
 	}
 }
 
+func InitLogger(logDir, errorLogFile string, isDaemon bool) (*zap.SugaredLogger, error) {
+	// Ensure log directory exists
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, err
+	}
+
+	// zapCfg := zap.NewProductionConfig()
+	zapCfg := zap.NewDevelopmentConfig()
+
+	// Set log file paths
+	errorLogPath := filepath.Join(logDir, errorLogFile)
+
+	// Daemon 模式下只写日志文件，避免写入已关闭的 stdout/stderr
+	if isDaemon {
+		zapCfg.OutputPaths = []string{errorLogPath}
+		zapCfg.ErrorOutputPaths = []string{errorLogPath}
+	} else {
+		zapCfg.OutputPaths = []string{"stdout", errorLogPath}
+		zapCfg.ErrorOutputPaths = []string{"stderr", errorLogPath}
+	}
+
+	// Configure encoder
+	zapCfg.EncoderConfig.TimeKey = "ts"
+	zapCfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	zapCfg.EncoderConfig.CallerKey = "caller"
+	zapCfg.EncoderConfig.StacktraceKey = "stacktrace"
+
+	return initLoggerWithConfig(zapCfg)
+}
+
 // InitLogger initializes the logger with the given zap config
-func InitLogger(zapCfg zap.Config) (*zap.SugaredLogger, error) {
+func initLoggerWithConfig(zapCfg zap.Config) (*zap.SugaredLogger, error) {
 	for _, path := range append(zapCfg.OutputPaths, zapCfg.ErrorOutputPaths...) {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return nil, err
@@ -53,36 +80,6 @@ func InitLogger(zapCfg zap.Config) (*zap.SugaredLogger, error) {
 	return Logger, nil
 }
 
-// GetGinLog returns a Gin middleware for logging
-// TODO: compatible with nginx log format
-func GetGinLog(accessLogPath string) gin.HandlerFunc {
-	config := zap.NewProductionConfig()
-	if len(accessLogPath) != 0 {
-		os.MkdirAll(filepath.Dir(accessLogPath), 0755)
-		config.OutputPaths = []string{accessLogPath}
-		config.ErrorOutputPaths = []string{accessLogPath}
-	}
-	// config.Encoding = "console"
-	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-	config.EncoderConfig.CallerKey = "caller"
-	config.EncoderConfig.StacktraceKey = "stacktrace"
-	logger, _ := config.Build(
-		zap.AddCaller(),
-		zap.AddStacktrace(zapcore.ErrorLevel),
-	)
-	return ginzap.GinzapWithConfig(logger, &ginzap.Config{
-		UTC:        true,
-		TimeFormat: time.RFC3339,
-		Context: ginzap.Fn(func(c *gin.Context) []zapcore.Field {
-			var hit string
-			if h, ok := c.Get("CACHE_STATUS"); ok {
-				hit = h.(string)
-			}
-			return []zapcore.Field{zap.String("CACHE_STATUS", hit)}
-		}),
-	})
-}
-
 // InitTestingLogger initializes a development logger for testing
 func InitTestingLogger() {
 	if Logger != nil {
@@ -92,8 +89,38 @@ func InitTestingLogger() {
 	// Development config already has caller enabled, but we ensure it's set
 	zapCfg.EncoderConfig.CallerKey = "caller"
 	zapCfg.EncoderConfig.StacktraceKey = "stacktrace"
-	InitLogger(zapCfg)
+	initLoggerWithConfig(zapCfg)
 }
+
+// GetGinLog returns a Gin middleware for logging
+// TODO: compatible with nginx log format
+// func GetGinLog(accessLogPath string) gin.HandlerFunc {
+// 	config := zap.NewProductionConfig()
+// 	if len(accessLogPath) != 0 {
+// 		os.MkdirAll(filepath.Dir(accessLogPath), 0755)
+// 		config.OutputPaths = []string{accessLogPath}
+// 		config.ErrorOutputPaths = []string{accessLogPath}
+// 	}
+// 	// config.Encoding = "console"
+// 	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+// 	config.EncoderConfig.CallerKey = "caller"
+// 	config.EncoderConfig.StacktraceKey = "stacktrace"
+// 	logger, _ := config.Build(
+// 		zap.AddCaller(),
+// 		zap.AddStacktrace(zapcore.ErrorLevel),
+// 	)
+// 	return ginzap.GinzapWithConfig(logger, &ginzap.Config{
+// 		UTC:        true,
+// 		TimeFormat: time.RFC3339,
+// 		Context: ginzap.Fn(func(c *gin.Context) []zapcore.Field {
+// 			var hit string
+// 			if h, ok := c.Get("CACHE_STATUS"); ok {
+// 				hit = h.(string)
+// 			}
+// 			return []zapcore.Field{zap.String("CACHE_STATUS", hit)}
+// 		}),
+// 	})
+// }
 
 // Info logs an info message
 // Caller skip is 1 because we're wrapping the zap logger

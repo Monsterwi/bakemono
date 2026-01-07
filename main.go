@@ -3,16 +3,22 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/Monsterwi/razor/cache"
+	appconfig "github.com/Monsterwi/razor/config"
 	"github.com/Monsterwi/razor/logger"
+	"github.com/sevlyar/go-daemon"
 )
 
 // Global instances
@@ -21,11 +27,72 @@ var (
 	httpProxy   *HTTPProxy
 )
 
-func main() {
-	// 1. Load configuration
-	cfg := GetDefaultConfig()
+// Command line flags
+var (
+	daemonMode  = flag.Bool("d", false, "Run in daemon mode")
+	configDir   = flag.String("c", "conf", "Path to config directory")
+	pidFile     = flag.String("p", "/var/run/bakemono.pid", "PID file")
+	showHelp    = flag.Bool("h", false, "Show help message")
+	showVersion = flag.Bool("v", false, "Show version information")
+)
 
-	var err error
+const (
+	Version   = "1.0.0"
+	BuildDate = "2026-01-06"
+)
+
+func main() {
+	// Parse command line flags
+	flag.Parse()
+
+	// Show help
+	if *showHelp {
+		printHelp()
+		return
+	}
+
+	// Show version
+	if *showVersion {
+		printVersion()
+		return
+	}
+
+	// If daemon mode is requested
+	if *daemonMode {
+		cntxt := &daemon.Context{}
+		cntxt.PidFileName = *pidFile
+
+		d, err := cntxt.Reborn()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start daemon: %v\n", err)
+			os.Exit(1)
+		}
+
+		// 父进程：释放资源并退出
+		if d != nil {
+			fmt.Printf("Bakemono started in background (PID: %d)\n", d.Pid)
+			return
+		}
+
+		// 子进程：释放父进程资源，继续执行后续代码
+		defer cntxt.Release()
+	}
+
+	// 1. Load configuration from records.config
+	cfg, err := appconfig.Load(*configDir)
+	if err != nil {
+		// Logger not initialized yet, use fmt
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Initialize logger with configured log directory
+	// Pass daemon mode flag to avoid writing to closed stdout/stderr
+	if err := initLogger(cfg, *daemonMode); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
+		os.Exit(1)
+	}
+
 	globalCache, err = NewCache(cfg)
 	if err != nil {
 		logger.Fatalf("Failed to start cache: %v", err)
@@ -40,15 +107,19 @@ func main() {
 		logger.Fatalf("Failed to init proxy: %v", err)
 	}
 
-	// 4. Setup graceful shutdown
+	// 4. Setup access log middleware and handler
+	accessLogPath := filepath.Join(cfg.LogfileDir, cfg.AccessLogFilename)
+	loggedHandler := logger.AccessLogMiddleware(accessLogPath)(http.HandlerFunc(handler))
+
+	// 5. Setup graceful shutdown
 	server := &http.Server{
-		Addr:    cfg.ServerAddr,
-		Handler: http.HandlerFunc(handler),
+		Addr:    ":" + strconv.Itoa(cfg.ServerPort),
+		Handler: loggedHandler,
 	}
 
 	// Start server in goroutine
 	go func() {
-		logger.Infof("Server started on %s", cfg.ServerAddr)
+		logger.Infof("Server started on %s", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Fatalf("Server error: %v", err)
 		}
@@ -80,9 +151,64 @@ func main() {
 	logger.Info("Server shutdown complete")
 }
 
+// printHelp displays usage information
+func printHelp() {
+	fmt.Printf(`Bakemono - High Performance CDN Cache Server
+
+Usage:
+  bakemono [options]
+
+Options:
+  -d          Run in daemon mode (background)
+  -c string   Path to records.config file (default: "conf/records.config")
+  -p string   Path to PID file (optional, recommended for daemon mode)
+  -h          Show this help message
+  -v          Show version information
+
+Examples:
+  # Run in foreground
+  bakemono
+
+  # Run in background
+  bakemono -d
+
+  # Run with custom config and PID file
+  bakemono -d -c /etc/bakemono/records.config -p /var/run/bakemono.pid
+
+  # Show version
+  bakemono -v
+
+For more information, visit: https://github.com/Monsterwi/bakemono
+`)
+}
+
+// printVersion displays version information
+func printVersion() {
+	fmt.Printf("Bakemono CDN Cache Server\n")
+	fmt.Printf("Version: %s\n", Version)
+	fmt.Printf("Build Date: %s\n", BuildDate)
+	fmt.Printf("Go Version: %s\n", runtime.Version())
+}
+
+func handlePurge(w http.ResponseWriter, r *http.Request, key []byte) {
+	err := globalCache.Remove(key)
+	if err != nil {
+		logger.Errorf("Failed to purge key %s: %v", string(key), err)
+		logger.SetCacheStatus(w, "PURGE_FAIL")
+		http.Error(w, "Purge Failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	logger.Infof("PURGED: %s", string(key))
+	logger.SetCacheStatus(w, "PURGE")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf("PURGED %s\n", string(key))))
+}
+
 // NewCache builds and initializes cache stripes from the provided config.
-func NewCache(cfg *Config) (*cache.Cache, error) {
-	store, err := LoadStore(cfg.StorageConfigPath)
+func NewCache(cfg *appconfig.Config) (*cache.Cache, error) {
+	storageConfigPath := filepath.Join(cfg.ConfigDir, appconfig.StorageConfigFilename)
+	store, err := appconfig.LoadStore(storageConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("load store: %w", err)
 	}
@@ -111,30 +237,40 @@ func NewCache(cfg *Config) (*cache.Cache, error) {
 func handler(w http.ResponseWriter, r *http.Request) {
 	key := []byte(GetCacheKey(r))
 
-	// 1. Try Read Cache
-	vc, err := globalCache.OpenRead(key)
-	if err == nil && vc != nil {
-		// Verify cache hit by trying to load metadata
-		// If LoadHTTPInfo returns io.EOF, it means key doesn't exist (Cache Miss)
-		info, infoErr := vc.LoadHTTPInfo()
-		if infoErr == nil && info != nil {
-			// Cache Hit
-			// log.Printf("Cache HIT: %s", key)
-			serveCacheHit(w, vc, info)
-			return
+	switch r.Method {
+	case "PURGE":
+		handlePurge(w, r, key)
+		return
+	case "GET":
+		// 1. Try Read Cache
+		vc, err := globalCache.OpenRead(key)
+		if err == nil && vc != nil {
+			// Verify cache hit by trying to load metadata
+			// If LoadHTTPInfo returns io.EOF, it means key doesn't exist (Cache Miss)
+			info, infoErr := vc.LoadHTTPInfo()
+			if infoErr == nil && info != nil {
+				// Cache Hit
+				logger.SetCacheStatus(w, "HIT")
+				serveCacheHit(w, r, vc, info)
+				return
+			}
+			// If infoErr is io.EOF, treat as Cache Miss
+			// Close the VC if it's not usable
+			_ = vc.Close()
 		}
-		// If infoErr is io.EOF, treat as Cache Miss
-		// log.Printf("Cache MISS (no metadata): %s, err: %v", key, infoErr)
-		// Close the VC if it's not usable
-		_ = vc.Close()
+		// 2. Cache Miss
+		logger.Infof("Cache MISS: %s", string(key))
+		logger.SetCacheStatus(w, "MISS")
+		serveCacheMiss(w, r, key)
+		return
+	default:
+		logger.Errorf("Unsupported method: %s", r.Method)
+		http.Error(w, "Unsupported Method: "+r.Method, http.StatusMethodNotAllowed)
+		return
 	}
-
-	// 2. Cache Miss
-	logger.Infof("Cache MISS: %s", string(key))
-	serveCacheMiss(w, r, key)
 }
 
-func serveCacheHit(w http.ResponseWriter, vc *cache.CacheVC, info *cache.CacheHTTPInfo) {
+func serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC, info *cache.CacheHTTPInfo) {
 	// Set Response Headers from CacheHTTPInfo
 	for k, v := range info.ResponseHeaders {
 		for _, vv := range v {
@@ -242,6 +378,23 @@ func serveCacheMiss(w http.ResponseWriter, r *http.Request, key []byte) {
 	}
 
 	// Cache will be committed by defer vc.Close()
+}
+
+// initializeLogger initializes the logger with the configured log directory
+func initLogger(cfg *appconfig.Config, isDaemon bool) error {
+	// Initialize production logger with configured paths
+	// Pass daemon mode to avoid writing to closed stdout/stderr
+	_, err := logger.InitLogger(cfg.LogfileDir, cfg.ErrorLogFilename, isDaemon)
+	if err != nil {
+		return fmt.Errorf("failed to initialize logger: %w", err)
+	}
+
+	logger.Infof("Logger initialized successfully (daemon mode: %v)", isDaemon)
+	logger.Infof("Log directory: %s", cfg.LogfileDir)
+	logger.Infof("Access log: %s/%s", cfg.LogfileDir, cfg.AccessLogFilename)
+	logger.Infof("Error log: %s/%s", cfg.LogfileDir, cfg.ErrorLogFilename)
+
+	return nil
 }
 
 // ---- Adapting Upstream.go code ----

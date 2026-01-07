@@ -11,5 +11,3 @@ var ErrVolFileCorrupted = errors.New("vol file corrupted")
 var ErrKeyTooLong = errors.New("key too long")
 
 var ErrCacheMiss = errors.New("cache miss")
-
-var ErrDelHeadOfBucket = errors.New("delete head of bucket")

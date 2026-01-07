@@ -3,13 +3,13 @@
 ## 🔴 高优先级 - 性能关键优化
 
 ### 1. Directory 存储结构重构（最关键）
-- [ ] **重构 DirManager 使用 Flat Array 替代 Map**
+- [x] **重构 DirManager 使用 Flat Array 替代 Map**
   - 将 `map[segId][]*Dir` 改为 `[]Dir` (纯结构体数组，非指针)
   - 通过 `index * sizeof(Dir)` 直接访问，消除 Map 查找开销
   - 预期收益：减少 50-70% 内存占用，消除 GC 压力，提升 2-3x 查找性能
   - 参考：ATS 的 `CacheDir` 使用连续内存布局
 
-- [ ] **Directory 序列化优化**
+- [x] **Directory 序列化优化**
   - 当前 `MarshalBinary` 使用 `bytes.Buffer`，考虑使用 `unsafe` 直接内存拷贝
   - 或使用 `mmap` 持久化 Directory，实现热重启（Hot Restart）
 
@@ -33,7 +33,9 @@
 - [ ] **I/O 任务抽象**
   - 定义 `IOTask` 接口（ReadTask, WriteTask）
   - 使用 Channel 传递任务，Worker 执行阻塞 I/O
-
+### 4. 支持purge功能
+### 5. 多 Fragment 文件部分被覆盖时的数据一致性问题
+- [ ] **添加循环覆盖场景的测试**
 ## 🟡 中优先级 - 功能完善
 
 ### ~~5. HTTP Vary / Alternates 支持~~

@@ -4,11 +4,11 @@ go 1.24.10
 
 require (
 	github.com/bocchi-the-cache/bakemono v0.1.0
-	github.com/gin-contrib/zap v1.1.6
 	github.com/gin-gonic/gin v1.11.0
 	github.com/go-resty/resty/v2 v2.17.0
 	github.com/lafikl/consistent v0.0.0-20220512074542-bdd3606bfc3e
 	github.com/maypok86/otter/v2 v2.2.1
+	github.com/sevlyar/go-daemon v0.1.6
 	github.com/smartystreets/goconvey v1.8.1
 	go.uber.org/zap v1.27.1
 )
@@ -27,6 +27,7 @@ require (
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/jtolds/gls v4.20.0+incompatible // indirect
+	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
