@@ -1,13 +1,14 @@
 package cache
 
 import (
-	"bytes"
 	"crypto/md5"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
+	"unsafe"
 
 	"github.com/Monsterwi/razor/logger"
 )
@@ -22,55 +23,57 @@ var (
 
 // DirManager manages the dirs attached to a vol.
 type DirManager struct {
-	ChunksNum            Offset
+	FragmentsNum         Offset
 	SegmentsNum          Offset
 	BucketsNum           Offset
 	BucketsNumPerSegment Offset
 
-	// map segment id to dirs
-	Dirs         map[segId][]*Dir
-	DirFreeStart map[segId]uint16
+	// Dirs is a flat array of all dirs
+	Dirs         []Dir
+	DirFreeStart []uint16
 
-	// XXX: remove this
 	// rw mutex for each segment
-	SegMutexes map[segId]*sync.RWMutex
+	SegMutexes []sync.RWMutex
 }
 
 // Init initializes the dir manager. Dirs will Initialized as empty by default.
 func (dm *DirManager) Init(dirNum Offset) Offset {
-	dm.Dirs = make(map[segId][]*Dir)
-	dm.DirFreeStart = make(map[segId]uint16)
-	dm.SegMutexes = make(map[segId]*sync.RWMutex)
-
 	dm.BucketsNum = dirNum / DirDepth
 	dm.SegmentsNum = (dm.BucketsNum + MaxBucketsPerSegment - 1) / MaxBucketsPerSegment
 	dm.BucketsNumPerSegment = (dm.BucketsNum + dm.SegmentsNum - 1) / dm.SegmentsNum
 
-	dm.ChunksNum = dm.BucketsNumPerSegment * DirDepth * dm.SegmentsNum
+	dm.FragmentsNum = dm.BucketsNumPerSegment * DirDepth * dm.SegmentsNum
+
+	dm.Dirs = make([]Dir, dm.FragmentsNum)
+	dm.DirFreeStart = make([]uint16, dm.SegmentsNum)
+	dm.SegMutexes = make([]sync.RWMutex, dm.SegmentsNum)
 
 	for i := 0; i < int(dm.SegmentsNum); i++ {
-		dm.SegMutexes[segId(i)] = &sync.RWMutex{}
+		dm.SegMutexes[i] = sync.RWMutex{}
 	}
 
 	dm.InitEmptyDirs()
-	logger.Infof("initing dir manager: ChunksMaxNum: %d, BucketsNum: %d, SegmentsNum: %d, BucketsNumPerSegment: %d", dm.ChunksNum, dm.BucketsNum, dm.SegmentsNum, dm.BucketsNumPerSegment)
-	return dm.ChunksNum
+	logger.Infof("initing dir manager: ChunksMaxNum: %d, BucketsNum: %d, SegmentsNum: %d, BucketsNumPerSegment: %d", dm.FragmentsNum, dm.BucketsNum, dm.SegmentsNum, dm.BucketsNumPerSegment)
+	return dm.FragmentsNum
 }
 
-// TODO: serialize and deserialize from bytes
+func (dm *DirManager) getSegmentDirs(seg segId) []Dir {
+	start := Offset(seg) * dm.BucketsNumPerSegment * DirDepth
+	end := start + dm.BucketsNumPerSegment*DirDepth
+	return dm.Dirs[start:end]
+}
 
 // InitEmptyDirs initializes all dirs as empty, make chain.
 func (dm *DirManager) InitEmptyDirs() {
 	for seg := 0; seg < int(dm.SegmentsNum); seg++ {
-		ChunkNumPerSegment := dm.BucketsNumPerSegment * DirDepth
-		dirs := make([]*Dir, ChunkNumPerSegment)
+		dirs := dm.getSegmentDirs(segId(seg))
 
 		// first free chunk for conclusion
-		dm.DirFreeStart[segId(seg)] = 1
+		dm.DirFreeStart[seg] = 1
 
 		// init all dirs as empty
 		for i := 0; i < len(dirs); i++ {
-			dirs[i] = &Dir{}
+			dirs[i] = Dir{}
 		}
 
 		// link dirs with next chain
@@ -79,12 +82,10 @@ func (dm *DirManager) InitEmptyDirs() {
 			// should not happen
 			logger.Fatal(err)
 		}
-
-		dm.Dirs[segId(seg)] = dirs
 	}
 }
 
-func linkEmptyDirs(dirs []*Dir) error {
+func linkEmptyDirs(dirs []Dir) error {
 
 	if len(dirs)%DirDepth != 0 {
 		return errors.New("dirs length should be multiple of DirDepth")
@@ -123,14 +124,14 @@ func linkEmptyDirs(dirs []*Dir) error {
 
 // freeChainDelete deletes a free dir from the chain
 func (dm *DirManager) freeChainDelete(segmentId segId, dirOffset Offset) {
-	isFirst, next := freeChainDelete(dm.Dirs[segmentId], dirOffset)
+	isFirst, next := freeChainDelete(dm.getSegmentDirs(segmentId), dirOffset)
 	if isFirst {
 		dm.DirFreeStart[segmentId] = next
 	}
 	return
 }
 
-func freeChainDelete(dirs []*Dir, dirOffset Offset) (isFirst bool, freeListHead uint16) {
+func freeChainDelete(dirs []Dir, dirOffset Offset) (isFirst bool, freeListHead uint16) {
 	if dirs[dirOffset].offset() != 0 {
 		// TODO: remove panic once stable
 		panic("dir is not empty")
@@ -152,14 +153,15 @@ func freeChainDelete(dirs []*Dir, dirOffset Offset) (isFirst bool, freeListHead 
 
 // freeChainSet set a free dir to the chain
 func (dm *DirManager) freeChainSet(segmentId segId, dirOffset Offset) {
-	if dm.Dirs[segmentId][dirOffset].offset() != 0 {
+	dirs := dm.getSegmentDirs(segmentId)
+	if dirs[dirOffset].offset() != 0 {
 		// TODO: remove panic once stable
 		panic("dir is not empty")
 	}
 	index := dm.DirFreeStart[segmentId]
 
-	dm.Dirs[segmentId][index].setPrev(uint16(dirOffset))
-	dm.Dirs[segmentId][dirOffset].setNext(index)
+	dirs[index].setPrev(uint16(dirOffset))
+	dirs[dirOffset].setNext(index)
 	dm.DirFreeStart[segmentId] = uint16(dirOffset)
 }
 
@@ -171,7 +173,7 @@ func (dm *DirManager) Get(key []byte) (hit bool, dirOffset Offset, d Dir) {
 
 	dm.SegMutexes[segmentId].RLock()
 	defer dm.SegMutexes[segmentId].RUnlock()
-	hit, dirOffset, _, d = dirProbe(keyInt12, bucketId, dm.Dirs[segmentId])
+	hit, dirOffset, _, d = dirProbe(keyInt12, bucketId, dm.getSegmentDirs(segmentId))
 	return hit, dirOffset, d
 }
 
@@ -187,7 +189,7 @@ func calcDirHashPosition(key []byte, SegmentsNum, BucketsNumPerSegment Offset) (
 	return keyInt12, segmentId, bucketId
 }
 
-func dirProbe(key uint16, bucketId Offset, dirs []*Dir) (hit bool, dirOffset, prevDirOffset Offset, d Dir) {
+func dirProbe(key uint16, bucketId Offset, dirs []Dir) (hit bool, dirOffset, prevDirOffset Offset, d Dir) {
 	index := bucketId * DirDepth
 	prevIndex := Offset(0)
 	counter := 0
@@ -204,7 +206,7 @@ func dirProbe(key uint16, bucketId Offset, dirs []*Dir) (hit bool, dirOffset, pr
 		}
 		dirKey := dirs[index].tag()
 		if dirKey == key {
-			return true, index, prevIndex, *dirs[index]
+			return true, index, prevIndex, dirs[index]
 		}
 		prevIndex = index
 		index = Offset(dirs[index].next())
@@ -234,16 +236,16 @@ func (dm *DirManager) Set(key []byte, off Offset, size int, phase bool) (dirOffs
 }
 
 func (dm *DirManager) dirInsert(key uint16, segmentId segId, bucketId Offset, dir Dir) (dirOffset Offset, err error) {
-	hit, dirOffset, _, dOld := dirProbe(key, bucketId, dm.Dirs[segmentId])
+	dirs := dm.getSegmentDirs(segmentId)
+	hit, dirOffset, _, _ := dirProbe(key, bucketId, dirs)
 	if hit {
 		// Note: set manually is dangerous, need to keep the next chain
-		dOld.setOffset(dir.offset())
-		dOld.setApproxSize(dir.approxSize())
-		dOld.setHead(true)
-		dOld.setTag(dir.tag())
-		dOld.setPhase(dir.phase())
+		next := dirs[dirOffset].next()
+		prev := dirs[dirOffset].prev()
 
-		dm.Dirs[segmentId][dirOffset] = &dOld
+		dirs[dirOffset] = dir
+		dirs[dirOffset].setNext(next)
+		dirs[dirOffset].setPrev(prev)
 		return dirOffset, nil
 	}
 
@@ -258,15 +260,15 @@ func (dm *DirManager) dirInsert(key uint16, segmentId segId, bucketId Offset, di
 	_, freeDirOffset := dm.getFreeDir(segmentId, bucketId)
 
 	// set dir
-	dm.Dirs[segmentId][freeDirOffset] = &dir
+	dirs[freeDirOffset] = dir
 
 	// link dir
 	if freeDirOffset != bucketId*DirDepth {
 		lastDirOfBucket := bucketId * DirDepth
-		for dm.Dirs[segmentId][lastDirOfBucket].next() != 0 {
-			lastDirOfBucket = Offset(dm.Dirs[segmentId][lastDirOfBucket].next())
+		for dirs[lastDirOfBucket].next() != 0 {
+			lastDirOfBucket = Offset(dirs[lastDirOfBucket].next())
 		}
-		dm.Dirs[segmentId][lastDirOfBucket].setNext(uint16(freeDirOffset))
+		dirs[lastDirOfBucket].setNext(uint16(freeDirOffset))
 	}
 
 	//err = dm.DiagPanicHangUpDirs()
@@ -281,8 +283,8 @@ func (dm *DirManager) dirInsert(key uint16, segmentId segId, bucketId Offset, di
 func (dm *DirManager) Delete(key []byte) (dirOffset Offset, err error) {
 	keyInt12, segmentId, bucketId := calcDirHashPosition(key, dm.SegmentsNum, dm.BucketsNumPerSegment)
 
-	dm.SegMutexes[segmentId].RLock()
-	defer dm.SegMutexes[segmentId].RUnlock()
+	dm.SegMutexes[segmentId].Lock()
+	defer dm.SegMutexes[segmentId].Unlock()
 
 	offset, err := dm.dirDelete(keyInt12, segmentId, bucketId)
 	if err != nil {
@@ -292,20 +294,32 @@ func (dm *DirManager) Delete(key []byte) (dirOffset Offset, err error) {
 }
 
 func (dm *DirManager) dirDelete(key uint16, segmentId segId, bucketId Offset) (dirOffset Offset, err error) {
-	hit, dirOffset, prevDirOffset, _ := dirProbe(key, bucketId, dm.Dirs[segmentId])
+	dirs := dm.getSegmentDirs(segmentId)
+	hit, dirOffset, prevDirOffset, _ := dirProbe(key, bucketId, dirs)
 	if !hit {
 		return dirOffset, nil
 	}
 
-	// now not support delete head of bucket
 	if dirOffset == bucketId*DirDepth {
-		return dirOffset, ErrDelHeadOfBucket
+		// Deleting the head of the bucket
+		next := Offset(dirs[dirOffset].next())
+		if next != 0 {
+			// Move the next entry to the head
+			dirs[dirOffset] = dirs[next]
+			dirs[next].clear()
+			dm.freeChainSet(segmentId, next)
+		} else {
+			// No more entries in the bucket
+			dirs[dirOffset].clear()
+		}
+		return dirOffset, nil
 	}
 
-	next := dm.Dirs[segmentId][dirOffset].next()
-	dm.Dirs[segmentId][prevDirOffset].setNext(next)
+	// Deleting a non-head entry
+	next := dirs[dirOffset].next()
+	dirs[prevDirOffset].setNext(next)
 
-	dm.Dirs[segmentId][dirOffset].clear()
+	dirs[dirOffset].clear()
 
 	// link the dir to the free chain
 	dm.freeChainSet(segmentId, dirOffset)
@@ -313,14 +327,15 @@ func (dm *DirManager) dirDelete(key uint16, segmentId segId, bucketId Offset) (d
 }
 
 func (dm *DirManager) getFreeDir(segmentId segId, bucketId Offset) (isSameBucket bool, freeDirOffset Offset) {
+	dirs := dm.getSegmentDirs(segmentId)
 	index := bucketId * DirDepth
 	// head of bucket
-	if dm.Dirs[segmentId][index].offset() == 0 {
+	if dirs[index].offset() == 0 {
 		return true, index
 	}
 	// same bucket
 	for i := 1; i < DirDepth; i++ {
-		if dm.Dirs[segmentId][index+Offset(i)].offset() == 0 {
+		if dirs[index+Offset(i)].offset() == 0 {
 			dm.freeChainDelete(segmentId, index+Offset(i))
 			return true, index + Offset(i)
 		}
@@ -366,6 +381,7 @@ FindFreeDir:
 
 // freeChainRebuild rebuilds the free chain in a segment, try to reuse free dirs
 func (dm *DirManager) freeChainRebuild(segmentId segId) Offset {
+	dirs := dm.getSegmentDirs(segmentId)
 	dm.DirFreeStart[segmentId] = 0
 	prev := Offset(0)
 	counter := Offset(0)
@@ -374,15 +390,15 @@ func (dm *DirManager) freeChainRebuild(segmentId segId) Offset {
 		index := Offset(b) * DirDepth
 		for j := 1; j < DirDepth; j++ {
 			thisNodeIndex := index + Offset(j)
-			if dm.Dirs[segmentId][thisNodeIndex].offset() == 0 {
+			if dirs[thisNodeIndex].offset() == 0 {
 				counter++
 				if dm.DirFreeStart[segmentId] == 0 {
 					dm.DirFreeStart[segmentId] = uint16(thisNodeIndex)
 				}
-				dm.Dirs[segmentId][thisNodeIndex].clear()
-				dm.Dirs[segmentId][thisNodeIndex].setPrev(uint16(prev))
+				dirs[thisNodeIndex].clear()
+				dirs[thisNodeIndex].setPrev(uint16(prev))
 				if prev != 0 {
-					dm.Dirs[segmentId][prev].setNext(uint16(thisNodeIndex))
+					dirs[prev].setNext(uint16(thisNodeIndex))
 				}
 				prev = thisNodeIndex
 			}
@@ -398,6 +414,7 @@ func (dm *DirManager) freeChainRebuild(segmentId segId) Offset {
 // purgeRandom10 purges 10% dirs in the segment randomly.
 // if bucketsNumPerSegment < 10, purge all dirs
 func (dm *DirManager) purgeRandom10(segmentId segId, whileListBucketId Offset) Offset {
+	dirs := dm.getSegmentDirs(segmentId)
 	randomIndex := rand.Intn(10)
 	counter := 0
 	for i := Offset(0); i < dm.BucketsNumPerSegment; i++ {
@@ -414,8 +431,8 @@ func (dm *DirManager) purgeRandom10(segmentId segId, whileListBucketId Offset) O
 			counter++
 			c++
 
-			next := Offset(dm.Dirs[segmentId][index].next())
-			dm.Dirs[segmentId][index].clear()
+			next := Offset(dirs[index].next())
+			dirs[index].clear()
 			index = next
 		}
 	}
@@ -428,6 +445,7 @@ func (dm *DirManager) purgeRandom10(segmentId segId, whileListBucketId Offset) O
 // purgeRandom33 purges 33% dirs in the segment randomly.
 // if bucketsNumPerSegment < 3, purge all dirs
 func (dm *DirManager) purgeRandom33(segmentId segId, whileListBucketId Offset) Offset {
+	dirs := dm.getSegmentDirs(segmentId)
 	randomIndex := rand.Intn(3)
 	counter := 0
 	for i := Offset(0); i < dm.BucketsNumPerSegment; i++ {
@@ -444,8 +462,8 @@ func (dm *DirManager) purgeRandom33(segmentId segId, whileListBucketId Offset) O
 			counter++
 			c++
 
-			next := Offset(dm.Dirs[segmentId][index].next())
-			dm.Dirs[segmentId][index].clear()
+			next := Offset(dirs[index].next())
+			dirs[index].clear()
 			index = next
 		}
 	}
@@ -458,6 +476,7 @@ func (dm *DirManager) purgeRandom33(segmentId segId, whileListBucketId Offset) O
 // purgeRandom100 purges 100% dirs in the segment randomly.
 // if bucketsNumPerSegment < 3, purge all dirs
 func (dm *DirManager) purgeRandom100(segmentId segId, whileListBucketId Offset) Offset {
+	dirs := dm.getSegmentDirs(segmentId)
 	counter := 0
 	for i := Offset(0); i < dm.BucketsNumPerSegment; i++ {
 		if i == whileListBucketId {
@@ -470,8 +489,8 @@ func (dm *DirManager) purgeRandom100(segmentId segId, whileListBucketId Offset) 
 			counter++
 			c++
 
-			next := Offset(dm.Dirs[segmentId][index].next())
-			dm.Dirs[segmentId][index].clear()
+			next := Offset(dirs[index].next())
+			dirs[index].clear()
 			index = next
 		}
 	}
@@ -481,103 +500,126 @@ func (dm *DirManager) purgeRandom100(segmentId segId, whileListBucketId Offset) 
 	return Offset(counter)
 }
 
-// MarshalBinary converts the Dirs to binary format
+// MarshalBinary converts the Dirs to binary format using unsafe for zero-copy
 func (dm *DirManager) MarshalBinary() (data []byte, err error) {
-	buf := new(bytes.Buffer)
+	segmentDirCount := int(dm.BucketsNumPerSegment) * DirDepth
+	segmentSize := segmentDirCount*DirSize + DirIDSize
+	totalSize := int(dm.SegmentsNum) * segmentSize
+
+	data = make([]byte, totalSize)
+	offset := 0
+
 	for i := segId(0); Offset(i) < dm.SegmentsNum; i++ {
-		err := func() error {
-			dm.SegMutexes[i].Lock()
-			defer dm.SegMutexes[i].Unlock()
-			for j := 0; j < int(dm.BucketsNumPerSegment*DirDepth); j++ {
-				err = binary.Write(buf, binary.BigEndian, &dm.Dirs[i][j].raw)
-				if err != nil {
-					return err
-				}
-			}
-			err = binary.Write(buf, binary.BigEndian, dm.DirFreeStart[i])
-			if err != nil {
-				return err
-			}
-			return nil
-		}()
-		if err != nil {
-			return nil, err
-		}
+		dm.SegMutexes[i].Lock()
+		dirs := dm.getSegmentDirs(i)
+
+		// 1. Copy Dirs using unsafe
+		// Pointer to start of this segment's dirs in the flat array
+		ptr := unsafe.Pointer(&dirs[0])
+		byteLen := segmentDirCount * DirSize
+
+		// Create a temporary byte slice header for the source memory
+		var srcBytes []byte
+		sh := (*reflect.SliceHeader)(unsafe.Pointer(&srcBytes))
+		sh.Data = uintptr(ptr)
+		sh.Len = byteLen
+		sh.Cap = byteLen
+
+		// Copy to the output buffer
+		copy(data[offset:], srcBytes)
+		offset += byteLen
+
+		// 2. Write DirFreeStart (uint16)
+		// Using Little Endian to match typical memory layout on x86, assuming we want consistency with unsafe copy
+		// if we were on LE machine.
+		// However, for strict compatibility with previous BigEndian code, unsafe copy is breaking anyway (on LE).
+		// So we just write it directly.
+		val := dm.DirFreeStart[i]
+		data[offset] = byte(val)
+		data[offset+1] = byte(val >> 8)
+		offset += 2
+
+		dm.SegMutexes[i].Unlock()
 	}
-	data = buf.Bytes()
-	return
+	return data, nil
 }
 
 func (dm *DirManager) UnmarshalBinary(data []byte) (err error) {
-	metaSizePerSegment := int(dm.BucketsNumPerSegment*DirDepth*Offset(DirSize)) + int(DirIDSize)
-	if len(data) != int(dm.SegmentsNum)*metaSizePerSegment {
+	segmentDirCount := int(dm.BucketsNumPerSegment) * DirDepth
+	segmentSize := segmentDirCount*DirSize + DirIDSize
+	if len(data) != int(dm.SegmentsNum)*segmentSize {
 		return fmt.Errorf("invalid data size")
 	}
-	buf := bytes.NewBuffer(data)
+
+	offset := 0
 	for i := segId(0); Offset(i) < dm.SegmentsNum; i++ {
-		err := func() error {
-			dm.SegMutexes[i].Lock()
-			defer dm.SegMutexes[i].Unlock()
-			for j := 0; j < int(dm.BucketsNumPerSegment*DirDepth); j++ {
-				err = binary.Read(buf, binary.BigEndian, &dm.Dirs[i][j].raw)
-				if err != nil {
-					return err
-				}
-			}
-			var dirID uint16
-			err = binary.Read(buf, binary.BigEndian, &dirID)
-			if err != nil {
-				return err
-			}
-			dm.DirFreeStart[i] = dirID
-			return nil
-		}()
-		if err != nil {
-			return err
-		}
+		dm.SegMutexes[i].Lock()
+		dirs := dm.getSegmentDirs(i)
+
+		// 1. Copy Dirs using unsafe
+		byteLen := segmentDirCount * DirSize
+		ptr := unsafe.Pointer(&dirs[0])
+
+		var dstBytes []byte
+		sh := (*reflect.SliceHeader)(unsafe.Pointer(&dstBytes))
+		sh.Data = uintptr(ptr)
+		sh.Len = byteLen
+		sh.Cap = byteLen
+
+		copy(dstBytes, data[offset:offset+byteLen])
+		offset += byteLen
+
+		// 2. Read DirFreeStart
+		val := uint16(data[offset]) | uint16(data[offset+1])<<8
+		dm.DirFreeStart[i] = val
+		offset += 2
+
+		dm.SegMutexes[i].Unlock()
 	}
 	return nil
 }
 
 func (dm *DirManager) UnmarshalBinaryConcurrency(data []byte) (err error) {
-	metaSizePerSegment := int(dm.BucketsNumPerSegment*DirDepth*Offset(DirSize)) + int(DirIDSize)
-	if len(data) != int(dm.SegmentsNum)*metaSizePerSegment {
+	segmentDirCount := int(dm.BucketsNumPerSegment) * DirDepth
+	segmentSize := segmentDirCount*DirSize + DirIDSize
+	if len(data) != int(dm.SegmentsNum)*segmentSize {
 		return fmt.Errorf("invalid data size")
 	}
+
 	var wg sync.WaitGroup
 	errChan := make(chan error, dm.SegmentsNum)
 	for i := segId(0); Offset(i) < dm.SegmentsNum; i++ {
 		wg.Add(1)
-		f := func(i segId) error {
+		go func(i segId) {
 			defer wg.Done()
 			dm.SegMutexes[i].Lock()
 			defer dm.SegMutexes[i].Unlock()
-			buf := bytes.NewBuffer(data[int(i)*metaSizePerSegment : int(i+1)*metaSizePerSegment])
-			for j := 0; j < int(dm.BucketsNumPerSegment*DirDepth); j++ {
-				err = binary.Read(buf, binary.BigEndian, &dm.Dirs[i][j].raw)
-				if err != nil {
-					return err
-				}
-			}
-			var dirID uint16
-			err = binary.Read(buf, binary.BigEndian, &dirID)
-			if err != nil {
-				return err
-			}
-			dm.DirFreeStart[i] = dirID // This line causes concurrent map writes!
-			return nil
-		}
-		go func(i segId) {
-			errChan <- f(i)
+
+			offset := int(i) * segmentSize
+			dirs := dm.getSegmentDirs(i)
+
+			// 1. Copy Dirs
+			byteLen := segmentDirCount * DirSize
+			ptr := unsafe.Pointer(&dirs[0])
+
+			var dstBytes []byte
+			sh := (*reflect.SliceHeader)(unsafe.Pointer(&dstBytes))
+			sh.Data = uintptr(ptr)
+			sh.Len = byteLen
+			sh.Cap = byteLen
+
+			copy(dstBytes, data[offset:offset+byteLen])
+			offset += byteLen
+
+			// 2. Read DirFreeStart
+			val := uint16(data[offset]) | uint16(data[offset+1])<<8
+			dm.DirFreeStart[i] = val
 		}(i)
 	}
 	wg.Wait()
 	close(errChan)
-	for err := range errChan {
-		if err != nil {
-			return err
-		}
-	}
+	// We don't really push to errChan in this version as copy doesn't error
+	// But keeping channel structure if we add logic later
 	return nil
 }
 

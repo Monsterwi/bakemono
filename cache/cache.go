@@ -129,6 +129,23 @@ func (c *Cache) OpenWrite(key []byte, opts int) (*CacheVC, error) {
 	return NewCacheVCWrite(stripe, key)
 }
 
+// Remove deletes an entry from the cache.
+// This corresponds to Cache::remove() in ATS.
+// It supports multi-fragment removal automatically.
+func (c *Cache) Remove(key []byte) error {
+	stripe := c.KeyToStripe(key)
+	if stripe == nil {
+		return fmt.Errorf("no stripe found")
+	}
+
+	vc, err := NewCacheVCRemove(stripe, key)
+	if err != nil {
+		return err
+	}
+
+	return vc.Remove()
+}
+
 // FragmentKey generates a key for the Nth fragment.
 // idx 0 is the base key.
 // firstKey is the First Key (Earliest Key) of the object.

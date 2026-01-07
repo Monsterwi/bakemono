@@ -2,7 +2,6 @@ package cache
 
 import (
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -11,7 +10,7 @@ import (
 func TestNewDirManager(t *testing.T) {
 	dm := &DirManager{}
 	dm.Init(123457)
-	if dm.ChunksNum != 123456 {
+	if dm.FragmentsNum != 123456 {
 		t.Error("ChunksMaxNum should be 123456")
 	}
 	if dm.BucketsNum != 30864 {
@@ -33,20 +32,22 @@ func countDirFreeInChain(dm *DirManager) (int, error) {
 		if index == 0 {
 			return 0, fmt.Errorf("dir free start should not be 0")
 		}
+		dirs := dm.getSegmentDirs(segId(seg))
 		for index != 0 {
 			counter1++
-			index = dm.Dirs[segId(seg)][index].next()
+			index = dirs[index].next()
 		}
 	}
 	//reverse counter
 	for seg := 0; seg < int(dm.SegmentsNum); seg++ {
 		index = dm.DirFreeStart[segId(seg)]
-		for dm.Dirs[segId(seg)][index].next() != 0 {
-			index = dm.Dirs[segId(seg)][index].next()
+		dirs := dm.getSegmentDirs(segId(seg))
+		for dirs[index].next() != 0 {
+			index = dirs[index].next()
 		}
 		for index != 0 {
 			counter2++
-			index = dm.Dirs[segId(seg)][index].prev()
+			index = dirs[index].prev()
 		}
 	}
 	if counter1 != counter2 {
@@ -131,7 +132,8 @@ func TestDirManager_FreeChainDelete(t *testing.T) {
 	{
 		seg := segId(0)
 		index := dm.DirFreeStart[seg]
-		index = dm.Dirs[seg][index].next()
+		dirs := dm.getSegmentDirs(seg)
+		index = dirs[index].next()
 		t.Logf("to delete index: %d", index)
 		dm.freeChainDelete(seg, Offset(index))
 		counter, err := countDirFreeInChain(dm)
@@ -147,8 +149,9 @@ func TestDirManager_FreeChainDelete(t *testing.T) {
 	{
 		seg := segId(0)
 		index := dm.DirFreeStart[seg]
-		for dm.Dirs[seg][index].next() != 0 {
-			index = dm.Dirs[seg][index].next()
+		dirs := dm.getSegmentDirs(seg)
+		for dirs[index].next() != 0 {
+			index = dirs[index].next()
 		}
 		t.Logf("to delete index: %d", index)
 		dm.freeChainDelete(seg, Offset(index))
@@ -206,7 +209,8 @@ func TestDirManager_FreeChainRebuild(t *testing.T) {
 		seg := segId(0)
 		index := dm.DirFreeStart[seg]
 		t.Logf("to pad index: %d", index)
-		dm.Dirs[seg][index].setOffset(1)
+		dirs := dm.getSegmentDirs(seg)
+		dirs[index].setOffset(1)
 		dm.freeChainRebuild(seg)
 
 		counter, err := countDirFreeInChain(dm)
@@ -222,9 +226,10 @@ func TestDirManager_FreeChainRebuild(t *testing.T) {
 	{
 		seg := segId(0)
 		index := dm.DirFreeStart[seg]
-		index = dm.Dirs[seg][index].next()
+		dirs := dm.getSegmentDirs(seg)
+		index = dirs[index].next()
 		t.Logf("to pad index: %d", index)
-		dm.Dirs[seg][index].setOffset(1)
+		dirs[index].setOffset(1)
 		dm.freeChainRebuild(seg)
 
 		counter, err := countDirFreeInChain(dm)
@@ -240,11 +245,12 @@ func TestDirManager_FreeChainRebuild(t *testing.T) {
 	{
 		seg := segId(0)
 		index := dm.DirFreeStart[seg]
-		for dm.Dirs[seg][index].next() != 0 {
-			index = dm.Dirs[seg][index].next()
+		dirs := dm.getSegmentDirs(seg)
+		for dirs[index].next() != 0 {
+			index = dirs[index].next()
 		}
 		t.Logf("to pad index: %d", index)
-		dm.Dirs[seg][index].setOffset(1)
+		dirs[index].setOffset(1)
 		dm.freeChainRebuild(seg)
 
 		counter, err := countDirFreeInChain(dm)
@@ -261,9 +267,9 @@ func TestDirManager_FreeChainRebuild(t *testing.T) {
 func TestDirManager_Probe(t *testing.T) {
 	// 1 miss head bucket dir
 	{
-		dirs := make([]*Dir, 12)
+		dirs := make([]Dir, 12)
 		for i := 0; i < len(dirs); i++ {
-			dirs[i] = &Dir{}
+			dirs[i] = Dir{}
 		}
 		_ = linkEmptyDirs(dirs)
 
@@ -286,9 +292,9 @@ func TestDirManager_Probe(t *testing.T) {
 
 	// 2 hit head bucket dir
 	{
-		dirs := make([]*Dir, 12)
+		dirs := make([]Dir, 12)
 		for i := 0; i < len(dirs); i++ {
-			dirs[i] = &Dir{}
+			dirs[i] = Dir{}
 		}
 		_ = linkEmptyDirs(dirs)
 
@@ -315,9 +321,9 @@ func TestDirManager_Probe(t *testing.T) {
 
 	// 3 miss non-head bucket dir
 	{
-		dirs := make([]*Dir, 12)
+		dirs := make([]Dir, 12)
 		for i := 0; i < len(dirs); i++ {
-			dirs[i] = &Dir{}
+			dirs[i] = Dir{}
 		}
 		_ = linkEmptyDirs(dirs)
 
@@ -338,9 +344,9 @@ func TestDirManager_Probe(t *testing.T) {
 	}
 	// 4 hit non-head bucket dir
 	{
-		dirs := make([]*Dir, 12)
+		dirs := make([]Dir, 12)
 		for i := 0; i < len(dirs); i++ {
-			dirs[i] = &Dir{}
+			dirs[i] = Dir{}
 		}
 		_ = linkEmptyDirs(dirs)
 
@@ -384,16 +390,17 @@ func TestDirManager_PurgeRandom10WhenFull(t *testing.T) {
 	// set every dir to be used
 	counter1 := 0
 	for seg := segId(0); Offset(seg) < dm.SegmentsNum; seg++ {
+		dirs := dm.getSegmentDirs(seg)
 		dm.DirFreeStart[seg] = 0
 		for b := Offset(0); b < dm.BucketsNumPerSegment; b++ {
 			index := b * DirDepth
 			for i := Offset(0); i < DirDepth; i++ {
 				counter1++
-				dm.Dirs[seg][index+i].setNext(0)
-				dm.Dirs[seg][index+i].setOffset(1)
-				dm.Dirs[seg][index+i].setTag(1)
+				dirs[index+i].setNext(0)
+				dirs[index+i].setOffset(1)
+				dirs[index+i].setTag(1)
 				if i != DirDepth-1 {
-					dm.Dirs[seg][index+i].setNext(uint16(index + i + 1))
+					dirs[index+i].setNext(uint16(index + i + 1))
 				}
 			}
 		}
@@ -425,16 +432,17 @@ func TestDirManager_FreeChainPop(t *testing.T) {
 	// set every dir to be used
 	counter1 := 0
 	for seg := segId(0); Offset(seg) < dm.SegmentsNum; seg++ {
+		dirs := dm.getSegmentDirs(seg)
 		dm.DirFreeStart[seg] = 0
 		for b := Offset(0); b < dm.BucketsNumPerSegment; b++ {
 			index := b * DirDepth
 			for i := Offset(0); i < DirDepth; i++ {
 				counter1++
-				dm.Dirs[seg][index+i].setNext(0)
-				dm.Dirs[seg][index+i].setOffset(1)
-				dm.Dirs[seg][index+i].setTag(1)
+				dirs[index+i].setNext(0)
+				dirs[index+i].setOffset(1)
+				dirs[index+i].setTag(1)
 				if i != DirDepth-1 {
-					dm.Dirs[seg][index+i].setNext(uint16(index + i + 1))
+					dirs[index+i].setNext(uint16(index + i + 1))
 				}
 			}
 		}
@@ -526,12 +534,12 @@ func TestDirManager_Delete(t *testing.T) {
 		pos, _ := dm.Set([]byte(keys[0]), 100, 200, false)
 		t.Logf("pos: %v", pos)
 		_, err := dm.Delete([]byte(keys[0]))
-		if err != nil && !errors.Is(err, ErrDelHeadOfBucket) {
+		if err != nil {
 			t.Fatal(err)
 		}
 		hit, _, _ := dm.Get([]byte(keys[0]))
-		if !hit {
-			t.Fatal("should hit")
+		if hit {
+			t.Fatal("should miss")
 		}
 	}
 
@@ -561,11 +569,9 @@ func TestDirManager_Delete(t *testing.T) {
 		}
 
 		// check other keys are still in the dir manager
-		for _, key := range []string{keys[0], keys[2]} {
-			hit, _, _ = dm.Get([]byte(key))
-			if !hit {
-				t.Fatal("should hit")
-			}
+		hit, _, _ = dm.Get([]byte(keys[2]))
+		if !hit {
+			t.Fatal("should hit")
 		}
 	}
 
@@ -596,11 +602,9 @@ func TestDirManager_Delete(t *testing.T) {
 			t.Fatal("should miss")
 		}
 		// check other keys are still in the dir manager
-		for _, key := range []string{keys[0], keys[2]} {
-			hit, _, _ = dm.Get([]byte(key))
-			if !hit {
-				t.Fatal("should hit")
-			}
+		hit, _, _ = dm.Get([]byte(keys[2]))
+		if !hit {
+			t.Fatal("should hit")
 		}
 	}
 }

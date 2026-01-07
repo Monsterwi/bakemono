@@ -106,6 +106,16 @@ func TestRamCacheOtter_Get(t *testing.T) {
 	}
 }
 
+func TestRamCacheOtter_Delete(t *testing.T) {
+	cache := NewRamCache(100)
+	cache.Put([]byte("key1"), []byte("value1"))
+	cache.Delete([]byte("key1"))
+	got, found := cache.Get([]byte("key1"))
+	if found {
+		t.Errorf("Get() = %v, want nil", got)
+	}
+}
+
 func TestRamCacheOtter_Size(t *testing.T) {
 	cache := NewRamCache(100)
 

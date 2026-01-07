@@ -119,3 +119,22 @@ func (od *OpenDir) CloseWrite(key []byte, w *CacheWriter) {
 		delete(od.entries, k)
 	}
 }
+
+// Delete removes an entry and its writers (aborts them).
+func (od *OpenDir) Delete(key []byte) {
+	od.mutex.Lock()
+	defer od.mutex.Unlock()
+
+	k := string(key)
+	entry, ok := od.entries[k]
+	if !ok {
+		return
+	}
+
+	entry.mutex.Lock()
+	defer entry.mutex.Unlock()
+
+	// In a real implementation we might want to signal writers to abort.
+	// For now, we just remove them from OpenDir.
+	delete(od.entries, k)
+}

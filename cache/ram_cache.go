@@ -31,6 +31,10 @@ func (r *RamCache) Put(key []byte, value []byte) error {
 	return nil
 }
 
+func (r *RamCache) Delete(key []byte) {
+	r.Invalidate(string(key))
+}
+
 func (r *RamCache) Items() int {
 	return r.EstimatedSize()
 }
@@ -38,7 +42,3 @@ func (r *RamCache) Items() int {
 func (r *RamCache) Size() uint64 {
 	return r.WeightedSize()
 }
-
-// func (r *RamCache) WeightedSize() uint64 {
-// 	return r.WeightedSize()
-// }
