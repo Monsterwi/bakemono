@@ -94,6 +94,8 @@ func (s *Stripe) Init(blocks int64) error {
 
 	// Initialize AggBuffer cursor
 	s.AggBuffer.Init(s.Start)
+	// Set bounds: [Start, Skip+Len)
+	s.AggBuffer.SetBounds(s.Start, s.Skip+s.Len)
 
 	// Initialize hit evacuate window (aligned with ATS)
 	s.recomputeHitEvacuateWindow()

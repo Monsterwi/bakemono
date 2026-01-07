@@ -44,6 +44,10 @@ type AggregateWriteBuffer struct {
 	flushChan chan FlushTask
 	// Track if the other buffer is currently flushing/busy
 	isFlushing bool
+
+	// Stripe Bounds
+	minOffset int64
+	maxOffset int64
 }
 
 func NewAggregateWriteBuffer() *AggregateWriteBuffer {
@@ -67,6 +71,21 @@ func (b *AggregateWriteBuffer) Init(startOffset int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.writeCursor = startOffset
+	// TODO: remove this
+	b.minOffset = startOffset
+	// Default maxOffset to very large if not set (or 0 implies no limit?)
+	// To avoid breaking existing tests that don't set bounds, we can leave it 0 and check if > 0
+}
+
+// TODO: remove this
+func (b *AggregateWriteBuffer) SetBounds(min, max int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.minOffset = min
+	b.maxOffset = max
+	if b.writeCursor < min {
+		b.writeCursor = min
+	}
 }
 
 func (b *AggregateWriteBuffer) IsEmpty() bool {
@@ -99,6 +118,23 @@ func (b *AggregateWriteBuffer) Add(data []byte, approxSize int, writer PendingWr
 	for {
 		active := b.buffers[b.activeIdx]
 		pos := b.bufferPos[b.activeIdx]
+
+		// TODO: remove this
+		// Check Stripe Wrapping
+		// If adding this data would cross maxOffset, we MUST flush and wrap.
+		// Note: This assumes one chunk fits in maxOffset-minOffset (stripe size).
+		if b.maxOffset > 0 && b.writeCursor+int64(len(data)) > b.maxOffset {
+			if !b.isFlushing {
+				b.swapAndFlushLocked()
+				// Reset cursor to minOffset
+				b.writeCursor = b.minOffset
+				// Continue loop to add data to new buffer (at minOffset)
+				continue
+			}
+			// Must wait for flush to complete before wrapping
+			b.cond.Wait()
+			continue
+		}
 
 		if len(data) <= len(active)-pos {
 			// Fits in current buffer

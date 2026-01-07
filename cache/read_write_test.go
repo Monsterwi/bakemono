@@ -284,3 +284,162 @@ func TestCacheMultiFragment(t *testing.T) {
 		convey.So(bytes.Equal(readBuf, data), convey.ShouldBeTrue)
 	})
 }
+
+func TestCacheRemove(t *testing.T) {
+	convey.Convey("Cache Remove (PURGE)", t, func() {
+		tmpFile := "test_stripe_remove.dat"
+		f, _ := os.Create(tmpFile)
+		f.Close()
+		defer os.Remove(tmpFile)
+
+		stripe := NewStripe(tmpFile, 1024*1024, 0)
+		stripe.Init(1024 * 1024 / 512)
+		stripe.Open()
+		defer stripe.Close()
+
+		key := []byte("purge_key")
+		data := []byte("Purge Me")
+
+		// 1. Write data
+		writer := NewCacheWriter(stripe, key)
+		writer.Write(data)
+		err := writer.Close()
+		convey.So(err, convey.ShouldBeNil)
+
+		// Verify it's in the directory
+		hit, _, _ := stripe.DirMgr.Get(key)
+		convey.So(hit, convey.ShouldBeTrue)
+
+		// Verify it's in RamCache
+		_, ok := stripe.RamCache.Get(key)
+		convey.So(ok, convey.ShouldBeTrue)
+
+		// 2. Remove (PURGE)
+		cache := &Cache{Stripes: []*Stripe{stripe}}
+		err = cache.Remove(key)
+		convey.So(err, convey.ShouldBeNil)
+
+		// 3. Verify it's gone from Directory
+		hit, _, _ = stripe.DirMgr.Get(key)
+		convey.So(hit, convey.ShouldBeFalse)
+
+		// 4. Verify it's gone from RamCache
+		_, ok = stripe.RamCache.Get(key)
+		convey.So(ok, convey.ShouldBeFalse)
+
+		// 5. Verify it's gone from OpenDir (already tested via success of Remove if we had concurrent write, but let's be explicit if we can)
+		// Since we closed the writer, it shouldn't be in OpenDir anyway.
+		// Let's test with an active writer.
+
+		key2 := []byte("purge_key_active")
+		vc2, _ := NewCacheVCWrite(stripe, key2)
+		vc2.Write(data)
+		// vc2 is still open, so it's in OpenDir
+
+		convey.So(stripe.OpenDir.OpenRead(key2), convey.ShouldNotBeNil)
+
+		cache2 := &Cache{Stripes: []*Stripe{stripe}}
+		err = cache2.Remove(key2)
+		convey.So(err, convey.ShouldBeNil)
+
+		convey.So(stripe.OpenDir.OpenRead(key2), convey.ShouldBeNil)
+		vc2.Close()
+	})
+
+	convey.Convey("Cache Remove (PURGE) without RamCache", t, func() {
+		tmpFile := "test_stripe_remove_no_ram.dat"
+		f, _ := os.Create(tmpFile)
+		f.Close()
+		defer os.Remove(tmpFile)
+
+		// Disable RamCache
+		stripe := NewStripe(tmpFile, 1024*1024, 0, WithRamCache(0))
+		stripe.Init(1024 * 1024 / 512)
+		stripe.Open()
+		defer stripe.Close()
+
+		convey.So(stripe.RamCache, convey.ShouldBeNil)
+
+		key := []byte("purge_key_no_ram")
+		data := []byte("Purge Me No Ram")
+
+		// 1. Write data
+		writer := NewCacheWriter(stripe, key)
+		writer.Write(data)
+		err := writer.Close()
+		convey.So(err, convey.ShouldBeNil)
+
+		// Verify it's in the directory
+		hit, _, _ := stripe.DirMgr.Get(key)
+		convey.So(hit, convey.ShouldBeTrue)
+
+		// 2. Remove (PURGE)
+		cache := &Cache{Stripes: []*Stripe{stripe}}
+		err = cache.Remove(key)
+		convey.So(err, convey.ShouldBeNil)
+
+		// 3. Verify it's gone from Directory
+		hit, _, _ = stripe.DirMgr.Get(key)
+		convey.So(hit, convey.ShouldBeFalse)
+	})
+
+	convey.Convey("Cache Remove (PURGE) Multi-Fragment", t, func() {
+		tmpFile := "test_stripe_remove_multifrag.dat"
+		fileSize := int64(10 * 1024 * 1024) // 10MB
+		f, _ := os.Create(tmpFile)
+		f.Close()
+		defer os.Remove(tmpFile)
+
+		stripe := NewStripe(tmpFile, fileSize, 0)
+		stripe.Init(fileSize / 512)
+		stripe.Open()
+		defer stripe.Close()
+
+		key := []byte("purge_key_multifrag")
+
+		// Create data larger than TargetFragmentSize (1MB)
+		// This will create multiple fragments
+		dataSize := 2*1024*1024 + 512*1024 // 2.5MB - should create 3 fragments
+		data := make([]byte, dataSize)
+		for i := 0; i < dataSize; i++ {
+			data[i] = byte(i % 256)
+		}
+
+		// 1. Write multi-fragment data
+		writer := NewCacheWriter(stripe, key)
+		n, err := writer.Write(data)
+		convey.So(err, convey.ShouldBeNil)
+		convey.So(n, convey.ShouldEqual, len(data))
+		err = writer.Close()
+		convey.So(err, convey.ShouldBeNil)
+
+		// Verify fragment 0 is in the directory
+		hit, _, _ := stripe.DirMgr.Get(key)
+		convey.So(hit, convey.ShouldBeTrue)
+
+		// Verify fragment 1 is in the directory
+		frag1Key := FragmentKey(key, 1)
+		hit, _, _ = stripe.DirMgr.Get(frag1Key)
+		convey.So(hit, convey.ShouldBeTrue)
+
+		// Verify fragment 2 is in the directory
+		frag2Key := FragmentKey(key, 2)
+		hit, _, _ = stripe.DirMgr.Get(frag2Key)
+		convey.So(hit, convey.ShouldBeTrue)
+
+		// 2. Remove (PURGE) - should remove all fragments
+		cache := &Cache{Stripes: []*Stripe{stripe}}
+		err = cache.Remove(key)
+		convey.So(err, convey.ShouldBeNil)
+
+		// 3. Verify all fragments are gone from Directory
+		hit, _, _ = stripe.DirMgr.Get(key)
+		convey.So(hit, convey.ShouldBeFalse)
+
+		hit, _, _ = stripe.DirMgr.Get(frag1Key)
+		convey.So(hit, convey.ShouldBeFalse)
+
+		hit, _, _ = stripe.DirMgr.Get(frag2Key)
+		convey.So(hit, convey.ShouldBeFalse)
+	})
+}

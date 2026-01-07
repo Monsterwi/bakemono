@@ -258,6 +258,7 @@ func (r *CacheReader) loadFromRamCache() bool {
 
 func (r *CacheReader) loadFromAggregationBuffer() bool {
 	if !r.Stripe.DirAggBufValid(&r.Dir) {
+		// logger.Debugf("DirAggBufValid returned false for offset %d", r.Dir.offset())
 		return false
 	}
 
@@ -293,6 +294,7 @@ func (r *CacheReader) loadFromDisk() error {
 
 	n, err := r.Stripe.Fd.ReadAt(buf, offset)
 	if err != nil && n == 0 {
+		// logger.Debugf("loadFromDisk failed at offset %d: %v", offset, err)
 		return err
 	}
 	// Note: ReadAt might return n < size if EOF.

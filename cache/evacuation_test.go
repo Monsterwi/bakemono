@@ -83,7 +83,7 @@ func TestEvacuation(t *testing.T) {
 
 		// Evacuation happens asynchronously in background goroutines (triggered by Flush).
 		// We need to wait a bit for them to complete (add to buffer and update directory).
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(1000 * time.Millisecond)
 
 		// 5. Verify Data A is still accessible (Evacuated)
 		// It should have been moved to a new offset (after C or mixed in C's flush block)

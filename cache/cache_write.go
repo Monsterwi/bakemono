@@ -38,6 +38,7 @@ func NewCacheWriter(s *Stripe, key []byte) *CacheWriter {
 	}
 }
 
+// REFACTOR: direct call to AggBuffer.Add
 // Write appends data to the writer.
 func (w *CacheWriter) Write(p []byte) (n int, err error) {
 	w.mutex.Lock()
