@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"time"
 )
 
 // CacheVC (Cache Virtual Connection) acts as the interface for reading and writing cache objects.
@@ -30,33 +31,17 @@ type CacheVC struct {
 
 // NewCacheVCRead creates a CacheVC for reading.
 func NewCacheVCRead(stripe *Stripe, key []byte) (*CacheVC, error) {
-	// Check RWW first (via Stripe or Cache helper)
-	// We will reuse the logic in Cache.OpenRead basically, but encapsulated here.
-	// For now, let's assume the caller (Cache.OpenRead) sets up the reader.
-
-	// Actually, CacheVC IS the thing returned by OpenRead in ATS.
-	// So we should move the setup logic here or have a factory.
-
 	vc := &CacheVC{
 		Stripe:  stripe,
 		Key:     key,
 		reading: true,
 	}
 
-	// Initialize Reader
-	// Check OpenDir for RWW
-	stripe.mu.RLock()
-	od := stripe.OpenDir.OpenRead(key)
-	stripe.mu.RUnlock()
-
-	if od != nil {
-		od.mutex.RLock()
-		// Check if there are active writers
-		if len(od.writers) > 0 {
-			// RWW
-			vc.reader = NewCacheReaderFromWriter(stripe, key, od.writers[0])
-		}
-		od.mutex.RUnlock()
+	// 1. Check OpenDir for Active Writers (RWW)
+	entry := stripe.OpenDir.Get(key)
+	if entry != nil {
+		// RWW
+		vc.reader = NewCacheReaderFromWriter(stripe, key, entry.Writer)
 	}
 
 	if vc.reader == nil {
@@ -66,10 +51,6 @@ func NewCacheVCRead(stripe *Stripe, key []byte) (*CacheVC, error) {
 			return nil, fmt.Errorf("no reader found for key: %s", key)
 		}
 	}
-
-	// We should probably try to load the header immediately to verify existence?
-	// ATS CacheVC does do_io_read which initiates the state machine.
-	// Here we are synchronous.
 
 	return vc, nil
 }
@@ -85,11 +66,47 @@ func NewCacheVCWrite(stripe *Stripe, key []byte) (*CacheVC, error) {
 	vc.writer = NewCacheWriter(stripe, key)
 
 	// Register with OpenDir
-	stripe.mu.Lock()
-	stripe.OpenDir.OpenWrite(key, vc.writer)
-	stripe.mu.Unlock()
+	entry, isLeader := stripe.OpenDir.Add(key, vc.writer)
+	if !isLeader {
+		return nil, fmt.Errorf("write conflict: another writer is active")
+	}
+	vc.writer.od = entry
 
 	return vc, nil
+}
+
+// IsRWW returns true if this VC is reading from an active writer.
+func (vc *CacheVC) IsRWW() bool {
+	return vc.reading && vc.reader != nil && vc.reader.writer != nil
+}
+
+// WaitForHeaders waits for the writer to receive headers from upstream.
+// This is only used for RWW readers.
+func (vc *CacheVC) WaitForHeaders(timeout time.Duration) error {
+	if !vc.IsRWW() {
+		return nil
+	}
+
+	w := vc.reader.writer
+	// Need to access the OpenDirEntry via the writer to get the signal
+	if w == nil || w.od == nil {
+		return fmt.Errorf("invalid RWW state: no writer or opendir entry")
+	}
+
+	select {
+	case <-w.od.ReadySignal:
+		// Headers are ready (or writer closed/aborted)
+		// We should check if Info is actually set
+		if w.Info == nil {
+			return fmt.Errorf("writer finished without headers")
+		}
+		// Refresh our info from the writer
+		vc.Info = w.Info
+		vc.reader.Info = w.Info
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("timeout waiting for headers")
+	}
 }
 
 // Read reads data from the cache.
@@ -117,6 +134,14 @@ func (vc *CacheVC) Close() error {
 	var err error
 	if vc.writing && vc.writer != nil {
 		err = vc.writer.Close()
+		// Writer finished, decrement RefCount in OpenDir
+		vc.Stripe.OpenDir.Remove(vc.Key)
+	}
+
+	// If this was an RWW reader (holding a reference to a writer via OpenDir),
+	// we must decrement the RefCount when we are done reading.
+	if vc.reading && vc.reader != nil && vc.reader.writer != nil {
+		vc.Stripe.OpenDir.Remove(vc.Key)
 	}
 
 	// Reader doesn't strictly need closing in our current impl (no fd held permanently),
@@ -131,6 +156,17 @@ func (vc *CacheVC) SetHTTPInfo(info *CacheHTTPInfo) {
 	if vc.writing && vc.writer != nil {
 		vc.writer.Info = info
 		vc.Info = info
+
+		// Notify listeners that headers are ready!
+		if vc.writer.od != nil {
+			// Only close if not already closed
+			select {
+			case <-vc.writer.od.ReadySignal:
+				// Already closed
+			default:
+				close(vc.writer.od.ReadySignal)
+			}
+		}
 	}
 }
 
@@ -163,16 +199,6 @@ func NewCacheVCRemove(stripe *Stripe, key []byte) (*CacheVC, error) {
 }
 
 // Remove removes the cache entry and all its fragments.
-// This implementation follows ATS CacheVC::removeEvent logic:
-//  1. Abort active writers via OpenDir
-//  2. For each fragment (0, 1, 2, ...):
-//     a. Probe directory for the fragment key
-//     b. Remove from directory if found
-//  3. Remove from RamCache
-//
-// Note: If an active writer exists but no fragments are in directory yet,
-//
-//	the operation still succeeds (writer is aborted).
 func (vc *CacheVC) Remove() error {
 	if !vc.removing || vc.closed {
 		return fmt.Errorf("remove operation not active or closed")
@@ -181,11 +207,10 @@ func (vc *CacheVC) Remove() error {
 	// Step 1: Abort active writers
 	// Check if there is an active writer for this key and mark it to not update directory
 	hadActiveWriter := false
-	od := vc.Stripe.OpenDir.OpenRead(vc.Key)
-	if od != nil {
-		// In ATS, this sets od->dont_update_directory = true
+	entry := vc.Stripe.OpenDir.Get(vc.Key)
+	if entry != nil {
 		// We'll just delete it from OpenDir to prevent it from updating
-		vc.Stripe.OpenDir.Delete(vc.Key)
+		vc.Stripe.OpenDir.ForceRemove(vc.Key)
 		hadActiveWriter = true
 	}
 
@@ -254,7 +279,3 @@ func (vc *CacheVC) removeFragment(key []byte) (bool, error) {
 
 	return true, nil
 }
-
-// Deref? ATS uses ref-counting.
-// Go GC handles memory, but we might need explicit cleanup for OpenDir registration if Close() is missed?
-// Usually user calls Close().

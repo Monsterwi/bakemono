@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"io"
 	"sync"
 )
 
@@ -16,26 +17,136 @@ type CacheWriter struct {
 
 	// Write buffer
 	buffer []byte
-	// offset int // unused
 
 	// Streaming State
 	frag0Data    []byte // Holds data for Fragment 0 (waiting for TotalLen)
 	nextFragIdx  int    // Index of the next fragment to write
 	totalWritten int64  // Total bytes written by caller
 
+	// Streaming synchronization
+	cond *sync.Cond
+
 	// State
 	mutex  sync.RWMutex
 	closed bool
+	err    error         // Error state if writer failed
 	od     *OpenDirEntry // Reference to OpenDir entry
 }
 
 func NewCacheWriter(s *Stripe, key []byte) *CacheWriter {
-	return &CacheWriter{
+	w := &CacheWriter{
 		Stripe: s,
 		Key:    key,
 		buffer: make([]byte, 0, 4096), // Initial buffer size
-		Info:   NewCacheHTTPInfo(),    // Initialize with empty info
 	}
+	w.cond = sync.NewCond(&w.mutex)
+	return w
+}
+
+// ReadAt implements a simpler interface for readers to get data from the writer.
+// It abstracts away the fragment logic from the consumer.
+// It returns bytes read, and an error if read failed or EOF.
+// Uses read lock for concurrent readers, upgrades to write lock only when waiting.
+func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
+	// If request size is 0, return
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	for {
+		// Use read lock for reading data
+		w.mutex.RLock()
+
+		// Calculate available data based on what's been written
+		// w.totalWritten includes buffered data + flushed fragments
+		available := w.totalWritten - offset
+
+		if available > 0 {
+			// We have data! But where is it?
+			// It could be in flushed fragments (RAM/Disk) or in current buffer.
+
+			// Current buffer starts at: w.totalWritten - len(w.buffer)
+			bufferStart := w.totalWritten - int64(len(w.buffer))
+
+			if offset >= bufferStart {
+				// It's in the buffer!
+				bufOffset := offset - bufferStart
+				toRead := int64(len(p))
+				if toRead > available {
+					toRead = available
+				}
+				copy(p, w.buffer[bufOffset:bufOffset+toRead])
+				w.mutex.RUnlock()
+				return int(toRead), nil
+			}
+
+			// Check frag0Data
+			// frag0Data contains the first fragment (offset 0 to len(frag0Data))
+			// It is kept in memory until Close().
+			if len(w.frag0Data) > 0 {
+				if offset < int64(len(w.frag0Data)) {
+					// It's in frag0Data!
+					toRead := int64(len(p))
+					frag0Avail := int64(len(w.frag0Data)) - offset
+					if toRead > frag0Avail {
+						toRead = frag0Avail
+					}
+					copy(p, w.frag0Data[offset:offset+toRead])
+					w.mutex.RUnlock()
+					return int(toRead), nil
+				}
+			}
+
+			// If we are here, the data is OLDER than current buffer AND not in frag0Data (or offset > frag0Data).
+			// It implies it has been flushed to disk/RAM.
+			w.mutex.RUnlock()
+			return 0, ErrReadFromDisk // Sentinel error
+		}
+
+		// No data available yet
+		if w.closed {
+			err := w.err
+			w.mutex.RUnlock()
+			if err != nil {
+				return 0, err
+			}
+			return 0, io.EOF
+		}
+
+		// Need to wait for more data
+		// cond.Wait() requires write lock, so we need to upgrade
+		w.mutex.RUnlock()
+
+		// Upgrade to write lock for cond.Wait()
+		w.mutex.Lock()
+		// Double-check after acquiring write lock
+		if w.closed {
+			err := w.err
+			w.mutex.Unlock()
+			if err != nil {
+				return 0, err
+			}
+			return 0, io.EOF
+		}
+		// Wait for more data (releases lock, re-acquires on return)
+		w.cond.Wait()
+		w.mutex.Unlock()
+		// Loop back to try reading again with read lock
+	}
+}
+
+// Abort signals that the write operation failed.
+func (w *CacheWriter) Abort(err error) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	if w.closed {
+		return
+	}
+
+	w.err = err
+	w.closed = true
+	w.cond.Broadcast()
 }
 
 // REFACTOR: direct call to AggBuffer.Add
@@ -52,8 +163,17 @@ func (w *CacheWriter) Write(p []byte) (n int, err error) {
 	w.buffer = append(w.buffer, p...)
 	w.totalWritten += int64(len(p))
 
+	// Notify waiting readers that new data is available
+	w.cond.Broadcast()
+
 	// Try to flush chunks
 	if err := w.processBuffer(); err != nil {
+		// If flush fails, we should Abort self?
+		// Or just return error.
+		// Let's set error state so readers know.
+		w.err = err
+		w.closed = true
+		w.cond.Broadcast()
 		return 0, err
 	}
 
@@ -148,12 +268,19 @@ func (w *CacheWriter) Close() error {
 		}
 	}
 
-	// Remove from OpenDir
-	if w.Stripe.OpenDir != nil {
-		w.Stripe.OpenDir.CloseWrite(w.Key, w)
-	}
-
 	w.closed = true
+	// Notify any remaining readers that we are done (EOF)
+	w.cond.Broadcast()
+
+	// Remove from OpenDir logic is handled by CacheVC / OpenDir wrapper
+	// We don't call OpenDir.CloseWrite here directly anymore to keep layering clean,
+	// or we rely on the OpenDirEntry's refcount.
+	// But strictly speaking, writer finishing means it's no longer the "Active Writer".
+	// The entry might remain for readers.
+
+	// If the OpenDirEntry is linked, we should probably mark it?
+	// But in our new design, the Writer struct persists in the OpenDirEntry.
+
 	return nil
 }
 

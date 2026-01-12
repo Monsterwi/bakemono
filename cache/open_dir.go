@@ -2,35 +2,41 @@ package cache
 
 import (
 	"sync"
+	"time"
 )
-
-// CacheWriter represents a writer for a cache object.
-// Stub for compatibility with OpenDir.
-// Moved to cache_write.go
 
 // OpenDirEntry represents a directory entry for a document that is currently being written.
 // Ref: trafficserver/src/iocore/cache/P_CacheInternal.h (OpenDirEntry)
 type OpenDirEntry struct {
 	mutex sync.RWMutex
 
-	// List of writers for this document.
-	// In ATS this is a linked list of CacheVC.
-	// Here we store pointers to CacheWriter.
-	writers []*CacheWriter
+	// The single active writer for this document (Leader)
+	Writer *CacheWriter
 
-	// Flag to indicate if a writer is currently active (exclusive write lock)
-	hasWriter bool
+	// Broadcast channel: closed when Header is ready or Error occurs.
+	// Readers wait on this channel.
+	ReadySignal chan struct{}
+
+	// Error state if Writer failed
+	Error error
+
+	// Creation time for timeout detection
+	CreatedAt time.Time
+
+	// Reference count for active readers (including the writer itself initially)
+	RefCount int
 }
 
-func NewOpenDirEntry() *OpenDirEntry {
+func NewOpenDirEntry(w *CacheWriter) *OpenDirEntry {
 	return &OpenDirEntry{
-		writers:   make([]*CacheWriter, 0),
-		hasWriter: false,
+		Writer:      w,
+		ReadySignal: make(chan struct{}),
+		CreatedAt:   time.Now(),
+		RefCount:    1, // Writer counts as 1 ref
 	}
 }
 
 // OpenDir manages concurrent access to documents being written.
-// Ref: trafficserver/src/iocore/cache/P_CacheInternal.h (OpenDir)
 type OpenDir struct {
 	mutex   sync.RWMutex
 	entries map[string]*OpenDirEntry
@@ -42,49 +48,33 @@ func NewOpenDir() *OpenDir {
 	}
 }
 
-// OpenWrite attempts to register a writer for a key.
-// Returns true if successful, false if write conflict (enforce single writer).
-func (od *OpenDir) OpenWrite(key []byte, w *CacheWriter) bool {
-	k := string(key)
-	od.mutex.Lock()
-	defer od.mutex.Unlock()
-
-	entry, ok := od.entries[k]
-	if !ok {
-		entry = NewOpenDirEntry()
-		od.entries[k] = entry
-	}
-
-	entry.mutex.Lock()
-	defer entry.mutex.Unlock()
-
-	// Strict single-writer policy:
-	// If there is already a writer, we reject the new writer.
-	// In ATS, this might queue the writer or return failure.
-	// Here we return false to indicate conflict.
-	if entry.hasWriter {
-		return false
-	}
-
-	entry.writers = append(entry.writers, w)
-	entry.hasWriter = true
-
-	// Link the writer to this entry so it can remove itself later
-	w.od = entry
-
-	return true
-}
-
-// OpenRead attempts to find an existing writer for a key.
-func (od *OpenDir) OpenRead(key []byte) *OpenDirEntry {
+// Get returns the entry for a key if it exists.
+func (od *OpenDir) Get(key []byte) *OpenDirEntry {
 	od.mutex.RLock()
 	defer od.mutex.RUnlock()
-
 	return od.entries[string(key)]
 }
 
-// CloseWrite removes a writer.
-func (od *OpenDir) CloseWrite(key []byte, w *CacheWriter) {
+// Add attempts to add a new entry. Returns the existing entry if conflict occurs.
+func (od *OpenDir) Add(key []byte, w *CacheWriter) (*OpenDirEntry, bool) {
+	od.mutex.Lock()
+	defer od.mutex.Unlock()
+
+	k := string(key)
+	if entry, exists := od.entries[k]; exists {
+		entry.mutex.Lock()
+		entry.RefCount++
+		entry.mutex.Unlock()
+		return entry, false // Conflict (Follower)
+	}
+
+	entry := NewOpenDirEntry(w)
+	od.entries[k] = entry
+	return entry, true // Success (Leader)
+}
+
+// Remove decrements refcount and removes entry if 0.
+func (od *OpenDir) Remove(key []byte) {
 	od.mutex.Lock()
 	defer od.mutex.Unlock()
 
@@ -95,46 +85,18 @@ func (od *OpenDir) CloseWrite(key []byte, w *CacheWriter) {
 	}
 
 	entry.mutex.Lock()
-	defer entry.mutex.Unlock()
+	entry.RefCount--
+	shouldDelete := entry.RefCount <= 0
+	entry.mutex.Unlock()
 
-	// Remove w from writers
-	found := false
-	for i, writer := range entry.writers {
-		if writer == w {
-			// Remove element
-			entry.writers = append(entry.writers[:i], entry.writers[i+1:]...)
-			found = true
-			break
-		}
-	}
-
-	if found {
-		// If we removed the active writer, clear the flag
-		// (Assuming w was the active writer, which it should be if we enforce single writer)
-		entry.hasWriter = false
-	}
-
-	// If empty, remove entry from map
-	if len(entry.writers) == 0 {
+	if shouldDelete {
 		delete(od.entries, k)
 	}
 }
 
-// Delete removes an entry and its writers (aborts them).
-func (od *OpenDir) Delete(key []byte) {
+// ForceRemove removes an entry regardless of refcount (e.g. timeout cleanup).
+func (od *OpenDir) ForceRemove(key []byte) {
 	od.mutex.Lock()
 	defer od.mutex.Unlock()
-
-	k := string(key)
-	entry, ok := od.entries[k]
-	if !ok {
-		return
-	}
-
-	entry.mutex.Lock()
-	defer entry.mutex.Unlock()
-
-	// In a real implementation we might want to signal writers to abort.
-	// For now, we just remove them from OpenDir.
-	delete(od.entries, k)
+	delete(od.entries, string(key))
 }

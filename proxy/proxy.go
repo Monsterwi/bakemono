@@ -1,28 +1,5 @@
-package main
+package proxy
 
-// func NewUpstream(addr string) *Upstream {
-// 	return &Upstream{addr: addr}
-// }
-
-// func (u *Upstream) Upstream(c *gin.Context) (io.ReadCloser, error) {
-// 	client := resty.New().SetDoNotParseResponse(true)
-// 	// SetTimeout(3 * time.Second)
-// 	// client.SetTransport(&http.Transport{
-// 	// 	MaxIdleConnsPerHost: 500,
-// 	// 	MaxConnsPerHost:     0,
-// 	// 	IdleConnTimeout:     time.Minute * 5,
-// 	// })
-// 	addr := "http://" + u.addr + "/" + c.Request.URL.Path
-// 	resp, err := client.R().Get(addr)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-// 	log.Printf("upstream resp statusCode %d", resp.StatusCode())
-// 	if resp.StatusCode() == 200 {
-// 		return resp.RawBody(), nil
-// 	}
-// 	return nil, errors.New("status code not 200")
-// }
 import (
 	"fmt"
 	"net"

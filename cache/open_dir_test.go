@@ -13,31 +13,32 @@ func TestOpenDirConcurrency(t *testing.T) {
 		w1 := &CacheWriter{Key: key} // Mock writer
 		w2 := &CacheWriter{Key: key} // Mock writer
 
-		// 1. First writer succeeds
-		ok := od.OpenWrite(key, w1)
-		convey.So(ok, convey.ShouldBeTrue)
+		// 1. First writer succeeds (Leader)
+		entry1, isLeader := od.Add(key, w1)
+		convey.So(isLeader, convey.ShouldBeTrue)
+		convey.So(entry1, convey.ShouldNotBeNil)
 
-		// 2. Second writer fails (Single Writer Policy)
-		ok = od.OpenWrite(key, w2)
-		convey.So(ok, convey.ShouldBeFalse)
+		// 2. Second writer fails (Follower)
+		entry2, isLeader := od.Add(key, w2)
+		convey.So(isLeader, convey.ShouldBeFalse)
+		convey.So(entry2, convey.ShouldEqual, entry1) // Should return same entry
 
-		// 3. Read finds the writer
-		entry := od.OpenRead(key)
+		// 3. Read finds the entry
+		entry := od.Get(key)
 		convey.So(entry, convey.ShouldNotBeNil)
-		entry.mutex.RLock()
-		convey.So(len(entry.writers), convey.ShouldEqual, 1)
-		convey.So(entry.writers[0], convey.ShouldEqual, w1)
-		entry.mutex.RUnlock()
+		convey.So(entry.Writer, convey.ShouldEqual, w1)
 
-		// 4. Close first writer
-		od.CloseWrite(key, w1)
+		// 4. Remove reference (Simulate Close)
+		od.Remove(key) // Writer close
+		od.Remove(key) // Follower close (if any) - in new logic we just RefCount--
 
-		// 5. Entry should be removed
-		entry = od.OpenRead(key)
+		// 5. Entry should be removed ONLY if RefCount is 0
+		// We called Add twice (refcount=2), Remove twice (refcount=0)
+		entry = od.Get(key)
 		convey.So(entry, convey.ShouldBeNil)
 
 		// 6. Second writer can now succeed
-		ok = od.OpenWrite(key, w2)
-		convey.So(ok, convey.ShouldBeTrue)
+		entry, isLeader = od.Add(key, w2)
+		convey.So(isLeader, convey.ShouldBeTrue)
 	})
 }

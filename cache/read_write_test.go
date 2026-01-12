@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/smartystreets/goconvey/convey"
 )
@@ -16,49 +17,80 @@ func TestCacheReadWrite(t *testing.T) {
 		f.Close()
 		defer os.Remove(tmpFile)
 
-		stripe := NewStripe(tmpFile, 1024*1024, 0)
-		stripe.Init(1024 * 1024 / 512)
+		// 100MB Stripe
+		stripe := NewStripe(tmpFile, 100*1024*1024, 0)
+		stripe.Init(100 * 1024 * 1024 / 512)
 		stripe.Open()
 		defer stripe.Close()
 
-		key := []byte("test_key")
+		convey.Convey("Small Object (Single Fragment)", func() {
+			key := []byte("small_key")
+			writer := NewCacheWriter(stripe, key)
+			reader := NewCacheReaderFromWriter(stripe, key, writer)
 
-		writer := NewCacheWriter(stripe, key)
-		reader := NewCacheReaderFromWriter(stripe, key, writer)
+			data := []byte("Small Data < 1MB")
 
-		convey.Convey("Write and Read concurrently", func() {
-			data := []byte("Hello RWW World")
+			// Async Writer
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				writer.Write(data)
+				writer.Close()
+			}()
 
-			// Write partial
-			n, err := writer.Write(data[:5])
-			convey.So(n, convey.ShouldEqual, 5)
+			buf := make([]byte, len(data))
+			n, err := io.ReadFull(reader, buf)
+
 			convey.So(err, convey.ShouldBeNil)
+			convey.So(n, convey.ShouldEqual, len(data))
+			convey.So(string(buf), convey.ShouldEqual, string(data))
+		})
 
-			// Read partial
-			buf := make([]byte, 10)
-			n, err = reader.Read(buf)
-			convey.So(n, convey.ShouldEqual, 5)
+		convey.Convey("Large Object (Multi-Fragment)", func() {
+			key := []byte("large_key")
+			writer := NewCacheWriter(stripe, key)
+			reader := NewCacheReaderFromWriter(stripe, key, writer)
+
+			// 2.5MB Data (TargetFragmentSize is 1MB)
+			// This forces the writer to flush Frag 1 and Frag 2 to disk/ramcache
+			// while reader is reading.
+			dataSize := int(2.5 * 1024 * 1024)
+			data := make([]byte, dataSize)
+			for i := 0; i < dataSize; i++ {
+				data[i] = byte(i % 256)
+			}
+
+			// Async Writer
+			go func() {
+				chunkSize := 512 * 1024 // 512KB writes
+				totalWritten := 0
+				for i := 0; i < dataSize; i += chunkSize {
+					end := i + chunkSize
+					if end > dataSize {
+						end = dataSize
+					}
+					writer.Write(data[i:end])
+					totalWritten += (end - i)
+
+					// Small delay to allow reader to catch up or fall behind
+					time.Sleep(5 * time.Millisecond)
+				}
+				writer.Close()
+			}()
+
+			readBuf := make([]byte, dataSize)
+			n, err := io.ReadFull(reader, readBuf)
+
+			// Reader might see ErrReadFromDisk if the writer flushed part of the buffer before reader could read it from RAM.
+			// However, since we are mocking a Stripe with a file, io.ReadFull should eventually work if logic falls back to disk.
+			// BUT, the test uses io.ReadFull, which returns EOF if stream ends.
+			// With RWW, reader waits for writer.
+			// If writer flushes, Reader gets ErrReadFromDisk from `ReadAt`.
+			// The updated `readFromWriter` handles this by loading fragment from disk.
+			// So io.ReadFull should succeed transparently.
+
 			convey.So(err, convey.ShouldBeNil)
-			convey.So(string(buf[:n]), convey.ShouldEqual, "Hello")
-
-			// Write more
-			n, err = writer.Write(data[5:])
-			convey.So(n, convey.ShouldEqual, 10)
-			convey.So(err, convey.ShouldBeNil)
-
-			// Read more
-			n, err = reader.Read(buf)
-			convey.So(n, convey.ShouldEqual, 10)
-			convey.So(err, convey.ShouldBeNil)
-			convey.So(string(buf[:n]), convey.ShouldEqual, " RWW World")
-
-			// Close writer
-			writer.Close()
-
-			// Read EOF
-			n, err = reader.Read(buf)
-			convey.So(n, convey.ShouldEqual, 0)
-			convey.So(err, convey.ShouldEqual, io.EOF)
+			convey.So(n, convey.ShouldEqual, dataSize)
+			convey.So(bytes.Equal(readBuf, data), convey.ShouldBeTrue)
 		})
 	})
 }
@@ -336,13 +368,13 @@ func TestCacheRemove(t *testing.T) {
 		vc2.Write(data)
 		// vc2 is still open, so it's in OpenDir
 
-		convey.So(stripe.OpenDir.OpenRead(key2), convey.ShouldNotBeNil)
+		convey.So(stripe.OpenDir.Get(key2), convey.ShouldNotBeNil)
 
 		cache2 := &Cache{Stripes: []*Stripe{stripe}}
 		err = cache2.Remove(key2)
 		convey.So(err, convey.ShouldBeNil)
 
-		convey.So(stripe.OpenDir.OpenRead(key2), convey.ShouldBeNil)
+		convey.So(stripe.OpenDir.Get(key2), convey.ShouldBeNil)
 		vc2.Close()
 	})
 

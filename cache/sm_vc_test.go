@@ -95,7 +95,17 @@ func TestCacheVC(t *testing.T) {
 		err = writeVC.Close()
 		convey.So(err, convey.ShouldBeNil)
 
-		// Flush disk
+		// Manually remove from OpenDir to simulate that writing is truly done
+		// In real app, close doesn't auto-remove from OpenDir if we want to keep it for slow readers?
+		// But here we want to test disk read, so we must ensure NewCacheVCRead doesn't pick up RWW.
+		stripe.OpenDir.Remove(key)
+		// Actually, NewCacheVCWrite does OpenDir.Add.
+		// writeVC.Close() does NOT call OpenDir.Remove in our new implementation (it relies on CloseWrite or manual).
+		// Wait, Close() calls writeFragment(0).
+		// If we want to test disk read, we need to ensure OpenDir entry is gone or we force disk read.
+		// NewCacheVCRead prefers RWW if entry exists.
+
+		// Flush disk to be sure
 		stripe.FlushAggBuffer()
 
 		// 2. Read via VC

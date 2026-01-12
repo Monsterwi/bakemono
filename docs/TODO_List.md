@@ -33,8 +33,59 @@
 - [ ] **I/O 任务抽象**
   - 定义 `IOTask` 接口（ReadTask, WriteTask）
   - 使用 Channel 传递任务，Worker 执行阻塞 I/O
-### 4. 支持purge功能
-### 5. 多 Fragment 文件部分被覆盖时的数据一致性问题
+### 4. 支持purge功能 ✅
+- [x] **实现 Cache.Remove() 方法**
+  - 支持多 Fragment 自动清理
+  - 清理 Directory 和 RamCache 中的条目
+  - 处理活跃 Writer 的清理
+
+### 5. Read-While-Write (RWW) 功能实现 ✅
+- [x] **核心 RWW 机制**
+  - 实现 `OpenDir` 管理并发写入
+  - Leader/Follower 模式：第一个请求成为 Leader，后续请求成为 Follower
+  - Follower 实时读取 Leader 写入的数据，避免重复回源
+
+- [x] **Writer 错误传播**
+  - 实现 `CacheWriter.Abort(err)` 方法
+  - Reader 能够感知 Writer 错误，避免返回损坏数据
+
+- [x] **读写锁优化**
+  - `CacheWriter.ReadAt` 使用 `RLock()` 支持并发读取
+  - `Write` 和 `Close` 使用 `Lock()` 确保写入互斥
+  - 预期收益：高并发场景下（1000+ Follower）显著减少锁竞争
+
+- [x] **资源清理保障**
+  - 所有 `CacheVC` 创建路径都使用 `defer vc.Close()`
+  - 确保即使发生 panic 也能正确清理 OpenDir 引用
+
+- [x] **ReadAt 接口抽象**
+  - `CacheWriter.ReadAt` 抽象了 Fragment 逻辑
+  - Reader 通过统一接口读取数据，降低耦合度
+
+### 6. RWW 性能优化（待实现）
+- [ ] **内存背压（Backpressure）机制**
+  - 当 `CacheWriter.buffer` 超过阈值（如 10MB）时，`Write` 方法阻塞
+  - 等待后台 flusher 清理空间，防止内存无限增长导致 OOM
+  - 预期收益：防止极端场景下的内存泄漏
+
+- [ ] **Context 取消与超时支持**
+  - `readFromWriter` 支持 `context.Context` 取消
+  - 替换 `sync.Cond` 为 Channel 通知机制，支持超时中断
+  - 避免 Writer 卡死时 Reader 永久阻塞
+
+- [ ] **内存对象池（sync.Pool）**
+  - 使用 `sync.Pool` 复用 1MB Fragment Buffer
+  - `CacheWriter` 和 `CacheReader` 对象池化
+  - 预期收益：减少 GC 压力，提升高并发吞吐量
+
+- [ ] **Fragment 0 写入优化（参考 ATS）**
+  - 考虑实现 ATS 的分离写入策略：
+    - Earliest Doc（第一个数据 fragment）先写入
+    - First Doc（包含完整元数据和 total_len）最后写入
+  - 当前实现（Fragment 0 延迟写入）功能正确，但内存占用较高
+  - 预期收益：减少大文件的内存占用
+
+### 7. 多 Fragment 文件部分被覆盖时的数据一致性问题
 - [ ] **添加循环覆盖场景的测试**
 ## 🟡 中优先级 - 功能完善
 

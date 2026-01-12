@@ -64,10 +64,11 @@ func NewCacheReader(s *Stripe, key []byte) *CacheReader {
 // NewCacheReaderFromWriter creates a reader that reads from an active writer (RWW).
 func NewCacheReaderFromWriter(s *Stripe, key []byte, w *CacheWriter) *CacheReader {
 	return &CacheReader{
-		Stripe: s,
-		Key:    key,
-		writer: w,
-		Info:   w.Info, // Share info from writer
+		Stripe:   s,
+		Key:      key,
+		FirstKey: key,
+		writer:   w,
+		Info:     w.Info, // Share info from writer
 	}
 }
 
@@ -130,6 +131,13 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 			return 0, err
 		}
 		r.fragmentIndex = 0 // Mark that we've loaded fragment 0
+
+		// Optimization: Check if it's a single fragment object
+		// If so, we can avoid complex multi-fragment logic check in loop
+		// But our loop handles it naturally via totalLen check.
+		// However, we can set a flag or just trust totalLen.
+		// Actually, standard Read loop uses totalLen to determine EOF.
+		// r.totalLen is set in parseDoc (called by loadFragment).
 	}
 
 	totalBytesRead := 0
@@ -144,6 +152,16 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 				}
 				return totalBytesRead, nil
 			}
+
+			// Optimization: If the loaded doc (Fragment 0) says it's a single fragment,
+			// and we ran out of buffer, it means EOF (or corrupted/truncated file).
+			// We don't need to try loading next fragment.
+			// But we need to access the Doc. parseDocFromBuf parses from r.buf, which is empty here!
+			// We should have cached this state.
+			// Since we don't store Doc in CacheReader, we rely on r.totalLen.
+			// r.totalLen is authoritative. If we haven't reached it, we MUST load next fragment.
+			// If SingleFragment is true, r.totalLen == r.doc.DataLen().
+			// So totalLen check above covers it.
 
 			// Load next fragment
 			r.fragmentIndex++
@@ -343,27 +361,85 @@ func (r *CacheReader) parseDoc() error {
 	return nil
 }
 
+// readFromWriter reads data from an active writer (RWW).
+// It uses r.fragmentIndex and r.offset to track progress, similar to standard Read.
 func (r *CacheReader) readFromWriter(p []byte) (n int, err error) {
-	r.writer.mutex.RLock()
-	defer r.writer.mutex.RUnlock()
+	// Simplified Logic using Writer.ReadAt
+	for {
+		// Try to read from Writer's memory buffer
+		n, err := r.writer.ReadAt(r.totalRead, p)
+		if err == ErrReadFromDisk {
+			// Data is not in buffer (flushed to disk/RAM)
+			// Fallback to loading fragment as if we were a normal reader
 
-	available := int64(len(r.writer.buffer)) - r.offset
-	if available <= 0 {
-		if r.writer.closed {
-			return 0, io.EOF
+			// Calculate logical fragment index based on totalRead
+			// Assuming standard fragment size logic matches writer's flushing logic
+			// Note: We need to handle this carefully.
+			// Ideally, we load the specific fragment corresponding to r.totalRead
+
+			// For simplicity in this Refactor Step 1:
+			// If we get ErrReadFromDisk, it means we are behind.
+			// We temporarily unlock writer to avoid deadlock?
+			// But ReadAt already unlocked it.
+
+			// We need to implement the "Read from Disk" logic here for the RWW case.
+			// Which is remarkably similar to the standard Read loop!
+
+			// Actually, if we are in RWW mode, we are usually "tailing" the writer.
+			// Being far behind is possible.
+
+			// Let's reuse loadFragment logic?
+			// Calculate which fragment we are in:
+			fragIdx := int(r.totalRead / TargetFragmentSize)
+			fragOffset := r.totalRead % TargetFragmentSize
+
+			// Load that fragment
+			if err := r.loadFragment(fragIdx); err != nil {
+				return 0, err
+			}
+
+			// Read from loaded buffer
+			// r.buf contains [DocHeader][Info][Data]
+			// We need to find Data Start
+			doc, err := r.parseDocFromBuf()
+			if err != nil {
+				return 0, err
+			}
+			dataStart := int64(DocHeaderSize) + int64(doc.HLen)
+
+			// Check available in loaded fragment
+			// Note: r.buf might contain the WHOLE fragment or just part?
+			// loadFragment loads what's on disk.
+			available := int64(len(r.buf)) - dataStart - fragOffset
+			if available <= 0 {
+				// This shouldn't happen if Writer said "ReadFromDisk"
+				return 0, fmt.Errorf("inconsistent state: writer said disk, but disk empty")
+			}
+
+			toRead := int64(len(p))
+			if toRead > available {
+				toRead = available
+			}
+
+			copy(p, r.buf[dataStart+fragOffset:dataStart+fragOffset+toRead])
+
+			r.totalRead += toRead
+			return int(toRead), nil
 		}
-		return 0, nil
+
+		if err != nil {
+			return n, err
+		}
+
+		if n > 0 {
+			r.totalRead += int64(n)
+			return n, nil
+		}
+
+		// If n==0 and err==nil, loop (Wait inside ReadAt should handle waiting,
+		// but ReadAt currently waits or returns EOF/Err).
+		// Our ReadAt implementation waits.
 	}
-
-	toRead := int64(len(p))
-	if toRead > available {
-		toRead = available
-	}
-
-	copy(p, r.writer.buffer[r.offset:r.offset+toRead])
-	r.offset += toRead
-
-	return int(toRead), nil
 }
 
 func (r *CacheReader) checkEvacuation(d Dir, key []byte) {
