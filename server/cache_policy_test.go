@@ -165,8 +165,8 @@ func TestTruncatedOriginDoesNotCommit(t *testing.T) {
 		}
 		_, err = io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if err == nil {
-			t.Fatal("expected truncated response")
+		if err != nil || resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("incomplete origin response: status=%d err=%v", resp.StatusCode, err)
 		}
 	}
 	if calls.Load() != 2 {
@@ -180,7 +180,7 @@ func (w *disconnectedClient) Header() http.Header       { return w.header }
 func (w *disconnectedClient) WriteHeader(int)           {}
 func (w *disconnectedClient) Write([]byte) (int, error) { return 0, fmt.Errorf("client disconnected") }
 
-func TestClientFailureDoesNotCommit(t *testing.T) {
+func TestClientFailureDoesNotDiscardCompletedObject(t *testing.T) {
 	s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		fmt.Fprint(w, "complete origin")
@@ -194,8 +194,8 @@ func TestClientFailureDoesNotCommit(t *testing.T) {
 		s.ServeHTTP(&disconnectedClient{make(http.Header)}, httptest.NewRequest("GET", "http://cache.test/item", nil))
 	}()
 	got := fetch(s, "http://cache.test/item", nil)
-	if calls.Load() != 2 || got.Body.String() != "complete origin" {
-		t.Fatalf("failed transfer cached: calls=%d body=%q", calls.Load(), got.Body.String())
+	if calls.Load() != 1 || got.Body.String() != "complete origin" {
+		t.Fatalf("completed object lost after client failure: calls=%d body=%q", calls.Load(), got.Body.String())
 	}
 }
 
@@ -284,16 +284,19 @@ func TestConcurrentFillDoesNotShareAnUncommittedResponse(t *testing.T) {
 	<-started
 	secondDone := make(chan string, 1)
 	go func() { secondDone <- fetch(s, "http://cache.test/item", nil).Body.String() }()
+
+	waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 })
 	select {
-	case body := <-secondDone:
-		if body != "second" || calls.Load() != 2 {
-			t.Errorf("concurrent request shared first body: %q calls=%d", body, calls.Load())
-		}
-	case <-time.After(time.Second):
-		t.Error("concurrent request waited for an uncommitted object")
+	case <-secondDone:
+		t.Fatal("uncommitted body escaped")
+	default:
 	}
 	close(release)
 	<-firstDone
+	if body := <-secondDone; body != "first" || calls.Load() != 1 {
+		t.Fatalf("body=%q calls=%d", body, calls.Load())
+	}
+
 }
 
 func TestRoutingNamespaceSeparatesOrigins(t *testing.T) {
@@ -344,8 +347,8 @@ func TestTruncatedChunkedOriginAbortsDownstream(t *testing.T) {
 		}
 		_, err = io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if err == nil {
-			t.Fatal("truncated chunked body appeared complete downstream")
+		if err != nil || resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("truncated chunked origin status=%d err=%v", resp.StatusCode, err)
 		}
 	}
 	if calls.Load() != 2 {

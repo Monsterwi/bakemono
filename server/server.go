@@ -32,6 +32,7 @@ type Server struct {
 	httpServer           *http.Server
 	tlsConfig            *tls.Config
 	counters             counters
+	fills                *fillGroup
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	mu                   sync.Mutex
@@ -66,6 +67,7 @@ func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy, options ...O
 		option(s)
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.fills = &fillGroup{ctx: s.ctx, cache: c, tasks: make(map[string]*fillTask)}
 	s.startupFiles, s.initErr = runtimeFiles(cfg)
 	if s.initErr == nil {
 		s.current, s.initErr = newRuntime(cfg, p, 1)
@@ -190,6 +192,7 @@ func (s *Server) ShutdownContext(ctx context.Context) error {
 			<-done
 		}
 		s.cancel()
+		s.fills.producers.Wait()
 		s.mu.Lock()
 		s.closeRetiredLocked()
 		if s.current != nil {

@@ -19,6 +19,8 @@ type Stats struct {
 	InFlight, Queued, CacheWriters, CacheQueued, DiskQueued                                                                     int
 	BufferReserved, DiskBufferedBytes                                                                                           int64
 	Requests, Rejected, Cancelled, Hits, Misses, Bypass, Bytes, TTFBCount, TTFBNanoseconds, CacheWriteErrors, CacheWriteSkipped uint64
+	SharedFillTasks, SharedFillWaiters                                                                                          int
+	SharedFillJoined, SharedFillCompleted, SharedFillUnshareable, SharedFillFailed, SharedFillCancelled                         uint64
 	Origin                                                                                                                      proxy.Stats
 }
 
@@ -47,6 +49,13 @@ func (s *Server) Stats() Stats {
 	}
 	s.mu.Unlock()
 
+	if s.fills != nil {
+		s.fills.mu.Lock()
+		st.SharedFillTasks, st.SharedFillWaiters = s.fills.active, s.fills.waiters
+		st.SharedFillJoined, st.SharedFillCompleted, st.SharedFillUnshareable = s.fills.joined, s.fills.completed, s.fills.unshareable
+		st.SharedFillFailed, st.SharedFillCancelled = s.fills.failed, s.fills.cancelled
+		s.fills.mu.Unlock()
+	}
 	if s.cache != nil {
 		for _, stripe := range s.cache.Stripes {
 			q, b := stripe.AggBuffer.Stats()

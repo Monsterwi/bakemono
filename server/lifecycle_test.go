@@ -190,9 +190,11 @@ func TestListenerBoundsSlowHeadersAndClients(t *testing.T) {
 }
 
 func TestCacheWriterQueueCancellationAndOverflow(t *testing.T) {
+	entered := make(chan struct{})
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=60")
 		if r.URL.Path == "/held" {
+			close(entered)
 			io.WriteString(w, "a")
 			w.(http.Flusher).Flush()
 			<-r.Context().Done()
@@ -207,11 +209,19 @@ func TestCacheWriterQueueCancellationAndOverflow(t *testing.T) {
 	s := lifecycleServer(t, origin.URL, cfg)
 	frontend := httptest.NewServer(s)
 	defer frontend.Close()
-	first, err := frontend.Client().Get(frontend.URL + "/held")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer first.Body.Close()
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	firstRequest, _ := http.NewRequestWithContext(firstCtx, "GET", frontend.URL+"/held", nil)
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		resp, _ := frontend.Client().Do(firstRequest)
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	request, _ := http.NewRequestWithContext(ctx, "GET", frontend.URL+"/queued", nil)
@@ -238,19 +248,20 @@ func TestCacheWriterQueueCancellationAndOverflow(t *testing.T) {
 	}
 	body, err := io.ReadAll(third.Body)
 	third.Body.Close()
-	if err != nil || string(body) != "complete" {
-		t.Fatalf("cache overload truncated origin: %q %v", body, err)
+	if err != nil || third.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("cache overload response=%d %q %v", third.StatusCode, body, err)
 	}
 	cancel()
 	if err := <-queued; !errors.Is(err, context.Canceled) {
 		t.Fatalf("queue cancel=%v", err)
 	}
-	first.Body.Close()
+	cancelFirst()
+	<-firstDone
 	deadline = time.After(time.Second)
 	for {
 		st := s.Stats()
 		if st.CacheWriters == 0 && st.CacheQueued == 0 && st.InFlight == 0 {
-			if st.BufferReserved != 0 || st.CacheWriteSkipped < 1 {
+			if st.BufferReserved != 0 || st.SharedFillFailed < 1 {
 				t.Fatalf("stats=%+v", st)
 			}
 			break
@@ -264,7 +275,7 @@ func TestCacheWriterQueueCancellationAndOverflow(t *testing.T) {
 	}
 }
 
-func TestOversizedStreamingFillReleasesReservationBeforeDownloadEnds(t *testing.T) {
+func TestOversizedUnknownLengthFillFailsAndReleasesReservation(t *testing.T) {
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=60")
 		io.WriteString(w, "abcdef")
@@ -283,15 +294,14 @@ func TestOversizedStreamingFillReleasesReservationBeforeDownloadEnds(t *testing.
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	prefix := make([]byte, 6)
-	if _, err = io.ReadFull(resp.Body, prefix); err != nil || string(prefix) != "abcdef" {
-		t.Fatalf("prefix=%q error=%v", prefix, err)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("oversized candidate status=%d", resp.StatusCode)
 	}
 	deadline := time.After(time.Second)
 	for {
 		st := s.Stats()
 		if st.CacheWriteSkipped == 1 && st.CacheWriters == 0 {
-			if st.InFlight != 1 || st.BufferReserved != 0 {
+			if st.InFlight != 0 || st.BufferReserved != 0 {
 				t.Fatalf("stats=%+v", st)
 			}
 			break
@@ -305,7 +315,7 @@ func TestOversizedStreamingFillReleasesReservationBeforeDownloadEnds(t *testing.
 	}
 }
 
-func TestCacheCommitFailureDoesNotTruncateOrigin(t *testing.T) {
+func TestCacheCommitFailureDoesNotPublishOrigin(t *testing.T) {
 	var calls atomic.Int64
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -335,8 +345,8 @@ func TestCacheCommitFailureDoesNotTruncateOrigin(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, httptest.NewRequest("GET", "http://front.test/object", nil))
-		if w.Code != 200 || w.Body.String() != "complete origin body" {
-			t.Fatalf("cache error interrupted origin: %d %q", w.Code, w.Body.String())
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("cache error published uncommitted origin: %d %q", w.Code, w.Body.String())
 		}
 	}
 	st := s.Stats()
