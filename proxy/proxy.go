@@ -222,13 +222,38 @@ func (h *HTTPProxy) Proxy(r *http.Request) (*resty.Response, error) {
 // ProxyWithOriginHeaders also returns a header snapshot before hop-by-hop removal
 // so cache admission cannot lose privacy or freshness signals.
 func (h *HTTPProxy) ProxyWithOriginHeaders(r *http.Request) (*resty.Response, http.Header, error) {
+	origin, err := h.SelectOrigin(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	return origin.ProxyWithOriginHeaders(r)
+}
+
+// Origin pins one configured target. Its owning HTTPProxy must remain open for
+// the complete operation; this handle does not own a separate connection pool.
+type Origin struct {
+	proxy *HTTPProxy
+	host  string
+}
+
+func (h *HTTPProxy) SelectOrigin(r *http.Request) (*Origin, error) {
 	host, err := h.lb.Balance(h.CacheKey(r))
 	if err != nil {
-		return nil, nil, fmt.Errorf("balance: %w", err)
+		return nil, fmt.Errorf("balance: %w", err)
 	}
+	return &Origin{proxy: h, host: host}, nil
+}
+
+// Identity includes the configured scheme, authority, base path and fixed query.
+func (o *Origin) Identity() string { return o.host }
+
+// ProxyWithOriginHeaders uses this target even if later selections choose a
+// different origin. Failures never switch a partially fetched representation.
+func (o *Origin) ProxyWithOriginHeaders(r *http.Request) (*resty.Response, http.Header, error) {
+	h := o.proxy
 	out := r.Clone(r.Context())
-	h.rewrite(&httputil.ProxyRequest{In: r, Out: out}, h.targets[host])
-	resp, err := h.roundTrip(out, host)
+	h.rewrite(&httputil.ProxyRequest{In: r, Out: out}, h.targets[o.host])
+	resp, err := h.roundTrip(out, o.host)
 	if err != nil {
 		return nil, nil, err
 	}
