@@ -16,6 +16,7 @@ CONFIG proxy.config.http.server_addr STRING :9090
 CONFIG proxy.config.http.server_ports STRING 9090
 CONFIG proxy.config.log.logfile_dir STRING /tmp/bakemono/logs
 CONFIG proxy.config.http.trusted_proxies STRING 192.0.2.0/24,2001:db8::/32
+CONFIG proxy.config.http.purge_token STRING test-only-purge-secret
 `
 
 	storageConfigPath := filepath.Join(tmpDir, "storage.config")
@@ -41,6 +42,10 @@ CONFIG proxy.config.http.trusted_proxies STRING 192.0.2.0/24,2001:db8::/32
 		t.Fatalf("trusted proxies = %v", cfg.TrustedProxies)
 	}
 
+	if cfg.PurgeToken != "test-only-purge-secret" {
+		t.Fatal("PURGE token not loaded")
+	}
+
 	// Verify loaded values
 	if cfg.ServerPort != 9090 {
 		t.Errorf("Expected ServerPort to be 9090, got %d", cfg.ServerPort)
@@ -57,6 +62,10 @@ func TestGetDefaultConfig(t *testing.T) {
 
 	if cfg == nil {
 		t.Fatal("Expected non-nil config")
+	}
+
+	if cfg.PurgeToken != "" {
+		t.Fatal("default config enables PURGE")
 	}
 
 	if cfg.ServerPort != 80 {

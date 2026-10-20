@@ -10,6 +10,8 @@ import (
 
 // CacheVC owns one read, write or removal operation and its acquired reference.
 type CacheVC struct {
+	done                       <-chan struct{}
+	readCancel                 context.CancelFunc
 	Stripe                     *Stripe
 	Key                        []byte
 	reading, writing, removing bool
@@ -24,8 +26,14 @@ type CacheVC struct {
 }
 
 func NewCacheVCRead(stripe *Stripe, key []byte) (*CacheVC, error) {
-	vc := &CacheVC{Stripe: stripe, Key: append([]byte(nil), key...), reading: true}
+	ctx, cancel := context.WithCancel(context.Background())
+	vc := &CacheVC{Stripe: stripe, Key: append([]byte(nil), key...), reading: true, done: ctx.Done(), readCancel: cancel}
 	stripe.mu.Lock()
+	if stripe.closing {
+		stripe.mu.Unlock()
+		cancel()
+		return nil, ErrCacheClosed
+	}
 	vc.generation = stripe.OpenDir.Generation()
 	vc.entry = stripe.OpenDir.Acquire(key)
 	stripe.mu.Unlock()
@@ -34,6 +42,7 @@ func NewCacheVCRead(stripe *Stripe, key []byte) (*CacheVC, error) {
 	} else {
 		vc.reader = NewCacheReader(stripe, key)
 	}
+	vc.reader.ctx = ctx
 	return vc, nil
 }
 
@@ -113,6 +122,8 @@ func (vc *CacheVC) WaitForHeaders(timeout time.Duration) error {
 		vc.Info, vc.reader.Info = info, info
 		vc.reader.mutex.Unlock()
 		return nil
+	case <-vc.done:
+		return fmt.Errorf("reader closed")
 	case <-time.After(timeout):
 		return fmt.Errorf("timeout waiting for headers")
 	}
@@ -138,6 +149,9 @@ func (vc *CacheVC) Write(p []byte) (int, error) {
 func (vc *CacheVC) Close() error {
 	vc.closeOnce.Do(func() {
 		vc.closed.Store(true)
+		if vc.readCancel != nil {
+			vc.readCancel()
+		}
 		if vc.writing {
 			vc.closeErr = vc.writer.Close()
 			vc.writer.cancel()
@@ -154,6 +168,9 @@ func (vc *CacheVC) Abort(err error) {
 	}
 	vc.closeOnce.Do(func() {
 		vc.closed.Store(true)
+		if vc.readCancel != nil {
+			vc.readCancel()
+		}
 		if vc.writing {
 			vc.writer.Abort(err)
 			vc.closeErr = vc.writer.Close()

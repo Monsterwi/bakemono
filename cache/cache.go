@@ -199,6 +199,11 @@ func (c *Cache) OpenReadCommitted(key []byte) (*CacheVC, error) {
 	if stripe == nil {
 		return nil, fmt.Errorf("no stripe found")
 	}
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+	if stripe.closing {
+		return nil, ErrCacheClosed
+	}
 	if stripe.OpenDir.Get(key) != nil {
 		return nil, fmt.Errorf("cache write in progress")
 	}
