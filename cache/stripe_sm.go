@@ -82,10 +82,7 @@ func (sm *StripeSM) mainLoop() {
 	for {
 		select {
 		case <-sm.ctx.Done():
-			// Context cancelled, exit loop
-			// Perform final flush and save before exiting
-			sm.flushAggBuffer()
-			sm.saveStripe()
+			// Stripe.Close owns the final flush/save and returns their errors.
 			return
 		case <-flushTicker.C:
 			// Periodic flush
@@ -122,8 +119,7 @@ func (sm *StripeSM) flushAggBuffer() {
 
 func (sm *StripeSM) saveStripe() {
 	// Save stripe metadata (Header + Directory) to disk
-	// If the stripe is already closed (Fd == nil), skip silently to avoid noisy errors during shutdown.
-	if sm.Stripe == nil || sm.Stripe.Fd == nil {
+	if sm.Stripe == nil {
 		logger.Debugf("StripeSM: skip save (stripe not open)")
 		return
 	}

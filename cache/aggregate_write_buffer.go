@@ -1,310 +1,312 @@
 package cache
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"sync"
 )
 
 const (
-	AggBufferSize    = 4 * 1024 * 1024 // 4MB
+	AggBufferSize    = 4 * 1024 * 1024
 	AggHighWaterMark = AggBufferSize / 2
 )
 
-// PendingWriter represents a writer waiting for the buffer to be flushed.
-// In ATS this is CacheVC.
-type PendingWriter interface {
-	OnLogFlush(err error)
+type PendingWriter interface{ OnLogFlush(error) }
+
+// FlushTask owns its bytes until NotifyFlushDone. Allocation, including wrap,
+// happens once in Add; the disk worker must use this exact offset and generation.
+type FlushTask struct {
+	Buffer     []byte
+	Writers    []PendingWriter
+	Offset     int64
+	Generation uint64
 }
 
-// FlushTask represents a buffer that needs to be flushed
-type FlushTask struct {
-	Buffer  []byte
-	Writers []PendingWriter
-	// The offset where this buffer starts (relative to the stream or absolute?)
-	// Not strictly needed if we just append, but good for debug
+type allocation struct {
+	offset               int64
+	generation, sequence uint64
 }
+
+var ErrCacheClosed = errors.New("cache storage closed")
 
 type AggregateWriteBuffer struct {
-	// Double buffering
-	buffers   [2][]byte
-	bufferPos [2]int
-	activeIdx int
-
-	// Current write cursor (absolute disk offset)
-	writeCursor int64
-
-	// Pending writers for the active buffer
-	pendingWriters [2][]PendingWriter
-
-	// Synchronization
-	mu sync.Mutex
-	// Condition to wait when both buffers are full
-	cond *sync.Cond
-
-	// Flush coordination
-	flushChan chan FlushTask
-	// Track if the other buffer is currently flushing/busy
-	isFlushing bool
-
-	// Stripe Bounds
-	minOffset int64
-	maxOffset int64
+	buffers                         [2][]byte
+	bufferPos                       [2]int
+	bufferStart                     [2]int64
+	bufferGeneration                [2]uint64
+	bufferSequence                  [2]uint64
+	pendingWriters                  [2][]PendingWriter
+	activeIdx                       int
+	writeCursor                     int64
+	generation, sequence, completed uint64
+	mu                              sync.Mutex
+	changed                         chan struct{}
+	flushChan                       chan FlushTask
+	isFlushing                      bool
+	minOffset, maxOffset            int64
+	err                             error
+	closed                          bool
 }
 
 func NewAggregateWriteBuffer() *AggregateWriteBuffer {
-	b := &AggregateWriteBuffer{
-		buffers: [2][]byte{
-			make([]byte, AggBufferSize),
-			make([]byte, AggBufferSize),
-		},
-		pendingWriters: [2][]PendingWriter{
-			make([]PendingWriter, 0),
-			make([]PendingWriter, 0),
-		},
-		activeIdx: 0,
-		flushChan: make(chan FlushTask, 1), // Buffer of 1 (the other buffer)
-	}
-	b.cond = sync.NewCond(&b.mu)
-	return b
+	return &AggregateWriteBuffer{buffers: [2][]byte{make([]byte, AggBufferSize), make([]byte, AggBufferSize)}, changed: make(chan struct{}), flushChan: make(chan FlushTask, 1)}
 }
 
-func (b *AggregateWriteBuffer) Init(startOffset int64) {
+func (b *AggregateWriteBuffer) Init(offset int64) { b.initPosition(offset, false) }
+func (b *AggregateWriteBuffer) initPosition(offset int64, phase bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.writeCursor = startOffset
-	// TODO: remove this
-	b.minOffset = startOffset
-	// Default maxOffset to very large if not set (or 0 implies no limit?)
-	// To avoid breaking existing tests that don't set bounds, we can leave it 0 and check if > 0
+	b.writeCursor = offset
+	if b.maxOffset == 0 {
+		b.minOffset = offset
+	}
+	if phase {
+		b.generation = 1
+	} else {
+		b.generation = 0
+	}
 }
-
-// TODO: remove this
 func (b *AggregateWriteBuffer) SetBounds(min, max int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.minOffset = min
-	b.maxOffset = max
+	b.minOffset, b.maxOffset = min, max
 	if b.writeCursor < min {
 		b.writeCursor = min
 	}
 }
-
 func (b *AggregateWriteBuffer) IsEmpty() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.bufferPos[b.activeIdx] == 0 && !b.isFlushing
 }
-
 func (b *AggregateWriteBuffer) GetBufferPos() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.bufferPos[b.activeIdx]
 }
-
-// GetWriteCursor returns the current absolute write position for the next byte
 func (b *AggregateWriteBuffer) GetWriteCursor() int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.writeCursor
 }
 
-// Add adds a document to the buffer.
-// Returns the absolute disk offset where the data will be written.
-func (b *AggregateWriteBuffer) Add(data []byte, approxSize int, writer PendingWriter) (int64, error) {
+// Stats counts bounded aggregate bytes, including the buffer owned by disk I/O.
+func (b *AggregateWriteBuffer) Stats() (queued int, bufferedBytes int64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	// Wait if current buffer is full AND we can't swap (other buffer busy)
-	// Or if current buffer space is insufficient
+	bufferedBytes = int64(b.bufferPos[b.activeIdx])
+	if bufferedBytes > 0 {
+		queued++
+	}
+	if b.isFlushing {
+		queued++
+		bufferedBytes += int64(b.bufferPos[1-b.activeIdx])
+	}
+	return
+}
+func (b *AggregateWriteBuffer) Err() error    { b.mu.Lock(); defer b.mu.Unlock(); return b.err }
+func (b *AggregateWriteBuffer) signalLocked() { close(b.changed); b.changed = make(chan struct{}) }
+func (b *AggregateWriteBuffer) waitLocked(ctx context.Context) error {
+	ch := b.changed
+	b.mu.Unlock()
+	select {
+	case <-ch:
+	case <-ctx.Done():
+	}
+	b.mu.Lock()
+	return ctx.Err()
+}
+func (b *AggregateWriteBuffer) Add(data []byte, size int, writer PendingWriter) (int64, error) {
+	return b.AddContext(context.Background(), data, size, writer)
+}
+func (b *AggregateWriteBuffer) AddContext(ctx context.Context, data []byte, size int, writer PendingWriter) (int64, error) {
+	a, err := b.addContext(ctx, data, size, writer)
+	return a.offset, err
+}
+func (b *AggregateWriteBuffer) addContext(ctx context.Context, data []byte, _ int, writer PendingWriter) (allocation, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(data) == 0 || len(data) > AggBufferSize || (b.maxOffset != 0 && (b.maxOffset <= b.minOffset || int64(len(data)) > b.maxOffset-b.minOffset)) {
+		return allocation{}, fmt.Errorf("record does not fit aggregate or stripe")
+	}
 	for {
-		active := b.buffers[b.activeIdx]
-		pos := b.bufferPos[b.activeIdx]
-
-		// TODO: remove this
-		// Check Stripe Wrapping
-		// If adding this data would cross maxOffset, we MUST flush and wrap.
-		// Note: This assumes one chunk fits in maxOffset-minOffset (stripe size).
+		if b.err != nil {
+			return allocation{}, b.err
+		}
+		if b.closed {
+			return allocation{}, ErrCacheClosed
+		}
+		if err := ctx.Err(); err != nil {
+			return allocation{}, err
+		}
 		if b.maxOffset > 0 && b.writeCursor+int64(len(data)) > b.maxOffset {
-			if !b.isFlushing {
-				b.swapAndFlushLocked()
-				// Reset cursor to minOffset
-				b.writeCursor = b.minOffset
-				// Continue loop to add data to new buffer (at minOffset)
+			if b.isFlushing {
+				if err := b.waitLocked(ctx); err != nil {
+					return allocation{}, err
+				}
 				continue
 			}
-			// Must wait for flush to complete before wrapping
-			b.cond.Wait()
+			b.swapAndFlushLocked()
+			b.writeCursor = b.minOffset
+			b.generation++
 			continue
 		}
-
-		if len(data) <= len(active)-pos {
-			// Fits in current buffer
+		if b.bufferPos[b.activeIdx]+len(data) <= AggBufferSize {
 			break
 		}
-
-		// Current buffer full/insufficient.
-		// Try to swap.
 		if !b.isFlushing {
 			b.swapAndFlushLocked()
-			// After swap, re-check space (the new buffer is empty)
 			continue
 		}
-
-		// Other buffer is busy, we must wait (Backpressure)
-		b.cond.Wait()
+		if err := b.waitLocked(ctx); err != nil {
+			return allocation{}, err
+		}
 	}
-
-	// Write to active buffer
-	idx := b.activeIdx
-	pos := b.bufferPos[idx]
+	idx, pos := b.activeIdx, b.bufferPos[b.activeIdx]
+	if pos == 0 {
+		b.bufferStart[idx] = b.writeCursor
+		b.bufferGeneration[idx] = b.generation
+	}
 	copy(b.buffers[idx][pos:], data)
 	b.bufferPos[idx] += len(data)
-
 	if writer != nil {
 		b.pendingWriters[idx] = append(b.pendingWriters[idx], writer)
 	}
-
-	// Capture return offset
-	currentOffset := b.writeCursor
+	b.sequence++
+	b.bufferSequence[idx] = b.sequence
+	a := allocation{b.writeCursor, b.generation, b.sequence}
 	b.writeCursor += int64(len(data))
-
-	// Check High Water Mark
 	if b.bufferPos[idx] >= AggHighWaterMark && !b.isFlushing {
 		b.swapAndFlushLocked()
 	}
-
-	return currentOffset, nil
+	return a, nil
 }
-
-// swapAndFlushLocked initiates a flush of the current active buffer.
-// Must be called with lock held.
 func (b *AggregateWriteBuffer) swapAndFlushLocked() {
 	idx := b.activeIdx
-	if b.bufferPos[idx] == 0 {
+	if b.isFlushing || b.bufferPos[idx] == 0 || b.err != nil {
 		return
 	}
-
-	// Prepare task
-	task := FlushTask{
-		Buffer:  b.buffers[idx][:b.bufferPos[idx]], // Slice it
-		Writers: b.pendingWriters[idx],
-	}
-
-	// Swap
+	task := FlushTask{Buffer: b.buffers[idx][:b.bufferPos[idx]], Writers: b.pendingWriters[idx], Offset: b.bufferStart[idx], Generation: b.bufferGeneration[idx]}
 	b.isFlushing = true
-	b.activeIdx = (idx + 1) % 2
-	b.bufferPos[b.activeIdx] = 0 // Reset new active
-	b.pendingWriters[b.activeIdx] = b.pendingWriters[b.activeIdx][:0]
-
-	// Send to flusher
-	select {
-	case b.flushChan <- task:
-		// Sent
-	default:
-		// Should not happen if isFlushing logic is correct (channel size 1)
-		panic("flush channel full")
-	}
+	b.activeIdx = 1 - idx
+	b.bufferPos[b.activeIdx] = 0
+	b.pendingWriters[b.activeIdx] = nil
+	b.flushChan <- task
 }
-
-// TriggerFlush initiates a flush asynchronously if there is data.
 func (b *AggregateWriteBuffer) TriggerFlush() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.isFlushing {
-		b.swapAndFlushLocked()
-	}
-}
-
-// FlushSync forces a flush and waits for it to complete.
-func (b *AggregateWriteBuffer) FlushSync() error {
-	b.mu.Lock()
-	// Trigger flush of current data
 	b.swapAndFlushLocked()
-
-	for b.isFlushing {
-		b.cond.Wait()
-	}
-	b.mu.Unlock()
-	return nil
 }
+func (b *AggregateWriteBuffer) FlushSync() error { return b.FlushContext(context.Background()) }
 
-// NotifyFlushDone is called by the background worker when flush is complete
-func (b *AggregateWriteBuffer) NotifyFlushDone() {
+// FlushContext is a barrier for additions preceding this call, not future traffic.
+func (b *AggregateWriteBuffer) FlushContext(ctx context.Context) error {
+	b.mu.Lock()
+	target := b.sequence
+	b.mu.Unlock()
+	return b.flushThrough(ctx, target)
+}
+func (b *AggregateWriteBuffer) flushThrough(ctx context.Context, target uint64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	b.isFlushing = false
-	b.cond.Signal()    // Wake up writers waiting for space
-	b.cond.Broadcast() // Or broadcast to wake FlushSync
+	for {
+		if b.err != nil {
+			return b.err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if b.completed >= target {
+			return nil
+		}
+		b.swapAndFlushLocked()
+		if err := b.waitLocked(ctx); err != nil {
+			return err
+		}
+	}
 }
 
-// GetFlushChan returns the channel to receive flush tasks
-func (b *AggregateWriteBuffer) GetFlushChan() <-chan FlushTask {
-	return b.flushChan
+// NotifyFlushDone retains the first disk failure and wakes every waiter.
+func (b *AggregateWriteBuffer) NotifyFlushDone(errs ...error) {
+	b.mu.Lock()
+	if len(errs) > 0 && errs[0] != nil && b.err == nil {
+		b.err = errs[0]
+	}
+	if b.isFlushing {
+		b.completed = b.bufferSequence[1-b.activeIdx]
+		b.isFlushing = false
+	}
+	var failed []PendingWriter
+	if b.err != nil {
+		failed = b.pendingWriters[b.activeIdx]
+		b.pendingWriters[b.activeIdx] = nil
+		b.bufferPos[b.activeIdx] = 0
+	}
+	err := b.err
+	b.signalLocked()
+	b.mu.Unlock()
+	for _, w := range failed {
+		w.OnLogFlush(err)
+	}
 }
-
-// Reset resets the buffer (used in tests usually)
+func (b *AggregateWriteBuffer) Fail(err error) {
+	if err == nil {
+		return
+	}
+	b.mu.Lock()
+	if b.err == nil {
+		b.err = err
+	}
+	b.signalLocked()
+	b.mu.Unlock()
+}
+func (b *AggregateWriteBuffer) stopAdds() {
+	b.mu.Lock()
+	b.closed = true
+	b.signalLocked()
+	b.mu.Unlock()
+}
+func (b *AggregateWriteBuffer) GetFlushChan() <-chan FlushTask { return b.flushChan }
 func (b *AggregateWriteBuffer) Reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.bufferPos[0] = 0
-	b.bufferPos[1] = 0
+	b.bufferPos = [2]int{}
 	b.activeIdx = 0
 	b.isFlushing = false
 	b.writeCursor = 0
+	b.sequence = 0
+	b.completed = 0
+	b.generation = 0
+	b.err = nil
+	b.closed = false
+	b.signalLocked()
 }
-
-// DirAggBufValid checks if the directory entry is within the aggregation buffer.
-// Aligned with ATS Stripe::dir_agg_buf_valid.
-func (b *AggregateWriteBuffer) DirAggBufValid(dirOffset int64) bool {
+func (b *AggregateWriteBuffer) DirAggBufValid(offset int64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	// Check Active Buffer
-	startActive := b.writeCursor - int64(b.bufferPos[b.activeIdx])
-	if dirOffset >= startActive && dirOffset < b.writeCursor {
-		return true
-	}
-
-	// Check Flushing Buffer (if any)
-	if b.isFlushing {
-		flushIdx := (b.activeIdx + 1) % 2
-		lenFlush := b.bufferPos[flushIdx]
-		startFlush := startActive - int64(lenFlush)
-
-		if dirOffset >= startFlush && dirOffset < startActive {
+	for _, idx := range []int{b.activeIdx, 1 - b.activeIdx} {
+		if idx != b.activeIdx && !b.isFlushing {
+			continue
+		}
+		if offset >= b.bufferStart[idx] && offset < b.bufferStart[idx]+int64(b.bufferPos[idx]) {
 			return true
 		}
 	}
-
 	return false
 }
-
-// CopyFrom attempts to copy data from the buffer
-// Returns n bytes read, or 0 if range is not in buffer.
-func (b *AggregateWriteBuffer) CopyFrom(diskOffset int64, p []byte) int {
+func (b *AggregateWriteBuffer) CopyFrom(offset int64, p []byte) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	// Check Active Buffer
-	startActive := b.writeCursor - int64(b.bufferPos[b.activeIdx])
-	if diskOffset >= startActive {
-		off := int(diskOffset - startActive)
-		if off < b.bufferPos[b.activeIdx] {
-			return copy(p, b.buffers[b.activeIdx][off:b.bufferPos[b.activeIdx]])
+	for _, idx := range []int{b.activeIdx, 1 - b.activeIdx} {
+		if idx != b.activeIdx && !b.isFlushing {
+			continue
+		}
+		off := offset - b.bufferStart[idx]
+		if off >= 0 && off < int64(b.bufferPos[idx]) {
+			return copy(p, b.buffers[idx][off:b.bufferPos[idx]])
 		}
 	}
-
-	// Check Flushing Buffer (if any)
-	if b.isFlushing {
-		flushIdx := (b.activeIdx + 1) % 2
-		lenFlush := b.bufferPos[flushIdx]
-		startFlush := startActive - int64(lenFlush)
-
-		if diskOffset >= startFlush && diskOffset < startActive {
-			off := int(diskOffset - startFlush)
-			return copy(p, b.buffers[flushIdx][off:lenFlush])
-		}
-	}
-
 	return 0
 }

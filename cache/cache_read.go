@@ -22,6 +22,8 @@ type CacheReader struct {
 	writer *CacheWriter // If reading from a writer (RWW)
 
 	// Multi-fragment state
+	version       uint64
+	versionSet    bool
 	fragmentIndex int
 	totalRead     int64  // Total payload bytes read across all fragments
 	totalLen      uint64 // Total length from Fragment 0's Doc (cached)
@@ -65,11 +67,13 @@ func NewCacheReaderFromWriter(s *Stripe, key []byte, w *CacheWriter) *CacheReade
 	w.mutex.RLock()
 	defer w.mutex.RUnlock()
 	return &CacheReader{
-		Stripe:   s,
-		Key:      key,
-		FirstKey: key,
-		writer:   w,
-		Info:     w.Info, // Share info from writer
+		Stripe:     s,
+		Key:        key,
+		FirstKey:   key,
+		writer:     w,
+		version:    w.version,
+		versionSet: true,
+		Info:       w.Info, // Share info from writer
 	}
 }
 
@@ -256,10 +260,17 @@ func (r *CacheReader) loadFragment(idx int) error {
 }
 
 func (r *CacheReader) handleRead() error {
-	if r.loadFromRamCache() {
-		return nil
+	// The same lock excludes overwrite and publication for RAM and disk reads.
+	r.Stripe.mu.RLock()
+	defer r.Stripe.mu.RUnlock()
+	if !r.Stripe.dirValid(r.Dir) {
+		return fmt.Errorf("cache fragment overwritten or storage unavailable")
 	}
-	if r.loadFromAggregationBuffer() {
+	hit, _, current := r.Stripe.DirMgr.Get(r.Key)
+	if !hit || current.offset() != r.Dir.offset() || current.phase() != r.Dir.phase() {
+		return fmt.Errorf("cache fragment replaced")
+	}
+	if r.loadFromRamCache() {
 		return nil
 	}
 	return r.loadFromDisk()
@@ -301,7 +312,7 @@ func (r *CacheReader) loadFromAggregationBuffer() bool {
 func (r *CacheReader) loadFromDisk() error {
 	// Read from Disk
 	// ATS uses pread with approx size
-	if r.Stripe.Fd == nil {
+	if r.Stripe.disk == nil {
 		return fmt.Errorf("stripe fd closed")
 	}
 
@@ -311,9 +322,15 @@ func (r *CacheReader) loadFromDisk() error {
 	// ATS: io.aiocb.aio_nbytes = stripe->skip + stripe->len - io.aiocb.aio_offset; (Clamping)
 	// We trust approxSize but should clamp to stripe bounds.
 
+	if remaining := r.Stripe.Skip + r.Stripe.Len - offset; int64(size) > remaining {
+		size = uint64(remaining)
+	}
+	if size < DocHeaderSize {
+		return fmt.Errorf("invalid fragment bounds")
+	}
 	buf := make([]byte, size)
 
-	n, err := r.Stripe.Fd.ReadAt(buf, offset)
+	n, err := r.Stripe.disk.ReadAt(buf, offset)
 	if err != nil && n == 0 {
 		// logger.Debugf("loadFromDisk failed at offset %d: %v", offset, err)
 		return err
@@ -348,6 +365,15 @@ func (r *CacheReader) parseDoc() error {
 	if doc.FirstKey != docKey(r.FirstKey) {
 		return fmt.Errorf("doc first_key mismatch")
 	}
+
+	if doc.Len < DocHeaderSize || int64(doc.Len) > int64(len(r.buf)) || uint64(doc.HLen) > uint64(doc.Len-DocHeaderSize) {
+		return fmt.Errorf("invalid fragment length")
+	}
+	version := uint64(doc.SyncSerial)<<32 | uint64(doc.WriteSerial)
+	if r.versionSet && r.version != version {
+		return fmt.Errorf("cache object replaced during read")
+	}
+	r.version, r.versionSet = version, true
 
 	// For Fragment 0, cache TotalLen (authoritative source)
 	// Fragment 1+ have incorrect TotalLen (cumulative at write time), so we ignore them

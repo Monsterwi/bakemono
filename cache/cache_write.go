@@ -1,6 +1,9 @@
 package cache
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"sync"
@@ -31,17 +34,28 @@ type CacheWriter struct {
 	closed    bool
 	err       error // Error state if writer failed
 	published []struct {
-		key    []byte
-		offset int64
+		key        []byte
+		allocation allocation
+		size       int
 	}
-	od *OpenDirEntry // Reference to OpenDir entry
+	ctx     context.Context
+	version uint64
+	od      *OpenDirEntry // Reference to OpenDir entry
 }
 
 func NewCacheWriter(s *Stripe, key []byte) *CacheWriter {
 	w := &CacheWriter{
 		Stripe: s,
+		ctx:    context.Background(),
 		Key:    key,
 		buffer: make([]byte, 0, 4096), // Initial buffer size
+	}
+	var identity [8]byte
+	if _, err := rand.Read(identity[:]); err != nil {
+		w.err = fmt.Errorf("cache write identity: %w", err)
+		w.closed = true
+	} else {
+		w.version = binary.BigEndian.Uint64(identity[:])
 	}
 	w.cond = sync.NewCond(&w.mutex)
 	return w
@@ -166,14 +180,19 @@ func (w *CacheWriter) abortLocked(err error) {
 	w.closed = true
 	w.buffer = nil
 	w.frag0Data = nil
+	w.Stripe.mu.Lock()
 	for _, fragment := range w.published {
-		if w.Stripe.DirMgr != nil && !w.Stripe.DirMgr.deleteAt(fragment.key, fragment.offset) {
+		if !w.Stripe.allocationValid(fragment.allocation, fragment.size) {
+			continue
+		}
+		if w.Stripe.DirMgr != nil && !w.Stripe.DirMgr.deleteAt(fragment.key, fragment.allocation.offset) {
 			continue
 		}
 		if w.Stripe.RamCache != nil {
 			w.Stripe.RamCache.Delete(fragment.key)
 		}
 	}
+	w.Stripe.mu.Unlock()
 	w.published = nil
 	if w.od != nil {
 		w.od.signalReady()
@@ -188,26 +207,39 @@ func (w *CacheWriter) Write(p []byte) (n int, err error) {
 	defer w.mutex.Unlock()
 
 	if w.closed {
+		if w.err != nil {
+			return 0, w.err
+		}
 		return 0, fmt.Errorf("writer closed")
 	}
 
-	// Append new data to buffer
-	w.buffer = append(w.buffer, p...)
-	w.totalWritten += int64(len(p))
-
-	// Notify waiting readers that new data is available
-	w.cond.Broadcast()
-
-	// Try to flush chunks
-	if err := w.processBuffer(); err != nil {
-		// If flush fails, we should Abort self?
-		// Or just return error.
-		// Let's set error state so readers know.
+	if err := w.ctx.Err(); err != nil {
 		w.abortLocked(err)
 		return 0, err
 	}
-
-	return len(p), nil
+	if int64(len(p)) > w.Stripe.Skip+w.Stripe.Len-w.Stripe.Start-w.totalWritten {
+		err := fmt.Errorf("object exceeds stripe data area")
+		w.abortLocked(err)
+		return 0, err
+	}
+	// Consume caller buffers one fragment at a time; retained memory is independent
+	// of the size of a single Write call.
+	for len(p) > 0 {
+		take := TargetFragmentSize - len(w.buffer)
+		if take > len(p) {
+			take = len(p)
+		}
+		w.buffer = append(w.buffer, p[:take]...)
+		w.totalWritten += int64(take)
+		n += take
+		p = p[take:]
+		if err := w.processBuffer(); err != nil {
+			w.abortLocked(err)
+			return n, err
+		}
+	}
+	w.cond.Broadcast()
+	return n, nil
 }
 
 // processBuffer checks if we have enough data to write fragments.
@@ -343,13 +375,15 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 	approxSize := (totalDocSize + SectorSize - 1) / SectorSize * SectorSize
 
 	doc := &Doc{
-		Magic:    DocMagic,
-		VMajor:   docIdentityVersion,
-		Len:      uint32(totalDocSize),
-		TotalLen: uint64(w.totalWritten), // Final total len (valid for Frag 0 at Close)
-		FirstKey: firstKey,
-		Key:      currentKey,
-		HLen:     currentHLen,
+		Magic:       DocMagic,
+		VMajor:      docIdentityVersion,
+		Len:         uint32(totalDocSize),
+		TotalLen:    uint64(w.totalWritten), // Final total len (valid for Frag 0 at Close)
+		FirstKey:    firstKey,
+		Key:         currentKey,
+		HLen:        currentHLen,
+		SyncSerial:  uint32(w.version >> 32),
+		WriteSerial: uint32(w.version),
 	}
 
 	// Serialize Doc Struct
@@ -373,38 +407,49 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 	docBytes, _ = doc.MarshalBinary()
 	copy(fullData[0:], docBytes)
 
-	// Add to AggBuffer
-	// New API: Add returns the absolute disk offset where this will be written
-	diskOffset, err := w.Stripe.AggBuffer.Add(fullData, approxSize, nil)
+	a, err := w.Stripe.AggBuffer.addContext(w.ctx, fullData, approxSize, nil)
 	if err != nil {
 		return err
 	}
-
+	if err = w.Stripe.AggBuffer.flushThrough(w.ctx, a.sequence); err != nil {
+		return err
+	}
+	w.Stripe.mu.Lock()
+	defer w.Stripe.mu.Unlock()
+	if w.Stripe.storageErr != nil {
+		return w.Stripe.storageErr
+	}
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+	if w.Stripe.closing {
+		return ErrCacheClosed
+	}
+	if !w.Stripe.allocationValid(a, len(fullData)) {
+		return fmt.Errorf("fragment overwritten before publication")
+	}
+	if idx == 0 {
+		for _, p := range w.published {
+			hit, _, d := w.Stripe.DirMgr.Get(p.key)
+			if !hit || int64(d.offset()) != p.allocation.offset || d.phase() != (p.allocation.generation%2 != 0) || !w.Stripe.allocationValid(p.allocation, p.size) {
+				return fmt.Errorf("object fragment overwritten before commit")
+			}
+		}
+	}
+	_, err = w.Stripe.DirMgr.Set(thisKey, Offset(a.offset), approxSize, a.generation%2 != 0)
+	if err != nil {
+		return err
+	}
 	w.published = append(w.published, struct {
-		key    []byte
-		offset int64
-	}{append([]byte(nil), thisKey...), diskOffset})
-	// Populate RamCache (Fragment)
+		key        []byte
+		allocation allocation
+		size       int
+	}{append([]byte(nil), thisKey...), a, len(fullData)})
 	if w.Stripe.RamCache != nil {
 		w.Stripe.RamCache.Put(thisKey, fullData)
 	}
-
-	// Update Directory (Fragment)
-	if w.Stripe.DirMgr != nil {
-		// Get current phase from Stripe
-		w.Stripe.mu.RLock()
-		phase := w.Stripe.Phase
-		w.Stripe.mu.RUnlock()
-
-		_, err := w.Stripe.DirMgr.Set(thisKey, Offset(diskOffset), approxSize, phase)
-		if err != nil {
-			return fmt.Errorf("failed to update dir for fragment %d: %v", idx, err)
-		}
-		// update dir trie for prefix purge (only for fragment 0, which uses the original key)
-		if idx == 0 && w.Stripe.DirMgr.DirTrie != nil {
-			w.Stripe.DirMgr.DirTrie.Set(w.Key)
-		}
+	if idx == 0 && w.Stripe.DirMgr.DirTrie != nil {
+		w.Stripe.DirMgr.DirTrie.Set(w.Key)
 	}
-
 	return nil
 }

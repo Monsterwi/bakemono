@@ -1,8 +1,10 @@
 package cache
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash/crc32"
 
@@ -70,12 +72,11 @@ func (c *Cache) Init() error {
 }
 
 func (c *Cache) Close() error {
+	var errs []error
 	for _, s := range c.Stripes {
-		if err := s.Close(); err != nil {
-			return err
-		}
+		errs = append(errs, s.Close())
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // SaveAll saves the state of all stripes (Header + Directory) to disk.
@@ -123,12 +124,23 @@ func (c *Cache) OpenRead(key []byte) (*CacheVC, error) {
 // It returns a CacheVC if successful.
 // This matches ATS design where Cache.open_write() returns CacheVC*.
 func (c *Cache) OpenWrite(key []byte, opts int) (*CacheVC, error) {
+	return c.OpenWriteContext(context.Background(), key, opts)
+}
+
+func (c *Cache) OpenWriteContext(ctx context.Context, key []byte, opts int) (*CacheVC, error) {
 	stripe := c.KeyToStripe(key)
 	if stripe == nil {
 		return nil, fmt.Errorf("no stripe found")
 	}
 
-	return NewCacheVCWrite(stripe, key)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	vc, err := NewCacheVCWrite(stripe, key)
+	if err == nil {
+		vc.writer.ctx = ctx
+	}
+	return vc, err
 }
 
 // Remove deletes an entry from the cache.
