@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -121,7 +122,7 @@ func (h *CacheHTTPInfo) UnmarshalBinary(data []byte) error {
 		return err
 	}
 	methodBytes := make([]byte, methodLen)
-	if _, err := buf.Read(methodBytes); err != nil {
+	if _, err := io.ReadFull(buf, methodBytes); err != nil {
 		return err
 	}
 	h.RequestMethod = string(methodBytes)
@@ -132,7 +133,7 @@ func (h *CacheHTTPInfo) UnmarshalBinary(data []byte) error {
 		return err
 	}
 	urlBytes := make([]byte, urlLen)
-	if _, err := buf.Read(urlBytes); err != nil {
+	if _, err := io.ReadFull(buf, urlBytes); err != nil {
 		return err
 	}
 	h.RequestURL = string(urlBytes)
@@ -157,7 +158,7 @@ func (h *CacheHTTPInfo) UnmarshalBinary(data []byte) error {
 			return err
 		}
 		kBytes := make([]byte, kLen)
-		if _, err := buf.Read(kBytes); err != nil {
+		if _, err := io.ReadFull(buf, kBytes); err != nil {
 			return err
 		}
 
@@ -166,11 +167,15 @@ func (h *CacheHTTPInfo) UnmarshalBinary(data []byte) error {
 			return err
 		}
 		vBytes := make([]byte, vLen)
-		if _, err := buf.Read(vBytes); err != nil {
+		if _, err := io.ReadFull(buf, vBytes); err != nil {
 			return err
 		}
 
 		h.ResponseHeaders.Add(string(kBytes), string(vBytes))
+	}
+
+	if buf.Len() != 0 {
+		return fmt.Errorf("trailing HTTP metadata")
 	}
 
 	return nil

@@ -38,14 +38,30 @@ type Server struct {
 	shutdownErr, initErr error
 	backgroundStop       chan struct{}
 	background           sync.WaitGroup
+	now                  func() time.Time
 }
 
-func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy) *Server {
+// Option configures a server before it starts serving requests.
+type Option func(*Server)
+
+// WithClock supplies the clock used for HTTP age and freshness decisions.
+func WithClock(now func() time.Time) Option {
+	return func(s *Server) {
+		if now != nil {
+			s.now = now
+		}
+	}
+}
+
+func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy, options ...Option) *Server {
 	if cfg == nil {
 		cfg = appconfig.GetDefaultConfig()
 	}
 	cfg = cfg.WithDefaults()
-	s := &Server{config: cfg, cache: c, proxy: p, backgroundStop: make(chan struct{})}
+	s := &Server{config: cfg, cache: c, proxy: p, backgroundStop: make(chan struct{}), now: time.Now}
+	for _, option := range options {
+		option(s)
+	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.initErr = cfg.Validate()
 	if s.initErr == nil {

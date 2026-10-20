@@ -10,17 +10,66 @@ import (
 	"github.com/Monsterwi/razor/cache"
 )
 
-// shortcut: bypass request directives and validators until conditional revalidation is supported.
 func requestCacheable(r *http.Request) bool {
-	if r.Method != http.MethodGet || r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
+	if (r.Method != http.MethodGet && r.Method != http.MethodHead) || r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
 		return false
 	}
-	for _, name := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Range", "If-Range", "If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "Cache-Control", "Pragma"} {
+	for _, name := range []string{"Authorization", "Proxy-Authorization", "Cookie", "Range", "If-Range", "If-Match", "If-Unmodified-Since"} {
 		if hasHeader(r.Header, name) {
 			return false
 		}
 	}
-	return true
+	if connectionNominates(r.Header, "Cache-Control", "Pragma", "If-None-Match", "If-Modified-Since", "Accept-Encoding", "Accept-Language") {
+		return false
+	}
+	if hasHeader(r.Header, "Pragma") && !strings.EqualFold(r.Header.Get("Pragma"), "no-cache") {
+		return false
+	}
+	_, ok := cacheDirectives(r.Header, true)
+	return ok
+}
+
+func connectionNominates(h http.Header, names ...string) bool {
+	for _, line := range h.Values("Connection") {
+		for _, field := range strings.Split(line, ",") {
+			for _, name := range names {
+				if strings.EqualFold(strings.TrimSpace(field), name) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func cacheDirectives(h http.Header, request bool) (map[string]string, bool) {
+	directives := make(map[string]string)
+	for _, line := range h.Values("Cache-Control") {
+		for _, raw := range strings.Split(line, ",") {
+			name, value, valued := strings.Cut(strings.TrimSpace(raw), "=")
+			name, value = strings.ToLower(strings.TrimSpace(name)), strings.TrimSpace(value)
+			if _, duplicate := directives[name]; duplicate {
+				return nil, false
+			}
+			numeric := name == "max-age" || (!request && name == "s-maxage") || (request && name == "min-fresh")
+			flag := name == "no-cache" || (!request && (name == "public" || name == "must-revalidate" || name == "proxy-revalidate" || name == "immutable" || name == "no-transform"))
+			if numeric {
+				if !valued {
+					return nil, false
+				}
+				if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+					value = value[1 : len(value)-1]
+				}
+				if _, ok := deltaSeconds(value); !ok {
+					return nil, false
+				}
+			} else if !flag || valued {
+				return nil, false
+			}
+			directives[name] = value
+		}
+	}
+	return directives, true
 }
 
 func hasHeader(h http.Header, name string) bool {
@@ -32,109 +81,108 @@ func hasHeader(h http.Header, name string) bool {
 	return false
 }
 
-// responseAge accepts only the deliberately small shared-cache subset. Unknown or
-// ambiguous directives bypass until their semantics are implemented.
-func responseAge(info *cache.CacheHTTPInfo, now time.Time) (time.Duration, bool) {
+type freshness struct {
+	age, lifetime time.Duration
+	validate      bool
+}
+
+// responsePolicy is shared by admission, lookup and successful validation.
+// Unsupported directives deliberately bypass; stale responses are never served.
+func responsePolicy(info *cache.CacheHTTPInfo, now time.Time) (freshness, bool) {
+	var p freshness
 	if info == nil || info.Status != http.StatusOK || info.RequestMethod != http.MethodGet {
-		return 0, false
+		return p, false
 	}
 	h := info.ResponseHeaders
-	for _, line := range h.Values("Connection") {
-		for _, name := range strings.Split(line, ",") {
-			switch http.CanonicalHeaderKey(strings.TrimSpace(name)) {
-			case "Cache-Control", "Age", "Date", "Set-Cookie", "Vary", "Content-Range", "Trailer":
-				// Removed freshness metadata must not make a stored object younger.
-				return 0, false
-			}
-		}
+	if _, ok := varyFields(h); !ok {
+		return p, false
 	}
-	for _, name := range []string{"Set-Cookie", "Vary", "Content-Range", "Trailer"} {
+	if connectionNominates(h, "Cache-Control", "Age", "Date", "Set-Cookie", "Vary", "Content-Range", "Trailer", "ETag", "Last-Modified") {
+		return p, false
+	}
+	for _, name := range []string{"Set-Cookie", "Content-Range", "Trailer"} {
 		if hasHeader(h, name) {
-			return 0, false
+			return p, false
 		}
 	}
-	directives := make(map[string]string)
-	for _, line := range h.Values("Cache-Control") {
-		for _, raw := range strings.Split(line, ",") {
-			name, value, valued := strings.Cut(strings.TrimSpace(raw), "=")
-			name = strings.ToLower(strings.TrimSpace(name))
-			value = strings.TrimSpace(value)
-			if _, duplicate := directives[name]; duplicate {
-				return 0, false
-			}
-			switch name {
-			case "public", "must-revalidate", "proxy-revalidate", "immutable", "no-transform":
-				if valued {
-					return 0, false
-				}
-			case "max-age", "s-maxage":
-				if !valued {
-					return 0, false
-				}
-				if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") && len(value) >= 2 {
-					value = value[1 : len(value)-1]
-				}
-				if _, ok := deltaSeconds(value); !ok {
-					return 0, false
-				}
-			default:
-				return 0, false
-			}
-			directives[name] = value
-		}
+	directives, ok := cacheDirectives(h, false)
+	if !ok {
+		return p, false
 	}
 	_, public := directives["public"]
-	lifetimeText, shared := directives["s-maxage"]
+	lifetime, shared := directives["s-maxage"]
 	if !public && !shared {
-		return 0, false
+		return p, false
 	}
 	if !shared {
-		lifetimeText = directives["max-age"]
+		lifetime = directives["max-age"]
 	}
-	lifetime, ok := deltaSeconds(lifetimeText)
-	if !ok || lifetime <= 0 {
-		return 0, false
+	p.lifetime, ok = deltaSeconds(lifetime)
+	if !ok {
+		return p, false
 	}
-	age := time.Duration(0)
+	_, p.validate = directives["no-cache"]
 	if values := h.Values("Age"); len(values) > 0 {
 		if len(values) != 1 {
-			return 0, false
+			return p, false
 		}
-		age, ok = deltaSeconds(values[0])
+		p.age, ok = deltaSeconds(values[0])
 		if !ok {
-			return 0, false
+			return p, false
 		}
 	}
 	delay := info.ResponseTime.Sub(info.RequestTime)
-	if delay < 0 {
-		return 0, false
+	resident := now.Sub(info.ResponseTime)
+	if delay < 0 || resident < 0 {
+		return p, false
 	}
-	// Bound before addition so an enormous Age cannot overflow into a fresh value.
-	if age >= lifetime || delay >= lifetime-age {
-		return 0, false
-	}
-	age += delay
+	p.age = addAge(p.age, delay)
 	if values := h.Values("Date"); len(values) > 0 {
 		if len(values) != 1 {
-			return 0, false
+			return p, false
 		}
 		date, err := http.ParseTime(values[0])
 		if err != nil {
-			return 0, false
+			return p, false
 		}
-		apparent := info.ResponseTime.Sub(date)
-		if apparent > age {
-			age = apparent
+		p.age = max(p.age, info.ResponseTime.Sub(date))
+	}
+	p.age = addAge(p.age, resident)
+	return p, true
+}
+
+func addAge(a, b time.Duration) time.Duration {
+	if a > time.Duration(math.MaxInt64)-b {
+		return time.Duration(math.MaxInt64)
+	}
+	return a + b
+}
+
+func requestFresh(r *http.Request, info *cache.CacheHTTPInfo, now time.Time) bool {
+	p, ok := responsePolicy(info, now)
+	if !ok || p.validate || p.age >= p.lifetime || hasHeader(r.Header, "Pragma") {
+		return false
+	}
+	directives, ok := cacheDirectives(r.Header, true)
+	if !ok {
+		return false
+	}
+	if _, force := directives["no-cache"]; force {
+		return false
+	}
+	if v, exists := directives["max-age"]; exists {
+		age, _ := deltaSeconds(v)
+		if p.age > age {
+			return false
 		}
 	}
-	resident := now.Sub(info.ResponseTime)
-	if resident < 0 {
-		return 0, false
+	if v, exists := directives["min-fresh"]; exists {
+		age, _ := deltaSeconds(v)
+		if age >= p.lifetime-p.age {
+			return false
+		}
 	}
-	if age >= lifetime || resident >= lifetime-age {
-		return 0, false
-	}
-	return age + resident, true
+	return true
 }
 
 func deltaSeconds(value string) (time.Duration, bool) {
