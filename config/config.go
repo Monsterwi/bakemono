@@ -18,6 +18,9 @@ const (
 
 // Config holds the application configuration
 type Config struct {
+	MaxClientConnections int
+	resourceDefaults     bool
+	CacheWriteTimeout    int
 	// Config directory
 	ConfigDir string
 
@@ -34,6 +37,11 @@ type Config struct {
 	AccessLogFilename string
 	ErrorLogFilename  string
 
+	MaxRequests, MaxQueuedRequests                                                                                  int
+	MaxOriginRequests, MaxOriginQueuedRequests, MaxOriginConnections                                                int
+	MaxCacheWriters, MaxQueuedCacheWriters, CacheWriteBufferBytes, MaxCacheObjectBytes                              int
+	RequestHeaderTimeout, ConnectTimeout, TLSHandshakeTimeout, ResponseHeaderTimeout, QueueTimeout, ShutdownTimeout int
+
 	// Timeout configuration
 	KeepAliveTimeout      int
 	TransactionTimeoutIn  int
@@ -42,7 +50,7 @@ type Config struct {
 
 // GetDefaultConfig returns default configuration values
 func GetDefaultConfig() *Config {
-	return &Config{
+	return (&Config{
 		ConfigDir:             "conf",
 		ServerPort:            80,
 		UpstreamAlgo:          balancer.ConsistentHashBalancer,
@@ -53,7 +61,7 @@ func GetDefaultConfig() *Config {
 		KeepAliveTimeout:      120,
 		TransactionTimeoutIn:  30,
 		TransactionTimeoutOut: 30,
-	}
+	}).WithDefaults()
 }
 
 // Load loads configuration from records.config file
@@ -73,7 +81,7 @@ func Load(configDir string) (*Config, error) {
 		return nil, fmt.Errorf("storage.config not found at %s", storageConfigPath)
 	}
 
-	cfg := &Config{}
+	cfg := GetDefaultConfig()
 	cfg.ConfigDir = configDir
 	// Load records.config
 	rc, err := LoadRecordsConfig(recordsConfigPath)
@@ -90,9 +98,9 @@ func Load(configDir string) (*Config, error) {
 	cfg.UpstreamAlgo = rc.GetString("proxy.config.http.parent_proxy.upstream_algo", cfg.UpstreamAlgo)
 	cfg.UpstreamTargets = rc.GetStringSlice("proxy.config.http.parent_proxy.upstream_targets", cfg.UpstreamTargets)
 	cfg.TrustedProxies = rc.GetStringSlice("proxy.config.http.trusted_proxies", cfg.TrustedProxies)
-	cfg.KeepAliveTimeout = rc.GetInt("proxy.config.http.keep_alive_no_activity_timeout_in", cfg.KeepAliveTimeout)
-	cfg.TransactionTimeoutIn = rc.GetInt("proxy.config.http.transaction_no_activity_timeout_in", cfg.TransactionTimeoutIn)
-	cfg.TransactionTimeoutOut = rc.GetInt("proxy.config.http.transaction_no_activity_timeout_out", cfg.TransactionTimeoutOut)
+	if err := cfg.loadLimits(rc); err != nil {
+		return nil, err
+	}
 
 	logger.Infof("Configuration loaded from %s", recordsConfigPath)
 	return cfg, nil

@@ -2,78 +2,161 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Monsterwi/razor/cache"
 	appconfig "github.com/Monsterwi/razor/config"
+	"github.com/Monsterwi/razor/internal/budget"
 	"github.com/Monsterwi/razor/logger"
 	"github.com/Monsterwi/razor/proxy"
+	"golang.org/x/net/netutil"
 )
 
 type Server struct {
-	config     *appconfig.Config
-	cache      *cache.Cache
-	proxy      *proxy.HTTPProxy
-	httpServer *http.Server
+	config               *appconfig.Config
+	cache                *cache.Cache
+	proxy                *proxy.HTTPProxy
+	httpServer           *http.Server
+	admission, writers   *budget.Limiter
+	counters             counters
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	mu                   sync.Mutex
+	draining             bool
+	handlers             sync.WaitGroup
+	shutdown             sync.Once
+	shutdownErr, initErr error
+	backgroundStop       chan struct{}
+	background           sync.WaitGroup
 }
 
 func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy) *Server {
-	s := &Server{
-		config: cfg,
-		cache:  c,
-		proxy:  p,
+	if cfg == nil {
+		cfg = appconfig.GetDefaultConfig()
+	}
+	cfg = cfg.WithDefaults()
+	s := &Server{config: cfg, cache: c, proxy: p, backgroundStop: make(chan struct{})}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.initErr = cfg.Validate()
+	if s.initErr == nil {
+		s.admission = budget.New(cfg.MaxRequests, cfg.MaxQueuedRequests)
+		writers := min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation())
+		s.writers = budget.New(writers, cfg.MaxQueuedCacheWriters)
+		s.initErr = p.ConfigureLimits(proxy.Limits{Requests: cfg.MaxOriginRequests, Queued: cfg.MaxOriginQueuedRequests, Connections: cfg.MaxOriginConnections, QueueTimeout: time.Duration(cfg.QueueTimeout) * time.Second, DialTimeout: time.Duration(cfg.ConnectTimeout) * time.Second, TLSHandshakeTimeout: time.Duration(cfg.TLSHandshakeTimeout) * time.Second, ResponseHeaderTimeout: time.Duration(cfg.ResponseHeaderTimeout) * time.Second, BodyIdleTimeout: time.Duration(cfg.TransactionTimeoutOut) * time.Second})
 	}
 	return s
 }
 
-func (s *Server) Run() error {
-	// Setup access log middleware and handler
-	accessLogPath := filepath.Join(s.config.LogfileDir, s.config.AccessLogFilename)
-
-	// s.handler is defined in handler.go
-	loggedHandler := logger.AccessLogMiddleware(accessLogPath)(http.HandlerFunc(s.handler))
-
-	s.httpServer = &http.Server{
-		Addr:    ":" + strconv.Itoa(s.config.ServerPort),
-		Handler: loggedHandler,
+// Serve exposes the real listener lifecycle to embedders and integration tests.
+func (s *Server) Serve(listener net.Listener) error {
+	if s.initErr != nil {
+		listener.Close()
+		return s.initErr
 	}
-
-	// Start server in goroutine
+	s.mu.Lock()
+	if s.draining || s.httpServer != nil {
+		s.mu.Unlock()
+		listener.Close()
+		return fmt.Errorf("server already started or draining")
+	}
+	logged := logger.AccessLogMiddleware(filepath.Join(s.config.LogfileDir, s.config.AccessLogFilename))(s)
+	hs := &http.Server{Handler: logged, ReadHeaderTimeout: time.Duration(s.config.RequestHeaderTimeout) * time.Second, IdleTimeout: time.Duration(s.config.KeepAliveTimeout) * time.Second, MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return s.ctx }}
+	s.httpServer = hs
+	s.background.Add(1)
 	go func() {
-		logger.Infof("Server started on %s", s.httpServer.Addr)
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalf("Server error: %v", err)
+		defer s.background.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.backgroundStop:
+				return
+			case <-ticker.C:
+				logger.Infof("HTTP resource stats: %+v", s.Stats())
+			}
 		}
 	}()
-
-	// Wait for interrupt signal to gracefully shutdown the server
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	logger.Info("Shutting down server...")
-
-	return s.Shutdown()
+	s.mu.Unlock()
+	return hs.Serve(netutil.LimitListener(listener, s.config.MaxClientConnections))
 }
 
+func (s *Server) Run() error {
+	if s.initErr != nil {
+		return errors.Join(s.initErr, s.Shutdown())
+	}
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(s.config.ServerPort))
+	if err != nil {
+		return errors.Join(err, s.Shutdown())
+	}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
+	result := make(chan error, 1)
+	go func() { result <- s.Serve(listener) }()
+	select {
+	case <-quit:
+		return s.Shutdown()
+	case err := <-result:
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		return errors.Join(err, s.Shutdown())
+	}
+}
 func (s *Server) Shutdown() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.config.ShutdownTimeout)*time.Second)
 	defer cancel()
+	return s.ShutdownContext(ctx)
+}
 
-	if err := s.httpServer.Shutdown(ctx); err != nil {
-		logger.Errorf("Server forced to shutdown: %v", err)
-	}
-
-	logger.Info("Closing cache...")
-	if err := s.cache.Close(); err != nil {
-		logger.Errorf("Error closing cache: %v", err)
-		return err
-	}
-	logger.Info("Cache closed successfully")
-	return nil
+// ShutdownContext rejects new work, drains then cancels, and joins all handlers
+// before closing storage. Kernel disk I/O may outlive the grace period; waiting
+// for it is required to avoid writes against a closed cache file.
+func (s *Server) ShutdownContext(ctx context.Context) error {
+	s.shutdown.Do(func() {
+		s.mu.Lock()
+		s.draining = true
+		hs := s.httpServer
+		close(s.backgroundStop)
+		s.mu.Unlock()
+		s.proxy.StopBackground()
+		s.background.Wait()
+		var err error
+		if hs != nil {
+			err = hs.Shutdown(ctx)
+			if err != nil {
+				s.cancel()
+				err = errors.Join(err, hs.Close())
+			}
+		}
+		done := make(chan struct{})
+		go func() { s.handlers.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			err = errors.Join(err, ctx.Err())
+			s.cancel()
+			if hs != nil {
+				err = errors.Join(err, hs.Close())
+			}
+			<-done
+		}
+		s.cancel()
+		err = errors.Join(err, s.proxy.Close())
+		if s.cache != nil {
+			err = errors.Join(err, s.cache.Close())
+		}
+		s.shutdownErr = err
+	})
+	return s.shutdownErr
 }
