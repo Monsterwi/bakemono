@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -147,18 +146,17 @@ func TestOriginPhaseTimeoutsAllowProgressingBody(t *testing.T) {
 }
 
 func TestCloseStopsHealthChecksAndActiveOrigin(t *testing.T) {
-	connections := make(chan struct{}, 8)
-	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	probes := make(chan struct{}, 8)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			probes <- struct{}{}
+			w.WriteHeader(200)
+			return
+		}
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	}))
-	origin.Config.ConnState = func(_ net.Conn, state http.ConnState) {
-		if state == http.StateNew {
-			connections <- struct{}{}
-		}
-	}
-	origin.Start()
 	defer origin.Close()
 	p, err := proxy.NewHTTPProxy([]string{origin.URL}, balancer.R2Balancer)
 	if err != nil {
@@ -166,7 +164,7 @@ func TestCloseStopsHealthChecksAndActiveOrigin(t *testing.T) {
 	}
 	p.HealthCheck(1)
 	select {
-	case <-connections:
+	case <-probes:
 	case <-time.After(5 * time.Second):
 		t.Fatal("health check did not run")
 	}
@@ -175,7 +173,6 @@ func TestCloseStopsHealthChecksAndActiveOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	<-connections
 	if err = p.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -183,8 +180,12 @@ func TestCloseStopsHealthChecksAndActiveOrigin(t *testing.T) {
 		t.Fatal("close did not cancel active origin")
 	}
 	response.RawBody().Close()
+	// Checks already joined; discard probes completed before Close returned.
+	for len(probes) > 0 {
+		<-probes
+	}
 	select {
-	case <-connections:
+	case <-probes:
 		t.Fatal("health check survived Close")
 	case <-time.After(1100 * time.Millisecond):
 	}

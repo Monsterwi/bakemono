@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -34,6 +35,7 @@ type HTTPProxy struct {
 	limits          Limits
 	budgets         map[string]*budget.Limiter
 	customTransport bool
+	roots           *x509.CertPool
 	ctx             context.Context
 	cancel          context.CancelFunc
 	healthMu        sync.Mutex
@@ -306,51 +308,6 @@ func (h *HTTPProxy) SetAlive(url string, alive bool) {
 	h.Lock()
 	defer h.Unlock()
 	h.alive[url] = alive
-}
-
-// HealthCheck enable a health check goroutine for each agent
-func (h *HTTPProxy) HealthCheck(interval uint) {
-	h.healthMu.Lock()
-	defer h.healthMu.Unlock()
-	if interval == 0 || interval > 86400 || h.healthStopped || h.healthCancel != nil {
-		return
-	}
-	ctx, cancel := context.WithCancel(h.ctx)
-	h.healthCancel = cancel
-	for host := range h.targets {
-		h.healthWG.Add(1)
-		go func(host string) {
-			defer h.healthWG.Done()
-			h.healthCheck(ctx, host, time.Duration(interval)*time.Second)
-		}(host)
-	}
-}
-func (h *HTTPProxy) healthCheck(ctx context.Context, host string, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		conn, err := (&net.Dialer{Timeout: ConnectionTimeout}).DialContext(ctx, "tcp", GetHost(h.targets[host]))
-		alive := err == nil
-		if conn != nil {
-			conn.Close()
-		}
-		if ctx.Err() != nil {
-			return
-		}
-		if alive != h.ReadAlive(host) {
-			h.SetAlive(host, alive)
-			if alive {
-				h.lb.Add(host)
-			} else {
-				h.lb.Remove(host)
-			}
-		}
-	}
 }
 
 // health check end

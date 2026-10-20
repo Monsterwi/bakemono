@@ -20,8 +20,11 @@ location:
   - pattern: /
 
 # upstream 
+# Legacy field name: enables HTTP HEAD checks using each origin's scheme/port.
 tcp_health_check: true
-health_check_interval: 10           # health check interval (second)
+health_check_interval: 10           # seconds; timeout 3s, fail/recover threshold 2
+# Optional private origin CA file; system roots and hostname verification remain.
+upstream_ca_file:
 upstream:                      
   proxy_pass:                  
   - "http://10.62.216.7"
