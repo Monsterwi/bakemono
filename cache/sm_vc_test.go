@@ -25,43 +25,20 @@ func TestStripeSM(t *testing.T) {
 		convey.So(err, convey.ShouldBeNil)
 		defer stripe.Close()
 
-		key := []byte("sm_key")
-		data := []byte("data")
-
-		// Write without explicit close/flush
-		// We manually add to AggBuffer to simulate pending write
-		// (CacheWriter usually handles this, but let's go direct)
-
-		// Wait, CacheWriter ADDS to AggBuffer.
-		// But FlushAggBuffer is what StripeSM calls.
-		// So if we use CacheWriter and Close it, it puts data in AggBuffer.
-		// Then we wait for SM to flush it to disk.
-
-		writer := NewCacheWriter(stripe, key)
-		writer.Write(data)
-		writer.Close() // This puts data in AggBuffer
-
-		// Verify buffer is NOT empty
-		stripe.mu.RLock()
-		pos := stripe.AggBuffer.GetBufferPos()
-		stripe.mu.RUnlock()
-		convey.So(pos, convey.ShouldBeGreaterThan, 0)
-
-		// Wait for background flush
-		time.Sleep(150 * time.Millisecond)
-
-		// Verify buffer IS empty
-		stripe.mu.RLock()
-		posAfter := stripe.AggBuffer.GetBufferPos()
-		stripe.mu.RUnlock()
-		convey.So(posAfter, convey.ShouldEqual, 0)
-
-		// Verify data on disk
-		reader := NewCacheReader(stripe, key)
-		buf := make([]byte, 10)
-		n, err := reader.Read(buf)
+		data := []byte("background bytes")
+		flushed := make(flushResult, 1)
+		offset, err := stripe.AggBuffer.Add(data, len(data), flushed)
 		convey.So(err, convey.ShouldBeNil)
-		convey.So(n, convey.ShouldEqual, len(data))
+		select {
+		case err := <-flushed:
+			convey.So(err, convey.ShouldBeNil)
+		case <-time.After(time.Second):
+			t.Fatal("maintenance did not flush queued bytes")
+		}
+		got := make([]byte, len(data))
+		_, err = stripe.Fd.ReadAt(got, offset)
+		convey.So(err, convey.ShouldBeNil)
+		convey.So(got, convey.ShouldResemble, data)
 	})
 }
 
@@ -124,3 +101,7 @@ func TestCacheVC(t *testing.T) {
 		readVC.Close()
 	})
 }
+
+type flushResult chan error
+
+func (f flushResult) OnLogFlush(err error) { f <- err }

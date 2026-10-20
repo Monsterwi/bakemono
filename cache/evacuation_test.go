@@ -128,3 +128,13 @@ func TestEvacuation(t *testing.T) {
 		convey.So(err, convey.ShouldNotBeNil)
 	})
 }
+
+func TestRepeatedHitsRegisterOneEvacuationCandidate(t *testing.T) {
+	table := NewEvacuationTable()
+	for i := 0; i < 10000; i++ {
+		table.Register([]byte("hot-object"), 4096, 1024)
+	}
+	if got := table.GetCandidatesInRange(4096, 5120); len(got) != 1 {
+		t.Fatalf("same hot record registered %d times", len(got))
+	}
+}

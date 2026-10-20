@@ -58,6 +58,9 @@ func NewCacheVCRead(stripe *Stripe, key []byte) (*CacheVC, error) {
 
 // NewCacheVCWrite creates a CacheVC for writing.
 func NewCacheVCWrite(stripe *Stripe, key []byte) (*CacheVC, error) {
+	if err := stripe.writeError(); err != nil {
+		return nil, err
+	}
 	vc := &CacheVC{
 		Stripe:  stripe,
 		Key:     key,
@@ -65,6 +68,9 @@ func NewCacheVCWrite(stripe *Stripe, key []byte) (*CacheVC, error) {
 	}
 
 	vc.writer = NewCacheWriter(stripe, key)
+	if vc.writer.err != nil {
+		return nil, vc.writer.err
+	}
 
 	// Register with OpenDir
 	_, isLeader := stripe.OpenDir.Add(key, vc.writer)

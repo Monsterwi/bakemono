@@ -155,14 +155,12 @@ func TestCacheWriterFlush(t *testing.T) {
 		err := writer.Close()
 		convey.So(err, convey.ShouldBeNil)
 
-		// Check AggBuffer
-		convey.So(stripe.AggBuffer.IsEmpty(), convey.ShouldBeFalse)
-		// bytesPendingAggregation was subtracted in Add.
-		// Since we started with 0 and didn't AddBytesPendingAggregation, it might be negative if logic is strictly following ATS.
-		// ATS Logic: bufferPos increases, bytesPending decreases.
-		// If we assume bytesPending tracks what is WAITING to be put in buffer, then adding to buffer reduces it.
-		// Let's just check buffer usage.
-		convey.So(stripe.AggBuffer.GetBufferPos(), convey.ShouldBeGreaterThan, 0)
+		// A successful Close has acknowledged disk bytes, not merely queued them.
+		convey.So(stripe.AggBuffer.IsEmpty(), convey.ShouldBeTrue)
+		reader := NewCacheReader(stripe, key)
+		got, err := io.ReadAll(reader)
+		convey.So(err, convey.ShouldBeNil)
+		convey.So(got, convey.ShouldResemble, data)
 	})
 }
 

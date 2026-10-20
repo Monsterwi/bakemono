@@ -1,47 +1,60 @@
 package cache
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
-
-	"github.com/Monsterwi/razor/logger"
 )
 
-// Stripe represents a cache volume/stripe.
-type Stripe struct {
-	DirMgr    *DirManager
-	AggBuffer *AggregateWriteBuffer
-	OpenDir   *OpenDir
-	RamCache  *RamCache
-	SM        *StripeSM // State Machine
-
-	Path       string
-	Fd         *os.File
-	Start      int64 // Start offset of data on disk
-	Len        int64 // Length of the stripe
-	Skip       int64 // Offset to start of stripe (header)
-	SectorSize int
-
-	// WritePos tracks the committed disk offset (start of the next flush).
-	WritePos int64
-	Phase    bool
-
-	Header *StripeHeader
-
-	mu sync.RWMutex
-	// stopChan signals background workers to stop
-	stopChan chan struct{}
-	wg       sync.WaitGroup
-
-	// Evacuation Management
-	EvacMgr *EvacuationTable
-	// Hit Evacuate Window (aligned with ATS hit_evacuate_window)
-	// Objects within this window from WritePos will be registered for evacuation on read.
-	hitEvacuateWindow int64
+// stripeFile is the filesystem boundary used for deterministic I/O failures.
+type stripeFile interface {
+	ReadAt([]byte, int64) (int, error)
+	WriteAt([]byte, int64) (int, error)
+	Sync() error
+	Close() error
 }
 
+type Stripe struct {
+	DirMgr                   *DirManager
+	AggBuffer                *AggregateWriteBuffer
+	OpenDir                  *OpenDir
+	RamCache                 *RamCache
+	SM                       *StripeSM
+	Path                     string
+	Fd                       *os.File
+	disk                     stripeFile
+	Start, Len, Skip         int64
+	SectorSize               int
+	WritePos                 int64
+	Phase                    bool
+	Header                   *StripeHeader
+	ioMu                     sync.Mutex
+	writingStart, writingEnd int64
+	writingGeneration        uint64
+	mu                       sync.RWMutex
+	generation               uint64
+	storageErr               error
+	closing                  bool
+	closeOnce                sync.Once
+	closeErr                 error
+	stopChan                 chan struct{}
+	wg                       sync.WaitGroup
+	EvacMgr                  *EvacuationTable
+	hitEvacuateWindow        int64
+	evacCtx                  context.Context
+	evacCancel               context.CancelFunc
+	evacQueue                chan []evacuationRecord
+}
+
+type evacuationRecord struct {
+	key, data  []byte
+	old        Dir
+	generation uint64
+}
 type StripeOption func(*Stripe)
 
 func WithRamCache(size uint64) StripeOption {
@@ -53,464 +66,352 @@ func WithRamCache(size uint64) StripeOption {
 		}
 	}
 }
-
-func NewStripe(path string, length int64, skip int64, opts ...StripeOption) *Stripe {
-	s := &Stripe{
-		DirMgr:     &DirManager{},
-		AggBuffer:  NewAggregateWriteBuffer(),
-		OpenDir:    NewOpenDir(),
-		RamCache:   NewRamCache(1024 * 1024 * 10), // Default 10MB RamCache
-		Path:       path,
-		Len:        length,
-		Skip:       skip,
-		SectorSize: SectorSize,
-		stopChan:   make(chan struct{}),
-		EvacMgr:    NewEvacuationTable(),
-	}
-
+func NewStripe(path string, length, skip int64, opts ...StripeOption) *Stripe {
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Stripe{DirMgr: &DirManager{}, AggBuffer: NewAggregateWriteBuffer(), OpenDir: NewOpenDir(), RamCache: NewRamCache(10 << 20), Path: path, Len: length, Skip: skip, SectorSize: SectorSize, stopChan: make(chan struct{}), EvacMgr: NewEvacuationTable(), evacCtx: ctx, evacCancel: cancel, evacQueue: make(chan []evacuationRecord, 1)}
 	for _, opt := range opts {
 		opt(s)
 	}
-
-	// Initialize State Machine
 	s.SM = NewStripeSM(s)
-
 	return s
 }
-
-// Init initializes the stripe.
-func (s *Stripe) Init(blocks int64) error {
-	// Initialize DirManager
-	avgObjSize := int64(8192)
-	dirNum := s.Len / avgObjSize
-	s.DirMgr.Init(Offset(dirNum))
-
-	// Calculate Metadata Size
-	metaSize := int64(StripeHeaderSize + s.DirMgr.BinarySize())
-	metaSize = (metaSize + int64(SectorSize) - 1) / int64(SectorSize) * int64(SectorSize)
-
-	s.Start = s.Skip + metaSize
+func (s *Stripe) Init(_ int64) error {
+	if s.Skip < 0 || s.Len < 32768 || s.Skip+s.Len < s.Skip {
+		return fmt.Errorf("invalid stripe bounds")
+	}
+	s.DirMgr.Init(Offset(s.Len / 8192))
+	meta := int64(StripeHeaderSize + s.DirMgr.BinarySize())
+	meta = (meta + SectorSize - 1) / SectorSize * SectorSize
+	s.Start = s.Skip + meta
+	if s.Start >= s.Skip+s.Len {
+		return fmt.Errorf("stripe has no data area")
+	}
 	s.WritePos = s.Start
-
-	// Initialize AggBuffer cursor
 	s.AggBuffer.Init(s.Start)
-	// Set bounds: [Start, Skip+Len)
 	s.AggBuffer.SetBounds(s.Start, s.Skip+s.Len)
-
-	// Initialize hit evacuate window (aligned with ATS)
 	s.recomputeHitEvacuateWindow()
-
 	return nil
 }
-
 func (s *Stripe) Open() error {
-	// Ensure the directory exists before opening the file
-	dir := filepath.Dir(s.Path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0755); err != nil {
+		return err
 	}
-
 	f, err := os.OpenFile(s.Path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
 	s.Fd = f
-
-	// Attempt to load header and directory
-	if err := s.Load(); err != nil {
-		logger.Infof("Stripe Load failed (new file or corrupt), initializing new: %v", err)
-		if err := s.Save(); err != nil {
-			logger.Errorf("Failed to save initial stripe state: %v", err)
-		} else {
-			logger.Debugf("Saved initial stripe state for %s", s.Path)
-		}
-	} else {
-		logger.Infof("Successfully loaded stripe state from %s: WritePos=%d, Phase=%v", s.Path, s.WritePos, s.Phase)
-		// Update AggBuffer cursor to match loaded state
-		s.AggBuffer.Init(s.WritePos)
-	}
-
-	// Start the SM background task
-	s.SM.Start()
-
-	// Start background flusher
-	s.StartBackgroundFlusher()
-
-	return nil
-}
-
-func (s *Stripe) Close() error {
-	if s.SM != nil {
-		s.SM.Stop()
-	}
-
-	if s.Fd != nil {
-		// Flush any pending data in AggBuffer before saving metadata
-		if err := s.FlushAggBufferSync(); err != nil {
-			logger.Errorf("Failed to flush AggBuffer during Close: %v", err)
-		}
-
-		// Stop background workers
-		close(s.stopChan)
-		s.wg.Wait()
-
-		// Save state (Header + Directory) before closing
-		if err := s.Save(); err != nil {
-			logger.Errorf("Failed to save stripe state during Close: %v", err)
-		} else {
-			logger.Debugf("Saved stripe state before close: WritePos=%d, Phase=%v", s.WritePos, s.Phase)
-		}
-
-		if err := s.Fd.Close(); err != nil {
-			logger.Errorf("Failed to close stripe file: %v", err)
+	s.disk = f
+	if err = s.Load(); err != nil {
+		if err = s.Save(); err != nil {
+			_ = f.Close()
+			s.Fd = nil
 			return err
 		}
-		s.Fd = nil
 	}
+	s.AggBuffer.initPosition(s.WritePos, s.Phase)
+	if s.Phase {
+		s.generation = 1
+	}
+	s.StartBackgroundFlusher()
+	s.wg.Add(1)
+	go s.evacuate()
+	s.SM.Start()
 	return nil
 }
+func (s *Stripe) Close() error {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closing = true
+		s.mu.Unlock()
+		s.AggBuffer.stopAdds()
+		s.evacCancel()
+		if s.SM != nil {
+			s.SM.Stop()
+		}
+		flushErr := s.FlushAggBufferSync()
+		close(s.stopChan)
+		s.wg.Wait()
+		s.ioMu.Lock()
+		defer s.ioMu.Unlock()
+		saveErr := s.saveSnapshot()
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.disk == nil {
+			s.closeErr = flushErr
+			return
+		}
+		closeErr := s.disk.Close()
+		s.Fd = nil
+		s.disk = nil
+		s.closeErr = errors.Join(flushErr, saveErr, closeErr)
+	})
+	return s.closeErr
+}
 
-// Save persists the Stripe state (Header + Directory) to disk.
+// Save acknowledges queued bytes before persisting a metadata snapshot. This
+// in-place checkpoint is not crash-atomic; successful WriteAt alone is not fsync.
 func (s *Stripe) Save() error {
+	if err := s.FlushAggBufferSync(); err != nil {
+		return err
+	}
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	return s.saveSnapshot()
+}
+func writeFullAt(f stripeFile, p []byte, off int64) error {
+	n, err := f.WriteAt(p, off)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return err
+}
+func (s *Stripe) failLocked(err error) error {
+	if err != nil && s.storageErr == nil {
+		s.storageErr = err
+		s.AggBuffer.Fail(err)
+	}
+	return s.storageErr
+}
+
+// Caller holds ioMu; snapshot publication is atomic, disk I/O never holds mu.
+func (s *Stripe) saveSnapshot() error {
+	s.mu.Lock()
+	if s.storageErr != nil {
+		err := s.storageErr
+		s.mu.Unlock()
+		return err
+	}
+	if s.disk == nil {
+		s.mu.Unlock()
+		return ErrCacheClosed
+	}
+	h := StripeHeader{Magic: StripeHeaderMagic, Version: StripeHeaderVer, WritePos: s.WritePos, Phase: s.Phase}
+	header, err := h.MarshalBinary()
+	if err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	dirs, err := s.DirMgr.MarshalBinary()
+	f := s.disk
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err = writeFullAt(f, header, s.Skip); err == nil {
+		err = writeFullAt(f, dirs, s.Skip+int64(len(header)))
+	}
+	if err == nil {
+		err = f.Sync()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.Fd == nil {
-		return fmt.Errorf("stripe not open")
-	}
-
-	header := StripeHeader{
-		Magic:    StripeHeaderMagic,
-		Version:  StripeHeaderVer,
-		WritePos: s.WritePos,
-		Phase:    s.Phase,
-	}
-
-	headerBytes, err := header.MarshalBinary()
-	if err != nil {
-		return err
-	}
-
-	dirBytes, err := s.DirMgr.MarshalBinary()
-	if err != nil {
-		return err
-	}
-
-	if _, err := s.Fd.WriteAt(headerBytes, s.Skip); err != nil {
-		return err
-	}
-
-	dirOffset := s.Skip + int64(len(headerBytes))
-	if _, err := s.Fd.WriteAt(dirBytes, dirOffset); err != nil {
-		logger.Errorf("Failed to write directory at offset %d: %v", dirOffset, err)
-		return fmt.Errorf("failed to write directory: %w", err)
-	}
-
-	if err := s.Fd.Sync(); err != nil {
-		logger.Errorf("Failed to sync stripe file: %v", err)
-		return fmt.Errorf("failed to sync: %w", err)
-	}
-
-	logger.Debugf("Saved stripe metadata: WritePos=%d, Phase=%v, DirSize=%d", s.WritePos, s.Phase, len(dirBytes))
-	return nil
+	return s.failLocked(err)
 }
 
-// Load restores the Stripe state from disk.
 func (s *Stripe) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.Fd == nil {
-		return fmt.Errorf("stripe not open")
+	if s.disk == nil {
+		return ErrCacheClosed
 	}
-
-	headerBytes := make([]byte, StripeHeaderSize)
-	if _, err := s.Fd.ReadAt(headerBytes, s.Skip); err != nil {
+	buf := make([]byte, StripeHeaderSize)
+	if _, err := s.disk.ReadAt(buf, s.Skip); err != nil {
 		return err
 	}
-
-	var header StripeHeader
-	if err := header.UnmarshalBinary(headerBytes); err != nil {
+	var h StripeHeader
+	if err := h.UnmarshalBinary(buf); err != nil {
 		return err
 	}
-
-	if header.Magic != StripeHeaderMagic {
-		return fmt.Errorf("invalid stripe magic: %x", header.Magic)
+	if h.Magic != StripeHeaderMagic || h.Version != StripeHeaderVer || h.WritePos < s.Start || h.WritePos > s.Skip+s.Len {
+		return fmt.Errorf("invalid stripe header")
 	}
-
-	dirSize := s.DirMgr.BinarySize()
-	dirBytes := make([]byte, dirSize)
-
-	dirOffset := s.Skip + int64(len(headerBytes))
-	if _, err := s.Fd.ReadAt(dirBytes, dirOffset); err != nil {
-		logger.Errorf("Failed to read directory from offset %d: %v", dirOffset, err)
-		return fmt.Errorf("failed to read directory: %w", err)
+	dirs := make([]byte, s.DirMgr.BinarySize())
+	if _, err := s.disk.ReadAt(dirs, s.Skip+int64(len(buf))); err != nil {
+		return err
 	}
-
-	if err := s.DirMgr.UnmarshalBinary(dirBytes); err != nil {
-		logger.Errorf("Failed to unmarshal directory: %v", err)
-		return fmt.Errorf("failed to unmarshal directory: %w", err)
+	if err := s.DirMgr.UnmarshalBinary(dirs); err != nil {
+		return err
 	}
-
-	logger.Debugf("Loaded directory: SegmentsNum=%d, BucketsNumPerSegment=%d", s.DirMgr.SegmentsNum, s.DirMgr.BucketsNumPerSegment)
-
-	s.WritePos = header.WritePos
-	s.Phase = header.Phase
-	s.Header = &header
-
+	s.WritePos, s.Phase, s.Header = h.WritePos, h.Phase, &h
 	return nil
 }
-
-// StartBackgroundFlusher starts the disk writer goroutine
-func (s *Stripe) StartBackgroundFlusher() {
-	s.wg.Add(1)
-	go s.diskWriter()
-}
-
-// diskWriter consumes tasks from AggBuffer and writes to disk
+func (s *Stripe) StartBackgroundFlusher() { s.wg.Add(1); go s.diskWriter() }
 func (s *Stripe) diskWriter() {
 	defer s.wg.Done()
-
-	flushChan := s.AggBuffer.GetFlushChan()
-
 	for {
 		select {
-		case task, ok := <-flushChan:
-			if !ok {
-				return
-			}
+		case task := <-s.AggBuffer.GetFlushChan():
 			s.handleFlushTask(task)
 		case <-s.stopChan:
 			return
 		}
 	}
 }
-
-// handleFlushTask processes a single flush task
 func (s *Stripe) handleFlushTask(task FlushTask) {
-	bytesPending := len(task.Buffer)
-	if bytesPending == 0 {
-		s.AggBuffer.NotifyFlushDone()
-		return
-	}
-
-	s.mu.RLock()
-	writePos := s.WritePos
-	start := s.Start
-	length := s.Len
-	phase := s.Phase
-	s.mu.RUnlock()
-
-	// 1. Evacuation Logic
-	if writePos+int64(bytesPending) > start+length {
-		// Wrap around
-		// We discard the tail write and wrap to Start.
-		// Note: We are losing the bytes that don't fit?
-		// Bakemono's original implementation implied wrap-around logic just moves WritePos.
-		// But if we have data to write, where does it go?
-		// If we are at End, we should ideally split.
-		// But assuming we just wrap-and-overwrite from Start.
-		// The data in `task.Buffer` is written at `Start`.
-
-		writePos = start
-		phase = !phase
-
-		victims, victimsInfo, err := s.collectEvacuationData(start, start+int64(bytesPending))
-		if err != nil {
-			logger.Errorf("Evacuation failed: %v", err)
-		}
-		s.requeueVictims(victims, victimsInfo, phase)
-	} else {
-		// Normal evacuation
-		victims, victimsInfo, err := s.collectEvacuationData(writePos, writePos+int64(bytesPending))
-		if err != nil {
-			logger.Errorf("Evacuation failed: %v", err)
-		}
-		s.requeueVictims(victims, victimsInfo, phase)
-	}
-
-	// 2. Write to Disk
-	if _, err := s.Fd.WriteAt(task.Buffer, writePos); err != nil {
-		logger.Errorf("Flush write failed: %v", err)
-		for _, w := range task.Writers {
-			if w != nil {
-				w.OnLogFlush(err)
-			}
-		}
-	} else {
-		for _, w := range task.Writers {
-			if w != nil {
-				w.OnLogFlush(nil)
-			}
-		}
-	}
-
-	// 3. Update State
+	s.ioMu.Lock()
 	s.mu.Lock()
-	s.WritePos = writePos + int64(bytesPending)
-	logger.Debugf("Flush Done. New WritePos: %d", s.WritePos)
-	s.Phase = phase
+	err := s.storageErr
+	var victims []evacuationRecord
+	end := task.Offset + int64(len(task.Buffer))
+	if err == nil && (task.Offset < s.Start || end > s.Skip+s.Len) {
+		err = fmt.Errorf("flush outside stripe data area")
+	}
+	if err == nil {
+		victims = s.collectEvacuationData(task.Offset, end)
+		// A phase bit can alias after two wraps. Remove its old entries before reuse.
+		if task.Generation != s.generation {
+			s.DirMgr.removePhase(task.Generation%2 != 0)
+		}
+		s.writingStart, s.writingEnd = task.Offset, end
+		s.writingGeneration = task.Generation
+		s.mu.Unlock()
+		err = writeFullAt(s.disk, task.Buffer, task.Offset)
+		s.mu.Lock()
+		s.writingStart, s.writingEnd = 0, 0
+	}
+	if err == nil {
+		s.WritePos = end
+		s.generation = task.Generation
+		s.Phase = task.Generation%2 != 0
+	} else {
+		s.failLocked(err)
+	}
 	s.mu.Unlock()
-
-	// 4. Notify Buffer available
-	s.AggBuffer.NotifyFlushDone()
-}
-
-func (s *Stripe) requeueVictims(victims [][]byte, victimsInfo []struct {
-	Key  []byte
-	Size int
-}, phase bool) {
-	for i, data := range victims {
-		info := victimsInfo[i]
-		approxSize := info.Size
-
-		go func(d []byte, sz int, k []byte, ph bool) {
-			// 1. Add to AggBuffer
-			newOffset, err := s.AggBuffer.Add(d, sz, nil)
-			if err != nil {
-				logger.Errorf("Evacuation add failed: %v", err)
-				return
-			}
-
-			// 2. Populate RamCache
-			if s.RamCache != nil {
-				s.RamCache.Put(k, d)
-			}
-
-			// 3. Update Directory with the correct phase
-			if s.DirMgr != nil {
-				_, err := s.DirMgr.Set(k, Offset(newOffset), sz, ph)
-				if err != nil {
-					logger.Errorf("Evacuation dir update failed: %v", err)
-				}
-			}
-		}(data, approxSize, info.Key, phase)
+	s.ioMu.Unlock()
+	for _, w := range task.Writers {
+		if w != nil {
+			w.OnLogFlush(err)
+		}
+	}
+	s.AggBuffer.NotifyFlushDone(err)
+	if err == nil && len(victims) > 0 {
+		select {
+		case s.evacQueue <- victims:
+		case <-s.evacCtx.Done():
+		default:
+			// shortcut: a full bounded evacuation queue evicts cold/overwritten entries;
+			// tune its budget only with measured hot-object retention requirements.
+		}
 	}
 }
-
-// FlushAggBuffer triggers an async flush.
-func (s *Stripe) FlushAggBuffer() error {
-	s.AggBuffer.TriggerFlush()
+func (s *Stripe) FlushAggBuffer() error     { s.AggBuffer.TriggerFlush(); return s.AggBuffer.Err() }
+func (s *Stripe) FlushAggBufferSync() error { return s.AggBuffer.FlushSync() }
+func (s *Stripe) writeError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.storageErr != nil {
+		return s.storageErr
+	}
+	if s.closing || s.disk == nil {
+		return ErrCacheClosed
+	}
 	return nil
 }
-
-// FlushAggBufferSync flushes the aggregate write buffer to disk synchronously.
-func (s *Stripe) FlushAggBufferSync() error {
-	return s.AggBuffer.FlushSync()
+func (s *Stripe) allocationValid(a allocation, size int) bool {
+	if s.writingEnd > 0 && a.generation != s.writingGeneration && a.offset < s.writingEnd && a.offset+int64(size) > s.writingStart {
+		return false
+	}
+	if a.offset < s.Start || a.offset+int64(size) > s.Skip+s.Len {
+		return false
+	}
+	return (a.generation == s.generation && a.offset+int64(size) <= s.WritePos) || (a.generation+1 == s.generation && a.offset >= s.WritePos)
+}
+func (s *Stripe) dirValid(d Dir) bool {
+	off := int64(d.offset())
+	if s.writingEnd > 0 && d.phase() != (s.writingGeneration%2 != 0) && off < s.writingEnd && off+int64(d.approxSize()) > s.writingStart {
+		return false
+	}
+	if s.storageErr != nil || s.disk == nil || off < s.Start || off >= s.Skip+s.Len {
+		return false
+	}
+	if d.phase() == s.Phase {
+		return off < s.WritePos
+	}
+	return off >= s.WritePos
 }
 
-// collectEvacuationData scans the directory for valid entries in the given range and reads them.
-func (s *Stripe) collectEvacuationData(start, end int64) ([][]byte, []struct {
-	Key  []byte
-	Size int
-}, error) {
-	// Optimization: Use EvacuationTable instead of scanning DirMgr
-	candidates := s.EvacMgr.GetCandidatesInRange(start, end)
-
-	var data [][]byte
-	var info []struct {
-		Key  []byte
-		Size int
-	}
-
-	for _, entry := range candidates {
-		dirOff := entry.Offset
-
-		// 1. Read doc header
-		headerBuf := make([]byte, DocHeaderSize)
-		_, err := s.Fd.ReadAt(headerBuf, dirOff)
-		if err != nil {
+func (s *Stripe) collectEvacuationData(start, end int64) []evacuationRecord {
+	var result []evacuationRecord
+	bytes := 0
+	for _, e := range s.EvacMgr.GetCandidatesInRange(start, end) {
+		hit, _, d := s.DirMgr.Get(e.LogicalKey)
+		if !hit || int64(d.offset()) != e.Offset || !s.dirValid(d) {
+			continue
+		}
+		header := make([]byte, DocHeaderSize)
+		if _, err := s.disk.ReadAt(header, e.Offset); err != nil {
 			continue
 		}
 		var doc Doc
-		if err := doc.UnmarshalBinary(headerBuf); err != nil {
+		if doc.UnmarshalBinary(header) != nil || doc.Magic != DocMagic || doc.VMajor != docIdentityVersion || doc.Key != e.Key {
 			continue
 		}
-
-		if doc.Magic != DocMagic {
+		size := int(doc.Len)
+		if size < DocHeaderSize || size > AggBufferSize || uint64(doc.HLen) > uint64(size-DocHeaderSize) || e.Offset+int64(size) > s.Skip+s.Len || bytes+size > AggBufferSize || int64(size)+end-start > s.Skip+s.Len-s.Start {
 			continue
 		}
-
-		// Verify Key matches to ensure we are evacuating the right object
-		if doc.VMajor != docIdentityVersion || doc.Key != entry.Key {
+		data := make([]byte, size)
+		if _, err := s.disk.ReadAt(data, e.Offset); err != nil {
 			continue
 		}
-
-		// 2. Read entire document
-		// Use doc.Len/TotalLen from disk or trusted entry.Size?
-		// Disk is authoritative.
-		docSize := int64(DocHeaderSize) + int64(doc.HLen) + int64(doc.TotalLen)
-
-		// Align docSize
-		approxSize := int((docSize + int64(s.SectorSize) - 1) / int64(s.SectorSize) * int64(s.SectorSize))
-
-		docData := make([]byte, docSize)
-		_, err = s.Fd.ReadAt(docData, dirOff)
-		if err != nil {
-			continue
+		gen := s.generation
+		if d.phase() != s.Phase {
+			if gen == 0 {
+				continue
+			}
+			gen--
 		}
-
-		data = append(data, docData)
-
-		keyCopy := append([]byte(nil), entry.LogicalKey...)
-
-		info = append(info, struct {
-			Key  []byte
-			Size int
-		}{Key: keyCopy, Size: approxSize})
-
-		logger.Debugf("Evacuating doc at %d, size %d", dirOff, docSize)
+		result = append(result, evacuationRecord{key: e.LogicalKey, data: data, old: d, generation: gen})
+		bytes += size
 	}
-
-	return data, info, nil
+	return result
 }
-
-// recomputeHitEvacuateWindow recalculates the hit evacuate window.
-// Aligned with ATS StripeSM::recompute_hit_evacuate_window().
+func (s *Stripe) evacuate() {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.evacCtx.Done():
+			return
+		case batch := <-s.evacQueue:
+			for _, v := range batch {
+				a, err := s.AggBuffer.addContext(s.evacCtx, v.data, len(v.data), nil)
+				if err != nil {
+					break
+				}
+				if err = s.AggBuffer.flushThrough(s.evacCtx, a.sequence); err != nil {
+					break
+				}
+				s.mu.Lock()
+				hit, _, current := s.DirMgr.Get(v.key)
+				if !s.closing && s.storageErr == nil && hit && current.offset() == v.old.offset() && current.phase() == v.old.phase() && v.generation+1 >= s.generation && s.allocationValid(a, len(v.data)) {
+					_, err = s.DirMgr.Set(v.key, Offset(a.offset), len(v.data), a.generation%2 != 0)
+					if err == nil && s.RamCache != nil {
+						s.RamCache.Put(v.key, v.data)
+					}
+				}
+				s.mu.Unlock()
+			}
+		}
+	}
+}
 func (s *Stripe) recomputeHitEvacuateWindow() {
-	// Calculate data blocks (excluding metadata)
-	dataBlocks := (s.Len - (s.Start - s.Skip)) / int64(SectorSize)
-	// Use 10% of data blocks as window (aligned with ATS cache_config_hit_evacuate_percent)
-	s.hitEvacuateWindow = (dataBlocks * 10) / 100
-	// Ensure minimum window size
-	if s.hitEvacuateWindow < (10*1024*1024)/int64(SectorSize) {
-		s.hitEvacuateWindow = (10 * 1024 * 1024) / int64(SectorSize)
+	s.hitEvacuateWindow = (s.Skip + s.Len - s.Start) / 10
+	if s.hitEvacuateWindow < 10<<20 {
+		s.hitEvacuateWindow = 10 << 20
 	}
-	// Convert back to bytes
-	s.hitEvacuateWindow = s.hitEvacuateWindow * int64(SectorSize)
 }
-
-// withinHitEvacuateWindow checks if a directory entry is within the hit evacuate window.
-// Aligned with ATS StripeSM::within_hit_evacuate_window().
-func (s *Stripe) withinHitEvacuateWindow(dirOffset int64) bool {
+func (s *Stripe) withinHitEvacuateWindow(offset int64) bool {
 	s.mu.RLock()
-	writePos := s.WritePos
-	length := s.Len
-	start := s.Start
-	s.mu.RUnlock()
-
-	var distance int64
-	if dirOffset >= writePos {
-		distance = dirOffset - writePos
-	} else {
-		// Wrapped
-		distance = (start + length - writePos) + (dirOffset - start)
+	defer s.mu.RUnlock()
+	distance := offset - s.WritePos
+	if distance < 0 {
+		distance += s.Skip + s.Len - s.Start
 	}
-
 	return distance < s.hitEvacuateWindow
 }
-
-// DirAggBufValid checks if a directory entry is within the aggregation buffer.
-// Aligned with ATS Stripe::dir_agg_buf_valid.
 func (s *Stripe) DirAggBufValid(d *Dir) bool {
-	// Check phase first - if phases don't match, this is a stale entry
 	s.mu.RLock()
-	phase := s.Phase
-	s.mu.RUnlock()
-
-	if phase != d.phase() {
-		return false
-	}
-
-	return s.AggBuffer.DirAggBufValid(int64(d.offset()))
+	defer s.mu.RUnlock()
+	return s.dirValid(*d) && s.AggBuffer.DirAggBufValid(int64(d.offset()))
 }

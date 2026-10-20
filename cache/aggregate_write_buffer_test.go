@@ -1,6 +1,9 @@
 package cache
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -193,4 +196,76 @@ func BenchmarkAggregateWriteBuffer_Add(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		buf.Add(data, 1024, nil)
 	}
+}
+
+func TestAggregateFlushKeepsInFlightBufferUntilAcknowledged(t *testing.T) {
+	b := NewAggregateWriteBuffer()
+	b.Init(1024)
+	first := bytes.Repeat([]byte{'A'}, AggHighWaterMark)
+	if _, err := b.Add(first, len(first), nil); err != nil {
+		t.Fatal(err)
+	}
+	task1 := <-b.GetFlushChan()
+	if _, err := b.Add([]byte("second"), 6, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- b.FlushContext(ctx) }()
+	// A cancelled barrier must leave ownership of task1 with its consumer.
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("flush: %v", err)
+	}
+	if _, err := b.Add([]byte("third"), 5, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(task1.Buffer, first) {
+		t.Fatal("in-flight bytes reused before acknowledgement")
+	}
+	b.NotifyFlushDone()
+	go func() { done <- b.FlushSync() }()
+	task2 := <-b.GetFlushChan()
+	if string(task2.Buffer) != "secondthird" {
+		t.Fatalf("remaining bytes: %q", task2.Buffer)
+	}
+	b.NotifyFlushDone()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAggregateRejectsImpossibleWritesAndCancelsBackpressure(t *testing.T) {
+	b := NewAggregateWriteBuffer()
+	b.Init(1024)
+	b.SetBounds(1024, 2048)
+	if _, err := b.Add(make([]byte, 1025), 1025, nil); err == nil {
+		t.Fatal("oversized record accepted")
+	}
+	if _, err := b.Add(make([]byte, AggBufferSize+1), AggBufferSize+1, nil); err == nil {
+		t.Fatal("record larger than buffer accepted")
+	}
+	if _, err := b.Add(make([]byte, 1024), 1024, nil); err != nil {
+		t.Fatal(err)
+	}
+	b.TriggerFlush()
+	task := <-b.GetFlushChan()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := b.AddContext(ctx, []byte("next"), 4, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AddContext=%v", err)
+	}
+	if task.Offset != 1024 || task.Generation != 0 {
+		t.Fatalf("allocation=%+v", task)
+	}
+	b.NotifyFlushDone()
+	if _, err := b.Add([]byte("next"), 4, nil); err != nil {
+		t.Fatal(err)
+	}
+	b.TriggerFlush()
+	wrapped := <-b.GetFlushChan()
+	if wrapped.Offset != 1024 || wrapped.Generation != 1 {
+		t.Fatalf("wrapped allocation=%+v", wrapped)
+	}
+	b.NotifyFlushDone()
 }

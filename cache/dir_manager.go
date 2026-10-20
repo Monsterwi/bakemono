@@ -244,11 +244,9 @@ func (dm *DirManager) dirInsert(key uint16, segmentId segId, bucketId Offset, di
 	if hit {
 		// Note: set manually is dangerous, need to keep the next chain
 		next := dirs[dirOffset].next()
-		prev := dirs[dirOffset].prev()
 
 		dirs[dirOffset] = dir
 		dirs[dirOffset].setNext(next)
-		dirs[dirOffset].setPrev(prev)
 		return dirOffset, nil
 	}
 
@@ -645,4 +643,32 @@ func (dm *DirManager) deleteAt(key []byte, expected int64) bool {
 	}
 	_, err := dm.dirDelete(tag, segment, bucket)
 	return err == nil
+}
+
+// removePhase prevents old directory entries becoming valid after phase reuse.
+// It runs once per wrap, rather than scanning the directory on every write.
+func (dm *DirManager) removePhase(phase bool) {
+	for seg := segId(0); Offset(seg) < dm.SegmentsNum; seg++ {
+		dm.SegMutexes[seg].Lock()
+		dirs := dm.getSegmentDirs(seg)
+		for bucket := Offset(0); bucket < dm.BucketsNumPerSegment; bucket++ {
+			index := bucket * DirDepth
+			for {
+				d := dirs[index]
+				if d.offset() == 0 {
+					break
+				}
+				if d.phase() == phase {
+					_, _ = dm.dirDelete(d.tag(), seg, bucket)
+					index = bucket * DirDepth
+					continue
+				}
+				if d.next() == 0 {
+					break
+				}
+				index = Offset(d.next())
+			}
+		}
+		dm.SegMutexes[seg].Unlock()
+	}
 }
