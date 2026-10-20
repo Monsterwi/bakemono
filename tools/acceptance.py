@@ -572,7 +572,9 @@ def functional(args, fixtures, output):
         client.checked(product, "/small-health-full")
         client.checked(product, "/small-health-range", headers={"Range": "bytes=0-16"}, expected=client.expected("/small-health-range", bounds=(0, 16)), status=206)
         origin.healthy = False
-        time.sleep(2.2)
+        probe_headers = {"Authorization": "Bearer health-probe-only"}
+        wait_for(lambda: client.request(product, "/small-health-probe", headers=probe_headers, status=None)["status"] == 502,
+                 "all origins removed by health checks")
         client.checked(product, "/small-health-full")
         result = client.request(product, "/small-health-range", headers={"Range": "bytes=0-16"}, expected=client.expected("/small-health-range", bounds=(0, 16)), status=206)
         if result["status"] == 206:
@@ -582,7 +584,9 @@ def functional(args, fixtures, output):
                          "status": result["status"], "explanation": "Range selects a healthy pinned origin before cache lookup; full-object HIT remains available."})
         save(output / "functional.json", evidence)
         origin.healthy = True
-        time.sleep(1.2)
+        wait_for(lambda: client.request(product, "/small-health-probe", headers=probe_headers, status=None)["status"] == 200,
+                 "healthy origin rejoined")
+        client.checked(product, "/small-health-probe", headers=probe_headers)
         client.checked(product, "/small-health-range", headers={"Range": "bytes=0-16"}, expected=client.expected("/small-health-range", bounds=(0, 16)), status=206)
         product.reload({"http.health.interval": ("INT", 0), "http.max_requests": ("INT", 2), "http.max_queued_requests": ("INT", 0)})
         origin.rules["/small-overload"] = {"header_delay": .5}
