@@ -13,9 +13,10 @@ const (
 // EvacuationBlock represents an item that needs to be evacuated.
 // Aligned with ATS EvacuationBlock structure.
 type EvacuationBlock struct {
-	Key    [16]byte
-	Offset int64
-	Size   int
+	Key        [16]byte
+	LogicalKey []byte
+	Offset     int64
+	Size       int
 }
 
 // EvacuationTable manages evacuation buckets.
@@ -55,13 +56,13 @@ func (et *EvacuationTable) Register(key []byte, offset int64, size int) {
 	// Basic dedup (optional, depends on frequency)
 	// For now, blind append.
 
-	var k [16]byte
-	copy(k[:], key)
+	k := docKey(key)
 
 	et.buckets[bucketID] = append(entries, EvacuationBlock{
-		Key:    k,
-		Offset: offset,
-		Size:   size,
+		Key:        k,
+		LogicalKey: append([]byte(nil), key...),
+		Offset:     offset,
+		Size:       size,
 	})
 }
 

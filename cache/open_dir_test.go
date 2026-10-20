@@ -18,7 +18,7 @@ func TestOpenDirConcurrency(t *testing.T) {
 		convey.So(isLeader, convey.ShouldBeTrue)
 		convey.So(entry1, convey.ShouldNotBeNil)
 
-		// 2. Second writer fails (Follower)
+		// 2. Second writer fails without acquiring a reference
 		entry2, isLeader := od.Add(key, w2)
 		convey.So(isLeader, convey.ShouldBeFalse)
 		convey.So(entry2, convey.ShouldEqual, entry1) // Should return same entry
@@ -30,10 +30,9 @@ func TestOpenDirConcurrency(t *testing.T) {
 
 		// 4. Remove reference (Simulate Close)
 		od.Remove(key) // Writer close
-		od.Remove(key) // Follower close (if any) - in new logic we just RefCount--
 
 		// 5. Entry should be removed ONLY if RefCount is 0
-		// We called Add twice (refcount=2), Remove twice (refcount=0)
+		// Only the successful Add owned a reference.
 		entry = od.Get(key)
 		convey.So(entry, convey.ShouldBeNil)
 

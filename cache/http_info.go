@@ -78,6 +78,9 @@ func (h *CacheHTTPInfo) MarshalBinary() ([]byte, error) {
 	for k, vals := range h.ResponseHeaders {
 		for _, v := range vals {
 			count++
+			if count > 65535 || len(k) > 65535 || len(v) > 65535 {
+				return nil, fmt.Errorf("HTTP metadata headers exceed format limits")
+			}
 			// Key
 			kBytes := []byte(k)
 			binary.Write(headerBuf, binary.BigEndian, uint16(len(kBytes)))

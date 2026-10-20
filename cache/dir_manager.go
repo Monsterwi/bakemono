@@ -630,3 +630,19 @@ func (dm *DirManager) BinarySize() int {
 	metaSizePerSegment := int(dm.BucketsNumPerSegment*DirDepth*Offset(DirSize)) + int(DirIDSize)
 	return int(dm.SegmentsNum) * metaSizePerSegment
 }
+
+// deleteAt lets failed writers clean up only the fragments they published.
+func (dm *DirManager) deleteAt(key []byte, expected int64) bool {
+	tag, segment, bucket := calcDirHashPosition(key, dm.SegmentsNum, dm.BucketsNumPerSegment)
+	dm.SegMutexes[segment].Lock()
+	defer dm.SegMutexes[segment].Unlock()
+	hit, _, _, dir := dirProbe(tag, bucket, dm.getSegmentDirs(segment))
+	if !hit {
+		return true
+	}
+	if int64(dir.offset()) != expected {
+		return false
+	}
+	_, err := dm.dirDelete(tag, segment, bucket)
+	return err == nil
+}

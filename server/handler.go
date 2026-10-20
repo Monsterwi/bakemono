@@ -1,219 +1,178 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Monsterwi/razor/cache"
 	"github.com/Monsterwi/razor/logger"
-	"github.com/Monsterwi/razor/proxy"
 )
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
-	key := []byte(proxy.GetCacheKey(r))
-
+	// Route changes must not reuse objects populated by a previous origin policy.
+	route, _ := json.Marshal(struct {
+		Targets   []string
+		Algorithm string
+	}{s.config.UpstreamTargets, s.config.UpstreamAlgo})
+	namespace := sha256.Sum256(route)
+	key := []byte(fmt.Sprintf("%x:%s", namespace, s.proxy.CacheKey(r)))
 	switch r.Method {
 	case "PURGE":
 		s.handlePurge(key, w, r)
-	case "GET":
+	case http.MethodGet:
 		s.handleGet(key, w, r)
+	case http.MethodHead:
+		s.proxyWithoutCache(w, r)
 	default:
-		logger.Errorf("Unsupported method: %s", r.Method)
-		http.Error(w, "Unsupported Method: "+r.Method, http.StatusMethodNotAllowed)
+		http.Error(w, "Unsupported Method", http.StatusMethodNotAllowed)
 	}
 }
 
 func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
-	// 1. Try OpenRead (Checks RAM, OpenDir/RWW, Disk)
-	vc, err := s.cache.OpenRead(key)
-
-	if err == nil {
-		// Ensure VC is closed on all exit paths
-		defer vc.Close()
-
-		// HIT (or RWW HIT)
-		if vc.IsRWW() {
-			logger.Infof("Cache HIT (RWW): %s", string(key))
-			logger.SetCacheStatus(w, "HIT_RWW")
-
-			// Wait for headers from Leader
-			if err := vc.WaitForHeaders(5 * time.Second); err != nil {
-				logger.Warnf("RWW wait failed: %v", err)
-				s.proxyWithoutCache(w, r)
-				return
-			}
-
-			// Load info (should be ready now)
-			info, err := vc.LoadHTTPInfo()
-			if err != nil {
-				logger.Warnf("RWW LoadHTTPInfo failed: %v", err)
-				s.proxyWithoutCache(w, r)
-				return
-			}
-
-			s.serveCacheHit(w, r, vc, info)
-			return
-		} else {
-			// Potential Normal HIT
-			// We don't know if it's a real hit until we load the info (check disk)
-
-			info, err := vc.LoadHTTPInfo()
-			if err == nil {
-				// Real HIT
-				logger.Infof("Cache HIT: %s", string(key))
-				logger.SetCacheStatus(w, "HIT")
-				s.serveCacheHit(w, r, vc, info)
-				return
-			}
-
-			// Fake HIT (Miss)
-			// Close the reader and fall through to write
-			logger.Debugf("OpenRead success but LoadHTTPInfo failed (Cache Miss): %v", err)
-			// VC will be closed by defer
-		}
-	}
-
-	// 2. MISS - Try OpenWrite (Become Leader)
-	vc, err = s.cache.OpenWrite(key, 0)
-	if err != nil {
-		// Failed to write (Lock collision?), Proxy only
-		logger.Warnf("OpenWrite failed (conflict?): %v", err)
+	if !requestCacheable(r) {
 		s.proxyWithoutCache(w, r)
 		return
 	}
-
-	// Ensure VC is closed on all exit paths
-	defer vc.Close()
-
-	// Leader
-	logger.Infof("Cache MISS (Leader): %s", string(key))
+	// shortcut: serve committed objects only until privacy-safe request collapsing exists.
+	if vc, err := s.cache.OpenReadCommitted(key); err == nil {
+		info, loadErr := vc.LoadHTTPInfo()
+		_, fresh := responseAge(info, time.Now())
+		if loadErr == nil && fresh {
+			defer vc.Close()
+			logger.SetCacheStatus(w, "HIT")
+			s.serveCacheHit(w, r, vc, info)
+			return
+		}
+		vc.Close()
+	}
 	logger.SetCacheStatus(w, "MISS")
-	s.serveCacheMissLeader(w, r, vc)
+	s.serveCacheMiss(w, r, key)
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
 	purgedKeys := s.cache.Purge(key)
-	keys := strings.Join(purgedKeys, ", ")
-	logger.Infof("PURGED: %s", keys)
-
 	logger.SetCacheStatus(w, "PURGE")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(fmt.Sprintf("PURGED %s\n", keys)))
+	fmt.Fprintf(w, "PURGED %s\n", strings.Join(purgedKeys, ", "))
+}
+
+func copyHeaders(dst, src http.Header) {
+	for k, values := range src {
+		for _, v := range values {
+			dst.Add(k, v)
+		}
+	}
 }
 
 func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC, info *cache.CacheHTTPInfo) {
-	// Note: VC.Close() is handled by caller (handleGet) via defer
-	// This ensures cleanup even on early returns or panics
-
-	// Set Response Headers from CacheHTTPInfo
-	for k, v := range info.ResponseHeaders {
-		for _, vv := range v {
-			w.Header().Add(k, vv)
-		}
+	copyHeaders(w.Header(), info.ResponseHeaders)
+	if age, ok := responseAge(info, time.Now()); ok {
+		w.Header().Set("Age", strconv.FormatInt(int64(age/time.Second), 10))
 	}
-
-	// Write Status
-	w.WriteHeader(int(info.Status))
-
-	// Copy Body
-	_, err := io.Copy(w, vc)
-	if err != nil {
-		logger.Errorf("Error sending cache body: %v", err)
+	w.WriteHeader(info.Status)
+	if err := streamResponse(w, vc, nil, r); err != nil {
+		logger.Errorf("Cache response transfer failed: %v", err)
+		panic(http.ErrAbortHandler)
 	}
 }
 
-func (s *Server) serveCacheMissLeader(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC) {
-	// Note: VC.Close() is handled by caller (handleGet) via defer
-	// This ensures cleanup even on early returns or panics
-
-	// Proxy to Upstream
-	resp, err := s.proxy.Proxy(r)
-	if err != nil {
-		logger.Errorf("Upstream proxy error for key %s: %v", string(vc.Key), err)
-		http.Error(w, "Upstream Error: "+err.Error(), http.StatusBadGateway)
-		// VC Close will happen, but we haven't written anything.
-		// Ideally we should mark it as aborted so readers get error.
-		// For now, Writer closed with 0 bytes will look like EOF to readers.
-		return
-	}
-	defer resp.RawBody().Close()
-
-	logger.Debugf("Upstream response: Status=%d, Headers=%v", resp.StatusCode(), resp.Header())
-
-	// Save Metadata
-	info := cache.NewCacheHTTPInfo()
-	info.Status = resp.StatusCode()
-	// if info.Status == 0 {
-	// 	info.Status = 200 // Default fallback, though Proxy should set it
-	// }
-	info.RequestTime = time.Now()
-	info.ResponseTime = time.Now()
-	info.RequestMethod = r.Method
-	info.RequestURL = r.URL.String()
-
-	for k, v := range resp.Header() {
-		for _, vv := range v {
-			info.ResponseHeaders.Add(k, vv)
-		}
-	}
-
-	// This notifies waiting followers (headers ready)
-	vc.SetHTTPInfo(info)
-
-	// Write Headers to Client
-	for k, v := range resp.Header() {
-		for _, vv := range v {
-			w.Header().Add(k, vv)
-		}
-	}
-	w.WriteHeader(resp.StatusCode())
-
-	// Stream Body
-	buf := make([]byte, 32*1024)
-	for {
-		n, readErr := resp.RawBody().Read(buf)
-		if n > 0 {
-			// Write to Client
-			if _, wErr := w.Write(buf[:n]); wErr != nil {
-				// Client disconnected, stop writing to client but continue caching?
-				// For simplicity, we abort.
-				return
-			}
-
-			// Write to Cache
-			// This broadcasts to followers via Cond
-			if _, cErr := vc.Write(buf[:n]); cErr != nil {
-				logger.Errorf("Cache write error: %v", cErr)
-				// Stop caching
-			}
-		}
-
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			logger.Errorf("Upstream read error: %v", readErr)
-			return
-		}
-	}
-}
-
-func (s *Server) proxyWithoutCache(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []byte) {
+	requested := time.Now()
 	resp, err := s.proxy.Proxy(r)
 	if err != nil {
 		http.Error(w, "Upstream Error", http.StatusBadGateway)
 		return
 	}
 	defer resp.RawBody().Close()
-
-	for k, v := range resp.Header() {
-		for _, vv := range v {
-			w.Header().Add(k, vv)
+	info := cache.NewCacheHTTPInfo()
+	info.RequestTime = requested
+	info.ResponseTime = time.Now()
+	info.RequestMethod = r.Method
+	info.RequestURL = r.URL.String()
+	info.Status = resp.StatusCode()
+	info.ResponseHeaders = resp.Header().Clone()
+	var vc *cache.CacheVC
+	if _, ok := responseAge(info, time.Now()); ok && len(resp.RawResponse.Trailer) == 0 {
+		vc, err = s.cache.OpenWrite(key, 0)
+		if err == nil {
+			vc.SetHTTPInfo(info)
+			// Only the successful EOF path below may commit.
+			defer vc.Abort(errors.New("cache fill incomplete"))
 		}
 	}
+	copyHeaders(w.Header(), resp.Header())
 	w.WriteHeader(resp.StatusCode())
-	io.Copy(w, resp.RawBody())
+	if err = streamResponse(w, resp.RawBody(), vc, r); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	if err = resp.RawBody().Close(); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	if r.Context().Err() != nil || len(resp.RawResponse.Trailer) != 0 {
+		return
+	}
+	if vc != nil {
+		if err = vc.Close(); err != nil {
+			logger.Errorf("Cache commit failed: %v", err)
+		}
+	}
+}
+
+func streamResponse(w http.ResponseWriter, body io.Reader, vc *cache.CacheVC, r *http.Request) error {
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := body.Read(buf)
+		if n > 0 {
+			if err := r.Context().Err(); err != nil {
+				return err
+			}
+			written, err := w.Write(buf[:n])
+			if err != nil {
+				return err
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
+			if err := http.NewResponseController(w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				return err
+			}
+			if vc != nil {
+				if _, err := vc.Write(buf[:n]); err != nil {
+					vc.Abort(err)
+					// Cache failure must not interrupt an otherwise usable origin response.
+					vc = nil
+				}
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+func (s *Server) proxyWithoutCache(w http.ResponseWriter, r *http.Request) {
+	logger.SetCacheStatus(w, "BYPASS")
+	resp, err := s.proxy.Proxy(r)
+	if err != nil {
+		http.Error(w, "Upstream Error", http.StatusBadGateway)
+		return
+	}
+	defer resp.RawBody().Close()
+	copyHeaders(w.Header(), resp.Header())
+	w.WriteHeader(resp.StatusCode())
+	if r.Method != http.MethodHead {
+		if err := streamResponse(w, resp.RawBody(), nil, r); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}
 }
