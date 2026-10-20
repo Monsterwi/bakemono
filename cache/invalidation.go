@@ -29,14 +29,8 @@ func (c *Cache) BeginFill(key, selector []byte) (*FillToken, error) {
 	if c.KeyToStripe(key) == nil {
 		return nil, errors.New("no stripe found")
 	}
-	for _, stripe := range c.Stripes {
-		stripe.mu.Lock()
-	}
-	defer func() {
-		for i := len(c.Stripes) - 1; i >= 0; i-- {
-			c.Stripes[i].mu.Unlock()
-		}
-	}()
+	unlock := c.lockStripes()
+	defer unlock()
 	token := &FillToken{key: append([]byte(nil), key...), selector: append([]byte(nil), selector...), stripes: append([]*Stripe(nil), c.Stripes...), generations: make([]uint64, len(c.Stripes))}
 	for i, stripe := range c.Stripes {
 		if stripe.closing {
@@ -118,14 +112,7 @@ func (c *Cache) PurgeSelector(selector []byte, prefix bool) ([]string, error) {
 		return nil, errors.New("empty purge selector")
 	}
 	// Lock in configured order so close cannot publish a clean checkpoint midway.
-	for _, stripe := range c.Stripes {
-		stripe.mu.Lock()
-	}
-	unlock := func() {
-		for i := len(c.Stripes) - 1; i >= 0; i-- {
-			c.Stripes[i].mu.Unlock()
-		}
-	}
+	unlock := c.lockStripes()
 	for _, stripe := range c.Stripes {
 		if stripe.closing {
 			unlock()

@@ -1,10 +1,12 @@
 package server_test
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/Monsterwi/razor/cache"
 	"github.com/Monsterwi/razor/config"
 	"github.com/Monsterwi/razor/proxy"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -512,5 +514,232 @@ func TestUnconditionalRetryCannotReturnAnotherUnusable304(t *testing.T) {
 	got := fetch(s, target, http.Header{"Cache-Control": {"no-cache"}})
 	if got.Code != http.StatusBadGateway || calls.Load() != 3 {
 		t.Fatalf("unusable retry=%d calls=%d", got.Code, calls.Load())
+	}
+}
+
+// The first downstream body byte proves the cache writer has been reserved.
+type firstBodyRecorder struct {
+	*httptest.ResponseRecorder
+	started chan struct{}
+}
+
+func (w *firstBodyRecorder) Write(p []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(p)
+	if w.started != nil {
+		close(w.started)
+		w.started = nil
+	}
+	return n, err
+}
+
+func TestUnsafeResponseFencesAlreadyReservedWriter(t *testing.T) {
+	for _, policy := range []string{"vary-star", "no-store"} {
+		t.Run(policy, func(t *testing.T) {
+			firstEntered, unsafeEntered := make(chan struct{}), make(chan struct{})
+			firstHeaders, unsafeResponse, firstBody := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var serial atomic.Int32
+			s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+				switch serial.Add(1) {
+				case 1:
+					close(firstEntered)
+					<-firstHeaders
+					w.Header().Set("Cache-Control", "public,max-age=3600")
+					w.Header().Set("Content-Length", "3")
+					fmt.Fprint(w, "o")
+					w.(http.Flusher).Flush()
+					<-firstBody
+					fmt.Fprint(w, "ld")
+					return
+				case 2:
+					close(unsafeEntered)
+					<-unsafeResponse
+				}
+				if policy == "vary-star" {
+					w.Header().Set("Cache-Control", "public,max-age=3600")
+					w.Header().Set("Vary", "*")
+				} else {
+					w.Header().Set("Cache-Control", "no-store")
+				}
+				fmt.Fprint(w, "new")
+			})
+			target := "http://cache.test/item"
+			active := make(chan struct{})
+			first := &firstBodyRecorder{httptest.NewRecorder(), active}
+			firstDone := make(chan struct{})
+			go func() {
+				defer close(firstDone)
+				s.ServeHTTP(first, httptest.NewRequest("GET", target, nil))
+			}()
+			<-firstEntered
+			unsafeDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() { unsafeDone <- fetch(s, target, nil) }()
+			<-unsafeEntered
+			close(firstHeaders)
+			<-active
+			close(unsafeResponse)
+			unsafe := <-unsafeDone
+			close(firstBody)
+			<-firstDone
+			got := fetch(s, target, nil)
+			if first.Body.String() != "old" || unsafe.Body.String() != "new" || got.Body.String() != "new" || calls.Load() != 3 {
+				t.Fatalf("first=%q unsafe=%q next=%q origin calls=%d", first.Body.String(), unsafe.Body.String(), got.Body.String(), calls.Load())
+			}
+		})
+	}
+}
+
+func TestUnsafeResponseRetiresValidCommittedHeadAfterStorageWrap(t *testing.T) {
+	for _, policy := range []string{"vary-star", "no-store"} {
+		t.Run(policy, func(t *testing.T) {
+			entered, resume := make(chan struct{}), make(chan struct{})
+			var calls atomic.Int32
+			origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				n := calls.Add(1)
+				w.Header().Set("Cache-Control", "public,max-age=3600")
+				if n == 1 {
+					fmt.Fprint(w, "old")
+					return
+				}
+				if n == 2 {
+					close(entered)
+					<-resume
+				}
+				if policy == "vary-star" {
+					w.Header().Set("Vary", "*")
+				} else {
+					w.Header().Set("Cache-Control", "no-store")
+				}
+				fmt.Fprint(w, "new")
+			}))
+			defer origin.Close()
+			c, err := cache.NewCache(1, []string{filepath.Join(t.TempDir(), "cache")}, []int64{8 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = c.Init(); err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			padding := bytes.Repeat([]byte("p"), 1<<20)
+			fill := func() {
+				w, err := c.OpenWrite([]byte("padding"), 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = w.Write(padding); err != nil {
+					t.Fatal(err)
+				}
+				if err = w.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for range 6 {
+				fill()
+			}
+			cfg := config.GetDefaultConfig()
+			cfg.UpstreamTargets = []string{origin.URL}
+			p, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			s := server.New(cfg, c, p)
+			target := "http://cache.test/item"
+			first := fetch(s, target, nil)
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- fetch(s, target, http.Header{"Cache-Control": {"no-cache"}}) }()
+			<-entered
+			// Wrap at the beginning while the committed head remains in the tail.
+			for range 2 {
+				fill()
+			}
+			close(resume)
+			unsafe := <-done
+			next := fetch(s, target, nil)
+			if first.Body.String() != "old" || unsafe.Body.String() != "new" || next.Body.String() != "new" || calls.Load() != 3 {
+				t.Fatalf("first=%q unsafe=%q next=%q origin calls=%d", first.Body.String(), unsafe.Body.String(), next.Body.String(), calls.Load())
+			}
+		})
+	}
+}
+
+func Test304RefreshPreservesRecoveredPreviousPhaseFragments(t *testing.T) {
+	body := bytes.Repeat([]byte("body"), (1<<20)/4+1)
+	var calls, validations atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		w.Header().Set("ETag", `"v1"`)
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			validations.Add(1)
+			w.Header().Set("X-Refreshed", "yes")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Write(body)
+	}))
+	defer origin.Close()
+	path := filepath.Join(t.TempDir(), "cache")
+	start := func() (*server.Server, *cache.Cache) {
+		c, err := cache.NewCache(1, []string{path}, []int64{8 << 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = c.Init(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.GetDefaultConfig()
+		cfg.UpstreamTargets = []string{origin.URL}
+		p, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return server.New(cfg, c, p), c
+	}
+	s, c := start()
+	padding := bytes.Repeat([]byte("p"), 1<<20)
+	fill := func() {
+		w, err := c.OpenWrite([]byte("padding"), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Write(padding); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 12 {
+		fill()
+	}
+	target := "http://cache.test/item"
+	if got := fetch(s, target, nil); !bytes.Equal(got.Body.Bytes(), body) {
+		t.Fatal("initial response body mismatch")
+	}
+	for range 2 {
+		fill()
+	}
+	if err := s.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	s, c = start()
+	defer s.Shutdown()
+	refreshed := fetch(s, target, http.Header{"Cache-Control": {"no-cache"}})
+	if refreshed.Code != 200 || refreshed.Header().Get("X-Refreshed") != "yes" || !bytes.Equal(refreshed.Body.Bytes(), body) || calls.Load() != 2 || validations.Load() != 1 {
+		t.Fatalf("recovered 304 status=%d refreshed=%q bytes=%d calls=%d validations=%d", refreshed.Code, refreshed.Header().Get("X-Refreshed"), refreshed.Body.Len(), calls.Load(), validations.Load())
+	}
+	if got := fetch(s, target, nil); !bytes.Equal(got.Body.Bytes(), body) || got.Header().Get("X-Refreshed") != "yes" || calls.Load() != 2 {
+		t.Fatal("refreshed previous-phase body was not retained")
+	}
+	// The first append after recovery must not clear the recovered current phase.
+	r, err := c.OpenReadCommitted([]byte("padding"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil || !bytes.Equal(got, padding) {
+		t.Fatalf("304 append damaged recovered current-phase object: bytes=%d err=%v", len(got), err)
 	}
 }

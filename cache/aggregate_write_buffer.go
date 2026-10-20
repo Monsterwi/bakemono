@@ -53,19 +53,15 @@ func NewAggregateWriteBuffer() *AggregateWriteBuffer {
 	return &AggregateWriteBuffer{buffers: [2][]byte{make([]byte, AggBufferSize), make([]byte, AggBufferSize)}, changed: make(chan struct{}), flushChan: make(chan FlushTask, 1)}
 }
 
-func (b *AggregateWriteBuffer) Init(offset int64) { b.initPosition(offset, false) }
-func (b *AggregateWriteBuffer) initPosition(offset int64, phase bool) {
+func (b *AggregateWriteBuffer) Init(offset int64) { b.initPosition(offset, 0) }
+func (b *AggregateWriteBuffer) initPosition(offset int64, generation uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.writeCursor = offset
 	if b.maxOffset == 0 {
 		b.minOffset = offset
 	}
-	if phase {
-		b.generation = 1
-	} else {
-		b.generation = 0
-	}
+	b.generation = generation
 }
 func (b *AggregateWriteBuffer) SetBounds(min, max int64) {
 	b.mu.Lock()

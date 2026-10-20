@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"testing"
 )
 
@@ -134,4 +135,217 @@ func TestUnsafePolicyFencesEmptyFamilyWithoutCancellingOtherFill(t *testing.T) {
 		t.Fatalf("unsafe policy allowed old empty-family fill: %v", err)
 	}
 	assertInvalidationBody(t, c, "independent-download", "keep")
+}
+
+func TestUnsafePolicyCancelsReservedWriterButPreservesReplacement(t *testing.T) {
+	c := safetyCache(t)
+	key := []byte("unsafe-family")
+	old, _ := c.BeginFill(key, key)
+	unsafe, _ := c.BeginFill(key, key)
+	writer, err := c.OpenWriteFillKeyReplacing(context.Background(), old, key, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Write([]byte("old"))
+	unrelated, _ := c.OpenWrite([]byte("independent-download"), 0)
+	unrelated.Write([]byte("keep"))
+	if err = c.InvalidateFill(unsafe); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := c.OpenWrite(key, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement.Write([]byte("new"))
+	if err = replacement.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err == nil {
+		t.Fatal("unsafe policy allowed reserved writer to commit")
+	}
+	if err = unrelated.Close(); err != nil {
+		t.Fatalf("unsafe policy cancelled unrelated writer: %v", err)
+	}
+	assertInvalidationBody(t, c, string(key), "new")
+	assertInvalidationBody(t, c, "independent-download", "keep")
+}
+
+func TestUnsafePolicyPreservesNewlyCommittedHeadWithReaderReference(t *testing.T) {
+	c := safetyCache(t)
+	key := []byte("new-committed")
+	unsafe, _ := c.BeginFill(key, key)
+	writer, err := c.OpenWrite(key, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Write([]byte("new"))
+	reader, err := c.OpenRead(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.InvalidateFill(unsafe); err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil || string(body) != "new" {
+		t.Fatalf("completed writer reader=%q err=%v", body, err)
+	}
+	reader.Close()
+	assertInvalidationBody(t, c, string(key), "new")
+}
+
+func TestUnsafePolicyCannotInvalidatePostPurgeWriter(t *testing.T) {
+	c := safetyCache(t)
+	key := []byte("post-purge")
+	unsafe, _ := c.BeginFill(key, key)
+	if _, err := c.PurgeSelector(key, false); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := c.OpenWrite(key, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Write([]byte("new"))
+	if err = c.InvalidateFill(unsafe); !errors.Is(err, ErrInvalidated) {
+		t.Fatalf("pre-PURGE invalidation=%v", err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatalf("pre-PURGE token cancelled newer writer: %v", err)
+	}
+	assertInvalidationBody(t, c, string(key), "new")
+}
+
+func TestUnsafePolicyFencesReservedWriterAfterStorageWrap(t *testing.T) {
+	c := safetyCache(t)
+	key := []byte("unsafe-family")
+	unsafe, _ := c.BeginFill(key, key)
+	writer, err := c.OpenWrite(key, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Write([]byte("old"))
+	// Exceed the fixture's 32 MiB capacity through ordinary writes.
+	padding := bytes.Repeat([]byte("x"), 1<<20)
+	for range 40 {
+		filler, err := c.OpenWrite([]byte("wrap-filler"), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = filler.Write(padding); err != nil {
+			t.Fatal(err)
+		}
+		if err = filler.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = c.InvalidateFill(unsafe); err != nil {
+		t.Fatalf("storage wrap prevented unsafe-policy fence: %v", err)
+	}
+	if err = writer.Close(); err == nil {
+		t.Fatal("reserved writer escaped policy fence after storage wrap")
+	}
+}
+
+func TestUnsafePolicyPreservesNewHeadAfterOffsetAndPhaseReuse(t *testing.T) {
+	c, err := NewCache(1, []string{filepath.Join(t.TempDir(), "cache")}, []int64{8 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	write := func(key, body []byte) {
+		w, err := c.OpenWrite(key, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Write(body); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := []byte("offset-reused")
+	padding := bytes.Repeat([]byte("p"), 1<<20)
+	write(key, padding)
+	unsafe, _ := c.BeginFill(key, key)
+	// Seven equal records fit per cycle; the fifteenth reuses the first offset/phase.
+	for range 13 {
+		write([]byte("padding"), padding)
+	}
+	newer := bytes.Repeat([]byte("n"), len(padding))
+	write(key, newer)
+	if err = c.InvalidateFill(unsafe); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.OpenReadCommitted(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil || !bytes.Equal(got, newer) {
+		t.Fatalf("old token deleted offset-reusing replacement: bytes=%d err=%v", len(got), err)
+	}
+}
+
+func TestUnsafePolicyRetiresPreviousPhaseHeadAfterCleanReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache")
+	open := func() *Cache {
+		c, err := NewCache(1, []string{path}, []int64{8 << 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = c.Init(); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	c := open()
+	write := func(key, body []byte) {
+		w, err := c.OpenWrite(key, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Write(body); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	padding := bytes.Repeat([]byte("p"), 1<<20)
+	for range 13 {
+		write([]byte("padding"), padding)
+	}
+	key := []byte("previous-phase-head")
+	write(key, []byte("old"))
+	for range 2 {
+		write([]byte("padding"), padding)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c = open()
+	defer c.Close()
+	assertInvalidationBody(t, c, string(key), "old")
+	token, err := c.BeginFill(key, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.InvalidateFill(token); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := c.OpenReadCommitted(key); err == nil {
+		defer r.Close()
+		if body, err := io.ReadAll(r); err == nil {
+			t.Fatalf("unsafe previous-phase head survived clean reopen: %q", body)
+		}
+	}
 }

@@ -118,10 +118,12 @@ func (s *Stripe) Open() error {
 		s.releaseOwnership()
 		return err
 	}
-	s.AggBuffer.initPosition(s.WritePos, s.Phase)
+	// A recovered phase always needs a representable preceding generation.
+	s.generation = 2
 	if s.Phase {
-		s.generation = 1
+		s.generation++
 	}
+	s.AggBuffer.initPosition(s.WritePos, s.generation)
 	s.StartBackgroundFlusher()
 	s.wg.Add(1)
 	go s.evacuate()

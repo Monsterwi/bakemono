@@ -17,6 +17,8 @@ The cache allows lost entries after a crash. It never promises database durabili
 4. Running-session `Save` syncs data and publishes a dirty checkpoint. It cannot make the current session recoverable.
 5. `Close` fences new work and PURGE, wakes/aborts active writers, stops evacuation and drains disk writes. It snapshots directory plus key mapping under the publication lock, syncs data, writes and syncs a temporary clean checkpoint, renames it atomically, then syncs its parent directory. Only this complete clean checkpoint can restore hits.
 
+At open, the stripe and aggregate writer use the same process-local allocation generation, preserving the recovered phase and a representable preceding generation. This lets previous-phase objects remain eligible for invalidation, metadata refresh and evacuation after clean reopen; it does not change the checkpoint format.
+
 Disk reads and evacuation allocate by bounded fragment length, never whole-object `TotalLen`. Readers retain already verified fragment bytes; an overwritten, replaced, corrupt or missing later fragment returns an error. Evacuation rechecks exact directory ownership, allocation generation and the PURGE generation before publication. Repeated reader registrations for the same disk offset are coalesced.
 
 ## Verified boundaries
