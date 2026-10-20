@@ -7,7 +7,8 @@
 ## 版本、环境与测量边界
 
 - 性能/首次完整功能工具提交：`d2c62566e69ffdb60d24faef12326c626098e94e`，启动时工作树干净。后续工具提交 `0f48add85601158358b0126e37e0e29cc483dbc5` 只收紧健康故障断言并增加并发重叠 Range；重新完整执行功能矩阵，性能代码和被测主程序没有变化。
-- 主程序 SHA256：`b35db3c2d8de185e067237de4331ab49ffe07360a48e50804df07bdb3ac5f6a9`。Go **1.26.10 linux/amd64**；Python **3.12.3** 标准库客户端/源站。不是 demo server，也不是 `httptest` 替代主程序。
+- 正式性能二进制 SHA256：`b35db3c2d8de185e067237de4331ab49ffe07360a48e50804df07bdb3ac5f6a9`。Go **1.26.10 linux/amd64**；Python **3.12.3** 标准库客户端/源站。不是 demo server，也不是 `httptest` 替代主程序。
+- 最终审查修复源码：`6672737758e20af280db830bf6b2f79cd42e121e`；新主程序 SHA256：`08447e638001a01ce39c975cf48952ba03418a307cbf1ef5f02477fb153c888a`。仅增加发布前的源站端口边界校验及验收工具启动失败清理，未改缓存数据路径。新二进制已重新执行完整功能矩阵；性能表仍归属于 `d2c6256`，没有重跑 ATS 吞吐或混用版本。
 - ATS **9.2.3**，包 `trafficserver=9.2.3+ds-1+deb12u1ubuntu0.1`，二进制 SHA256：`4f12be0c0ed68e44552e0dbc99e4decf15bd2281bf315c0cfd3da33b023fd853`。这是固定发行版补丁版本，未声称最新 ATS。
 - Linux **3.10.0-957.27.2.el7.x86_64**，Intel Skylake 虚拟 CPU **8 个逻辑核**，内存约 **31.3 GiB**。测试盘 `/workspace/data` 位于 `/dev/sdb[/code]` 的 ext4 `/workspace` 挂载，约 **98.3 GiB**，正式运行开始可用约 **10.4 GiB**。没有新建裸盘、格式化或填满共享文件系统。
 - 每产品独立 **1 GiB 文件缓存、1 条带、10 MiB 应用 RAM cache**；Bakemono 对象限额 **256 MiB**、写缓冲预算 **128 MiB**、请求 **256+64 等待**，`GOMAXPROCS=8`。ATS 网络线程 **8**、task 线程 **2**、每盘 I/O 线程 **8**。两者均启用请求落盘日志，格式与实现不同。完整配置保留在原始目录。
@@ -20,6 +21,8 @@
 **客户端、源站和被测服务共享主机；Python 调度/GIL、SHA256、文件读取与 loopback 都可能先成为瓶颈。** 产品 CPU/GiB 单独统计，但整体吞吐是这一验证负载的交付能力，不是服务端独立极限或无条件产品排名。
 
 ## 功能与故障结果
+
+下表保留正式运行及 `0f48add` 补测结果，其中重叠 Range 延迟来自该次补测。最终 `6672737` 另行完整复验仍为 **19 PASS / 1 LIMITATION**：独立记录 **480 个请求**，其中5个并发批次共188个请求、非预期错误0（118×200、40×206、30个预期503）。再次验证16×200MiB仅回源1次、跨偏移8并发仅取40MiB union、随后32并发回源0；不并入正式49,480请求的分母。
 
 | 范围 | 实际结果与硬断言 |
 | --- | --- |
@@ -77,7 +80,9 @@ Bakemono 正式矩阵的采样峰为 **RSS 152.46 MiB、FD 115、goroutine 210**
 
 ## 复现与证据
 
-本地已实际通过 `go test ./... -count=1 -timeout=180s`、`GOFLAGS=-race go test -race ./... -count=1 -timeout=180s` 和 `go vet ./...`；实际binary也成功构建。
+最终修复源码已实际通过 `go test ./... -count=1 -timeout=180s`、`GOFLAGS=-race go test -race ./... -count=1 -timeout=180s` 和 `go vet ./...`；实际binary也成功构建。Python工具清理回归通过 `python3 -m unittest discover -s tools -p '*_test.py'`，并已接入CI。两轴独立复核确认工具清理和无效端口问题已解决；远端最终CI另行记录。
+
+端口回归覆盖省略端口、80/443/65535及IPv6有效，0/65536/整数溢出无效；真实HTTP测试证明坏配置Reload失败、版本不变、旧源站正文仍可用。工具回归使用真实临时子进程和源站，验证启动超时回收、Popen失败关闭日志并保留原异常，以及构造失败后的源站/客户端清理。两项非阻断的缓存路径重复建议保留，本轮不做无关重构。
 
 可复用工具：[tools/acceptance.py](../tools/acceptance.py)。下列输出目录必须尚不存在；所有 fixture、cache、结果均在用户指定测试盘，工具不会清理既有目录。
 
@@ -99,6 +104,8 @@ ATS环境JSON引用固定包解压目录及隔离runroot模板，未安装系统
 
 - `issue14-acceptance-d2c6256/`：正式64批测量；`environment.json`、`batches.json`（含每100ms资源样本）、`requests.jsonl`（逐请求SHA/长度/延迟）、`origin-*.json`、配置和全部进程日志，`outcome.json` 为 success=true。
 - `issue14-functional-overlap/`：0f48add 的完整功能复验，19 PASS/1 LIMITATION，另含跨偏移8/32并发原始结果；仍使用同一d2二进制SHA。两个目录不能混成同一请求数分母。
+- `review-functional-6672737/`：最终源码及新二进制的完整功能复验，启动时工作树干净；`environment.json`保存新SHA，`outcome.json`为success=true，`review-summary.json`独立汇总480请求/5批及已知502限制。完整配置、原始请求/源站记录和缓存保留，未覆盖前两次结果。
+- `issue-14-review-startup-{red,green}.log`、`issue-14-review-ports-{red,green}.log`：两个审查问题的失败复现及修复后通过证据；`issue-14-review-{normal,race,vet,targeted-race}.log`为最终源码验证，`issue-14-review-functional.log`为新二进制完整功能执行日志。
 - `issue-14-ats-fd-flags.json`：已测binary/config短重启的实际fd flags；通过同UID只读检查，未修改ptrace安全设置。
 - `issue-14-normal.log`、`issue-14-race.log`、`issue-14-vet.log`：全套 normal、全套race（`GOFLAGS=-race`使子binary也带race）、vet。
 - `issue-14-stats-red.log` / `issue-14-stats-green.log`：主程序本地SIGUSR1资源快照的RED→GREEN证据。SIGUSR1现在输出既有计数及真实goroutine，不新增公开管理HTTP接口。
