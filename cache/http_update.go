@@ -31,6 +31,22 @@ func (c *Cache) fillSnapshotLocked(selector []byte) ([]fillHead, error) {
 	return heads, nil
 }
 
+func (c *Cache) rangeSnapshotLocked(selector []byte) ([]fillHead, error) {
+	prefix := append(append([]byte(nil), selector...), []byte("\nrange:manifest:")...)
+	var heads []fillHead
+	for _, s := range c.Stripes {
+		keys, err := s.DirMgr.DirTrie.KeysForPrefixLimit(prefix, MaxFillVariants-len(heads))
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			hit, _, d := s.DirMgr.Get([]byte(key))
+			heads = append(heads, fillHead{s, key, d, hit, s.OpenDir.Get([]byte(key))})
+		}
+	}
+	return heads, nil
+}
+
 func (c *Cache) lockStripes() func() {
 	for _, s := range c.Stripes {
 		s.mu.Lock()
@@ -45,6 +61,11 @@ func (c *Cache) lockStripes() func() {
 func (c *Cache) checkFillEpochsLocked(token *FillToken) error {
 	if token == nil || len(token.stripes) != len(c.Stripes) || len(token.generations) != len(c.Stripes) || len(token.wraps) != len(c.Stripes) || len(token.policies) != len(c.Stripes) {
 		return ErrInvalidated
+	}
+	if token.parent != nil {
+		if err := c.checkFillEpochsLocked(token.parent); err != nil {
+			return err
+		}
 	}
 	for i, s := range c.Stripes {
 		if s.closing {
@@ -121,6 +142,10 @@ func (c *Cache) OpenWriteFillKeyReplacing(ctx context.Context, token *FillToken,
 		if s == bound.stripe {
 			bound.generation = token.generations[i]
 			bound.policy = token.policies[i]
+			if token.parent != nil {
+				bound.fenceSelector = token.parent.selector
+				bound.fencePolicy = token.parent.policies[i]
+			}
 		}
 	}
 	// Admission can fail without destroying any existing family member.
@@ -149,6 +174,13 @@ func (c *Cache) InvalidateFill(token *FillToken) error {
 		unlock()
 		return err
 	}
+	rangeHeads, err := c.rangeSnapshotLocked(token.selector)
+	if err != nil {
+		unlock()
+		return err
+	}
+	heads = append(heads, rangeHeads...)
+	snapshots := append(append([]fillHead(nil), token.snapshot...), token.rangeSnapshot...)
 	var writers []*CacheWriter
 	for i, s := range c.Stripes {
 		s.OpenDir.policyEpoch(token.selector).Add(1)
@@ -157,7 +189,7 @@ func (c *Cache) InvalidateFill(token *FillToken) error {
 				continue
 			}
 			remove := !head.present && head.writer != nil
-			for _, old := range token.snapshot {
+			for _, old := range snapshots {
 				if head != old {
 					continue
 				}

@@ -75,11 +75,12 @@ func newCacheVCWriteLocked(ctx context.Context, token *FillToken) (*CacheVC, err
 	w.cancel()
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	w.generation, w.selector, w.policy = token.generation, token.selector, token.policy
+	w.fenceSelector, w.fencePolicy = token.fenceSelector, token.fencePolicy
 	if stripe.closing || stripe.storageErr != nil {
 		w.cancel()
 		return nil, ErrCacheClosed
 	}
-	if token.generation != stripe.OpenDir.Generation() || token.policy != stripe.OpenDir.policyEpoch(token.selector).Load() {
+	if token.generation != stripe.OpenDir.Generation() || token.policy != stripe.OpenDir.policyEpoch(token.selector).Load() || (len(token.fenceSelector) > 0 && token.fencePolicy != stripe.OpenDir.policyEpoch(token.fenceSelector).Load()) {
 		w.cancel()
 		return nil, ErrInvalidated
 	}

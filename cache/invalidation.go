@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 )
 
 var ErrInvalidated = errors.New("cache operation invalidated")
@@ -11,12 +12,16 @@ var ErrInvalidated = errors.New("cache operation invalidated")
 // FillToken must be captured before fetching origin bytes. A purge conservatively
 // fences all unfinished fills on the affected stripe, without retaining key history.
 type FillToken struct {
+	parent        *FillToken
+	fenceSelector []byte
+	fencePolicy   uint64
 	stripe        *Stripe
 	key, selector []byte
 	generation    uint64
 	stripes       []*Stripe
 	generations   []uint64
 	snapshot      []fillHead
+	rangeSnapshot []fillHead
 	wraps         []uint64
 	policies      []uint64
 	policy        uint64
@@ -45,7 +50,36 @@ func (c *Cache) BeginFill(key, selector []byte) (*FillToken, error) {
 	if err != nil {
 		return nil, err
 	}
-	return token, nil
+	token.rangeSnapshot, err = c.rangeSnapshotLocked(selector)
+	return token, err
+}
+
+// DeriveFill gives each reserved range object an independent selector while
+// retaining the original pre-origin URL invalidation fence through publication.
+func (c *Cache) DeriveFill(parent *FillToken, key []byte) (*FillToken, error) {
+	if parent == nil || parent.parent != nil || !strings.HasPrefix(string(key), string(parent.selector)+"\nrange:") {
+		return nil, ErrInvalidated
+	}
+	if err := validateIdentity(key, key); err != nil {
+		return nil, err
+	}
+	unlock := c.lockStripes()
+	defer unlock()
+	if err := c.checkFillEpochsLocked(parent); err != nil {
+		return nil, err
+	}
+	token := *parent
+	token.parent = parent
+	token.rangeSnapshot = nil
+	token.key, token.selector = append([]byte(nil), key...), append([]byte(nil), key...)
+	token.policies, token.wraps = nil, nil
+	for _, stripe := range c.Stripes {
+		token.policies = append(token.policies, stripe.OpenDir.policyEpoch(key).Load())
+		token.wraps = append(token.wraps, stripe.generation)
+	}
+	var err error
+	token.snapshot, err = c.fillSnapshotLocked(key)
+	return &token, err
 }
 
 func (c *Cache) OpenWriteFill(ctx context.Context, token *FillToken, opts int) (*CacheVC, error) {
@@ -77,6 +111,10 @@ func (c *Cache) OpenWriteFillKey(ctx context.Context, token *FillToken, key []by
 		if stripe == bound.stripe {
 			bound.generation = token.generations[i]
 			bound.policy = token.policies[i]
+			if token.parent != nil {
+				bound.fenceSelector = token.parent.selector
+				bound.fencePolicy = token.parent.policies[i]
+			}
 		}
 	}
 	return newCacheVCWrite(ctx, &bound)
@@ -124,6 +162,9 @@ func (c *Cache) PurgeSelector(selector []byte, prefix bool) ([]string, error) {
 	for _, stripe := range c.Stripes {
 		stripe.OpenDir.generation.Add(1)
 		keys := stripe.DirMgr.DirTrie.KeysForSelector(selector)
+		if !prefix {
+			keys = append(keys, stripe.DirMgr.DirTrie.Get(append(append([]byte(nil), selector...), []byte("\nrange:")...))...)
+		}
 		if prefix {
 			keys = stripe.DirMgr.DirTrie.Get(selector)
 		}

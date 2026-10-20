@@ -29,6 +29,10 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
+	if rangeEligible(r) {
+		s.serveRange(w, r, key)
+		return
+	}
 	if !requestCacheable(r) {
 		s.proxyWithoutCache(w, r)
 		return

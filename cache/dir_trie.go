@@ -73,18 +73,26 @@ func (dt *DirTrie) SetIdentity(key, selector []byte) error {
 }
 
 func (dt *DirTrie) Get(prefix []byte) []string {
+	keys, _ := dt.KeysForPrefixLimit(prefix, MaxIndexEntries)
+	return keys
+}
+
+func (dt *DirTrie) KeysForPrefixLimit(prefix []byte, limit int) ([]string, error) {
 	dt.mu.RLock()
 	defer dt.mu.RUnlock()
 	var keys []string
 	for selector, entries := range dt.selectors {
 		if strings.HasPrefix(selector, string(prefix)) {
+			if len(keys)+len(entries) > limit {
+				return nil, ErrIndexFull
+			}
 			for key := range entries {
 				keys = append(keys, key)
 			}
 		}
 	}
 	sort.Strings(keys)
-	return keys
+	return keys, nil
 }
 
 func (dt *DirTrie) KeysForSelector(selector []byte) []string {
