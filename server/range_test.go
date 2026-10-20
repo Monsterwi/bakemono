@@ -562,3 +562,109 @@ func TestRangeRejectsInvalidBlockMetadataAndRevalidates(t *testing.T) {
 		})
 	}
 }
+
+func TestRangeReloadKeepsPinnedOldProducerAndSeparatesNewRuntime(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	oldData := bytes.Repeat([]byte("a"), 1<<20)
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"same"`)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		if r.Method == "GET" {
+			close(entered)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(oldData))
+	}))
+	defer old.Close()
+	next := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"same"`)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(bytes.Repeat([]byte("b"), 1<<20)))
+	}))
+	defer next.Close()
+	s, _ := newRangeDiskServer(t, filepath.Join(t.TempDir(), "cache"), 32<<20, []string{old.URL}, 64<<20)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := startFill(s, ctx, http.Header{"Range": {"bytes=0-100"}})
+	<-entered
+	follower := startFill(s, context.Background(), http.Header{"Range": {"bytes=100-200"}})
+	waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 })
+	cfg := config.GetDefaultConfig()
+	cfg.UpstreamTargets = []string{next.URL}
+	cfg.UpstreamAlgo = "round-robin"
+	if err := s.Reload(cfg); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	<-first
+	got := fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=100-200"}})
+	if got.Code != 206 || got.Body.String() != strings.Repeat("b", 101) {
+		t.Fatalf("new runtime=%d %q", got.Code, got.Body.String())
+	}
+	once.Do(func() { close(release) })
+	got = <-follower
+	if got.Code != 206 || got.Body.String() != strings.Repeat("a", 101) {
+		t.Fatalf("old runtime=%d %q", got.Code, got.Body.String())
+	}
+	waitFillStats(t, s, func(st server.Stats) bool {
+		return st.SharedFillTasks == 0 && st.SharedFillWaiters == 0 && st.CacheWriters == 0 && st.Origin.InFlight == 0
+	})
+}
+
+func TestRangeOriginBufferHoldsWriterBudget(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	s, _ := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		if r.Method == "GET" {
+			close(entered)
+			<-release
+		}
+		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(bytes.Repeat([]byte("x"), 1<<20)))
+	})
+	first := startFill(s, context.Background(), http.Header{"Range": {"bytes=0-100"}})
+	<-entered
+	if s.Stats().CacheWriters != 1 {
+		t.Errorf("block origin holds %d writer reservations, want 1 before buffering", s.Stats().CacheWriters)
+	}
+	once.Do(func() { close(release) })
+	if got := <-first; got.Code != 206 {
+		t.Fatal(got.Code)
+	}
+}
+
+func TestRangeHonorsShorterBlockFreshnessThanManifest(t *testing.T) {
+	now := time.Now().UTC()
+	var gets atomic.Int32
+	s, _ := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", now.Format(http.TimeFormat))
+		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		if r.Method == "GET" {
+			gets.Add(1)
+			w.Header().Set("Cache-Control", "public,max-age=1")
+		}
+		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader([]byte("0123456789")))
+	})
+	server.WithClock(func() time.Time { return now })(s)
+	first := fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-2"}})
+	if first.Code != 206 || first.Body.String() != "012" {
+		t.Fatal(first.Code)
+	}
+	if first.Header().Get("Cache-Control") != "no-cache" {
+		t.Errorf("assembled response advertises unchecked freshness: %q", first.Header().Get("Cache-Control"))
+	}
+	now = now.Add(2 * time.Second)
+	second := fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-2"}})
+	if second.Code != 206 || second.Body.String() != "012" || gets.Load() != 2 {
+		t.Fatalf("short-lived block status=%d body=%q GETs=%d", second.Code, second.Body.String(), gets.Load())
+	}
+}

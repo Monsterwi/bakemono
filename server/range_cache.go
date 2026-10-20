@@ -101,11 +101,16 @@ func (s *Server) rangeFill(r *http.Request, key []byte, token *cache.FillToken, 
 	}
 	defer s.fills.leave(task, creator)
 	if creator {
-		request := r.Clone(task.ctx)
+		request := withRequestRuntime(r.Clone(task.ctx), task.ctx, resources.runtime)
 		go func() {
 			defer s.fills.finish(task)
 			defer resources.release()
-			result := produce(task, request, resources)
+			release, err := resources.writers.Acquire(task.ctx, time.Duration(resources.config.QueueTimeout)*time.Second)
+			result := fillResult{err: err}
+			if err == nil {
+				defer release()
+				result = produce(task, request, resources)
+			}
 			if result.err == nil {
 				result.err = task.ctx.Err()
 			}
@@ -129,11 +134,6 @@ func (s *Server) rangeFill(r *http.Request, key []byte, token *cache.FillToken, 
 }
 
 func (s *Server) writeRangeObject(task *fillTask, key []byte, info *cache.CacheHTTPInfo, body io.Reader, limit int64, resources fillResources) error {
-	release, err := resources.writers.Acquire(task.ctx, time.Duration(resources.config.QueueTimeout)*time.Second)
-	if err != nil {
-		return err
-	}
-	defer release()
 	ctx, cancel := context.WithCancel(task.ctx)
 	vc, err := s.cache.OpenWriteFillKeyReplacing(ctx, task.token, key, nil)
 	if err != nil {
@@ -261,29 +261,37 @@ func rangeBounds(value string, total int64) (int64, int64, error) {
 	return start, end, nil
 }
 
-func (s *Server) readRangeBlock(key []byte, m *rangeManifest, index int64) ([]byte, error) {
+func (s *Server) readRangeBlock(key []byte, m *rangeManifest, index int64) ([]byte, *cache.CacheHTTPInfo, error) {
 	vc, err := s.cache.OpenReadCommitted(key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer vc.Close()
 	info, err := vc.LoadHTTPInfo()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	size := min(rangeBlockSize, m.Total-index*rangeBlockSize)
 	if info.Status != http.StatusPartialContent || info.ResponseHeaders.Get("ETag") != m.ETag {
-		return nil, errRangeChanged
+		return nil, nil, errRangeChanged
 	}
 	data, err := io.ReadAll(io.LimitReader(vc, size+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if int64(len(data)) != size {
-		return nil, io.ErrUnexpectedEOF
+		return nil, nil, io.ErrUnexpectedEOF
 	}
-	return data, nil
+	return data, info, nil
 }
+func (s *Server) rangeBlockFresh(r *http.Request, info *cache.CacheHTTPInfo) bool {
+	normal := *info
+	normal.Status = http.StatusOK
+	normal.ResponseHeaders = info.ResponseHeaders.Clone()
+	normal.ResponseHeaders.Del("Content-Range")
+	return requestFresh(r, &normal, s.now())
+}
+
 func (s *Server) invalidateRange(root []byte, parent *cache.FillToken, m *rangeManifest) {
 	hash := sha256.Sum256([]byte(m.Origin + "\x00" + m.Variant))
 	key := []byte(fmt.Sprintf("%s\nrange:manifest:%x", root, hash))
@@ -299,7 +307,7 @@ func (s *Server) invalidateRange(root []byte, parent *cache.FillToken, m *rangeM
 
 func (s *Server) ensureRangeBlock(r *http.Request, root []byte, parent *cache.FillToken, m *rangeManifest, index int64, origin *proxy.Origin) (bool, error) {
 	key := rangeBlockKey(root, m, index)
-	if _, err := s.readRangeBlock(key, m, index); err == nil {
+	if _, info, err := s.readRangeBlock(key, m, index); err == nil && s.rangeBlockFresh(r, info) {
 		return true, nil
 	}
 	token, err := s.cache.DeriveFill(parent, key)
@@ -307,7 +315,7 @@ func (s *Server) ensureRangeBlock(r *http.Request, root []byte, parent *cache.Fi
 		return false, err
 	}
 	err = s.rangeFill(r, key, token, func(task *fillTask, request *http.Request, resources fillResources) fillResult {
-		if _, err := s.readRangeBlock(key, m, index); err == nil {
+		if _, info, err := s.readRangeBlock(key, m, index); err == nil && s.rangeBlockFresh(request, info) {
 			return fillResult{key: key}
 		}
 		start := index * rangeBlockSize
@@ -442,6 +450,8 @@ func (s *Server) serveRange(w http.ResponseWriter, r *http.Request, root []byte)
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, m.Total))
 	w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	w.Header().Set("Accept-Ranges", "bytes")
+	// shortcut: require downstream validation until freshness from all blocks is combined.
+	w.Header().Set("Cache-Control", "no-cache")
 	if policy, ok := responsePolicy(info, s.now()); ok {
 		w.Header().Set("Age", strconv.FormatInt(int64(policy.age/time.Second), 10))
 	}
@@ -452,7 +462,7 @@ func (s *Server) serveRange(w http.ResponseWriter, r *http.Request, root []byte)
 	s.cacheStatus(w, status)
 	w.WriteHeader(http.StatusPartialContent)
 	for index := start / rangeBlockSize; index <= end/rangeBlockSize; index++ {
-		data, err := s.readRangeBlock(rangeBlockKey(root, m, index), m, index)
+		data, _, err := s.readRangeBlock(rangeBlockKey(root, m, index), m, index)
 		if err != nil {
 			panic(http.ErrAbortHandler)
 		}
