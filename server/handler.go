@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Monsterwi/razor/cache"
@@ -16,7 +17,7 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "PURGE":
-		s.handlePurge(w, r, key)
+		s.handlePurge(key, w, r)
 	case "GET":
 		s.handleGet(key, w, r)
 	default:
@@ -93,19 +94,14 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 	s.serveCacheMissLeader(w, r, vc)
 }
 
-func (s *Server) handlePurge(w http.ResponseWriter, r *http.Request, key []byte) {
-	err := s.cache.Remove(key)
-	if err != nil {
-		logger.Errorf("Failed to purge key %s: %v", string(key), err)
-		logger.SetCacheStatus(w, "PURGE_FAIL")
-		http.Error(w, "Purge Failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
+	purgedKeys := s.cache.Purge(key)
+	keys := strings.Join(purgedKeys, ", ")
+	logger.Infof("PURGED: %s", keys)
 
-	logger.Infof("PURGED: %s", string(key))
 	logger.SetCacheStatus(w, "PURGE")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(fmt.Sprintf("PURGED %s\n", string(key))))
+	w.Write([]byte(fmt.Sprintf("PURGED %s\n", keys)))
 }
 
 func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC, info *cache.CacheHTTPInfo) {

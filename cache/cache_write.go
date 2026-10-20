@@ -356,6 +356,10 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 		if err != nil {
 			return fmt.Errorf("failed to update dir for fragment %d: %v", idx, err)
 		}
+		// update dir trie for prefix purge (only for fragment 0, which uses the original key)
+		if idx == 0 && w.Stripe.DirMgr.DirTrie != nil {
+			w.Stripe.DirMgr.DirTrie.Set(w.Key)
+		}
 	}
 
 	return nil

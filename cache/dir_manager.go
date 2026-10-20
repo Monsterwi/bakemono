@@ -32,12 +32,15 @@ type DirManager struct {
 	Dirs         []Dir
 	DirFreeStart []uint16
 
+	DirTrie *DirTrie
+
 	// rw mutex for each segment
 	SegMutexes []sync.RWMutex
 }
 
 // Init initializes the dir manager. Dirs will Initialized as empty by default.
 func (dm *DirManager) Init(dirNum Offset) Offset {
+	dm.DirTrie = NewDirTrie()
 	dm.BucketsNum = dirNum / DirDepth
 	dm.SegmentsNum = (dm.BucketsNum + MaxBucketsPerSegment - 1) / MaxBucketsPerSegment
 	dm.BucketsNumPerSegment = (dm.BucketsNum + dm.SegmentsNum - 1) / dm.SegmentsNum

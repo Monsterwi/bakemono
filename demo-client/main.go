@@ -12,7 +12,7 @@ import (
 func main() {
 	// url := "http://10.10.135.73:80/ba117d2eb12e488ad09b27d6c4b49e03.265tscrc"
 	// url := "http://10.72.13.32:80/ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?v=1&alg=crc32&blk=16k"
-	url := "http://127.0.0.1:80/ba117d2eb12e488ad09b27d6c4b49e03.265tscrc?v=1&alg=crc32&blk=16k"
+	url := "http://127.0.0.1:80/ba117d2eb12e488ad09b27d6c4b49e03.265tscrc"
 	concurrency := 5 // 并发请求数
 	wg := sync.WaitGroup{}
 	wg.Add(concurrency)

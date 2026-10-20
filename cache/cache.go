@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+
+	"github.com/Monsterwi/razor/logger"
 )
 
 // Cache is the main entry point, managing multiple stripes (volumes).
@@ -144,6 +146,46 @@ func (c *Cache) Remove(key []byte) error {
 	}
 
 	return vc.Remove()
+}
+
+// PurgeByPrefix removes all cache entries that match the given prefix.
+// It returns a list of purged keys.
+func (c *Cache) Purge(key []byte) []string {
+	// key ends with '/'
+	prefixPurge := false
+	if key[len(key)-1] == '/' {
+		prefixPurge = true
+	}
+
+	if !prefixPurge {
+		c.Remove(key)
+		c.KeyToStripe(key).DirMgr.DirTrie.Delete(key)
+		return []string{string(key)}
+	}
+
+	// prefix purge
+	var purgedKeys []string
+	// Search all stripes for keys matching the prefix
+	for _, stripe := range c.Stripes {
+		if stripe == nil || stripe.DirMgr == nil || stripe.DirMgr.DirTrie == nil {
+			continue
+		}
+
+		// Get all keys matching the prefix from this stripe's trie
+		matchedKeys := stripe.DirMgr.DirTrie.Get(key)
+		for _, keyStr := range matchedKeys {
+			key := []byte(keyStr)
+			// Remove the key from cache
+			if err := c.Remove(key); err != nil {
+				logger.Errorf("Failed to purge key %s: %v", string(key), err)
+				continue
+			}
+			stripe.DirMgr.DirTrie.Delete(key)
+			purgedKeys = append(purgedKeys, keyStr)
+		}
+	}
+
+	return purgedKeys
 }
 
 // FragmentKey generates a key for the Nth fragment.
