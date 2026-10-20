@@ -1,22 +1,27 @@
 package proxy
 
-import (
-	"net/http"
-	"net/url"
-)
+import "net/http"
 
+// GetCacheKey preserves the complete request target; URL equivalence is not assumed.
 func GetCacheKey(r *http.Request) string {
-	includeParams := []string{"blk", "type"}
-	params := r.URL.Query()
-	values := make(url.Values)
-	for _, p := range includeParams {
-		if v := params.Get(p); v != "" {
-			values.Add(p, v)
+	scheme := r.URL.Scheme
+	if scheme == "" {
+		scheme = "http"
+		if r.TLS != nil {
+			scheme = "https"
 		}
 	}
-	cacheKey := r.URL.Path
-	if t := values.Encode(); t != "" {
-		cacheKey += "?" + t
+	authority := r.Host
+	if authority == "" {
+		authority = r.URL.Host
 	}
-	return cacheKey
+	path := r.URL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	key := "http-v2:" + scheme + "://" + authority + path
+	if r.URL.RawQuery != "" || r.URL.ForceQuery {
+		key += "?" + r.URL.RawQuery
+	}
+	return key
 }
