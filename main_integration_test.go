@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -116,6 +117,13 @@ CONFIG proxy.config.http.shutdown_timeout INT 1
 		}
 		_ = conn.Close()
 		return true
+	})
+	if err := cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "local resource snapshot", func() bool {
+		logs, _ := os.ReadFile(output.Name())
+		return regexp.MustCompile(`HTTP resource stats: .*Goroutines:[1-9][0-9]*`).Match(logs)
 	})
 	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	defer client.CloseIdleConnections()

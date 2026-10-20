@@ -136,18 +136,22 @@ func (s *Server) Run() error {
 	if s.initErr != nil {
 		return errors.Join(s.initErr, s.Shutdown())
 	}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGUSR1)
+	defer signal.Stop(quit)
 	listener, err := net.Listen("tcp", ":"+strconv.Itoa(s.config.ServerPort))
 	if err != nil {
 		return errors.Join(err, s.Shutdown())
 	}
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(quit)
 	result := make(chan error, 1)
 	go func() { result <- s.Serve(listener) }()
 	for {
 		select {
 		case received := <-quit:
+			if received == syscall.SIGUSR1 {
+				logger.Infof("HTTP resource stats: %+v", s.Stats())
+				continue
+			}
 			if received == syscall.SIGHUP {
 				cfg, reloadErr := appconfig.Load(s.config.ConfigDir)
 				if reloadErr == nil {
