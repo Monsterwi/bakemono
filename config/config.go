@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/Monsterwi/razor/balancer"
 	"github.com/Monsterwi/razor/cache"
@@ -97,13 +99,29 @@ func Load(configDir string) (*Config, error) {
 	// Apply configuration from records.config
 	// cfg.ServerAddr = rc.GetString("proxy.config.http.server_addr", cfg.ServerAddr)
 	cfg.PurgeToken = rc.GetString("proxy.config.http.purge_token", "")
-	cfg.ServerPort = rc.GetInt("proxy.config.http.server_ports", cfg.ServerPort)
+	if rc.Has("proxy.config.http.server_ports") {
+		cfg.ServerPort, err = strconv.Atoi(rc.GetString("proxy.config.http.server_ports", ""))
+		if err != nil {
+			return nil, fmt.Errorf("invalid server port")
+		}
+	}
 	cfg.LogfileDir = rc.GetString("proxy.config.log.logfile_dir", cfg.LogfileDir)
 	cfg.AccessLogFilename = rc.GetString("proxy.config.log.access_log_filename", cfg.AccessLogFilename)
 	cfg.ErrorLogFilename = rc.GetString("proxy.config.log.error_log_filename", cfg.ErrorLogFilename)
 	cfg.UpstreamAlgo = rc.GetString("proxy.config.http.parent_proxy.upstream_algo", cfg.UpstreamAlgo)
-	cfg.UpstreamTargets = rc.GetStringSlice("proxy.config.http.parent_proxy.upstream_targets", cfg.UpstreamTargets)
-	cfg.TrustedProxies = rc.GetStringSlice("proxy.config.http.trusted_proxies", cfg.TrustedProxies)
+	for key, target := range map[string]*[]string{"proxy.config.http.parent_proxy.upstream_targets": &cfg.UpstreamTargets, "proxy.config.http.trusted_proxies": &cfg.TrustedProxies} {
+		if !rc.Has(key) {
+			continue
+		}
+		values := strings.Split(rc.GetString(key, ""), ",")
+		for i := range values {
+			values[i] = strings.TrimSpace(values[i])
+			if values[i] == "" {
+				return nil, fmt.Errorf("empty value in %s", key)
+			}
+		}
+		*target = values
+	}
 	if err := cfg.loadNetwork(rc); err != nil {
 		return nil, err
 	}

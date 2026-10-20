@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,13 +17,8 @@ import (
 )
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
-	// Route changes must not reuse objects populated by a previous origin policy.
-	route, _ := json.Marshal(struct {
-		Targets   []string
-		Algorithm string
-	}{s.config.UpstreamTargets, s.config.UpstreamAlgo})
-	namespace := sha256.Sum256(route)
-	key := []byte(fmt.Sprintf("%x:%s", namespace, s.proxy.CacheKey(r)))
+	runtime := requestRuntime(r)
+	key := []byte(fmt.Sprintf("%s:%s", runtime.namespace, runtime.proxy.CacheKey(r)))
 	switch r.Method {
 	case "PURGE":
 		s.handlePurge(key, w, r)
@@ -84,7 +77,7 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
-	if s.config.PurgeToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.config.PurgeToken)) != 1 {
+	if requestRuntime(r).config.PurgeToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+requestRuntime(r).config.PurgeToken)) != 1 {
 		logger.SetLogField(w, "purge_authorized", false)
 		http.Error(w, "PURGE forbidden", http.StatusForbidden)
 		return
@@ -145,7 +138,7 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		requested := s.now()
-		resp, originHeaders, err := s.proxy.ProxyWithOriginHeaders(originRequest)
+		resp, originHeaders, err := requestRuntime(r).proxy.ProxyWithOriginHeaders(originRequest)
 		if err != nil {
 			s.upstreamError(w, r, err)
 			return
@@ -164,8 +157,8 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 			resp.RawBody().Close()
 			if valid && sameVary(previous.ResponseHeaders, merged.ResponseHeaders) {
 				merged.ResponseHeaders = mergeResponseHeaders(previous.ResponseHeaders, resp.Header())
-				ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.config.CacheWriteTimeout)*time.Second)
-				release, acquireErr := s.writers.Acquire(ctx, time.Duration(s.config.QueueTimeout)*time.Second)
+				ctx, cancel := context.WithTimeout(r.Context(), time.Duration(requestRuntime(r).config.CacheWriteTimeout)*time.Second)
+				release, acquireErr := requestRuntime(r).writers.Acquire(ctx, time.Duration(requestRuntime(r).config.QueueTimeout)*time.Second)
 				updateErr := acquireErr
 				if acquireErr == nil {
 					updateErr = s.cache.UpdateHTTPInfo(ctx, token, stored, merged)
@@ -209,15 +202,15 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 		}
 		var fill *cacheFill
 		canAdd := len(keys) < maxHTTPVariants || containsField(keys, string(representation)) || len(remove) > 0
-		if token != nil && cacheable && canAdd && r.Method == http.MethodGet && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(representation, info, resp.RawResponse.ContentLength) {
-			release, acquireErr := s.writers.Acquire(r.Context(), time.Duration(s.config.QueueTimeout)*time.Second)
+		if token != nil && cacheable && canAdd && r.Method == http.MethodGet && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(r, representation, info, resp.RawResponse.ContentLength) {
+			release, acquireErr := requestRuntime(r).writers.Acquire(r.Context(), time.Duration(requestRuntime(r).config.QueueTimeout)*time.Second)
 			if acquireErr == nil {
 				cacheCtx, cacheCancel := context.WithCancel(r.Context())
 				defer cacheCancel()
 				vc, writeErr := s.cache.OpenWriteFillKeyReplacing(cacheCtx, token, representation, remove)
 				if writeErr == nil {
 					vc.SetHTTPInfo(info)
-					fill = &cacheFill{release: release, vc: vc, cancel: cacheCancel, timeout: time.Duration(s.config.CacheWriteTimeout) * time.Second, limit: int64(s.config.MaxCacheObjectBytes), stats: &s.counters}
+					fill = &cacheFill{release: release, vc: vc, cancel: cacheCancel, timeout: time.Duration(requestRuntime(r).config.CacheWriteTimeout) * time.Second, limit: int64(requestRuntime(r).config.MaxCacheObjectBytes), stats: &s.counters}
 					defer fill.abort(errors.New("cache fill incomplete"))
 				} else {
 					release()
@@ -260,7 +253,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, fill *cac
 			if err := r.Context().Err(); err != nil {
 				return err
 			}
-			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(s.config.TransactionTimeoutIn) * time.Second))
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(requestRuntime(r).config.TransactionTimeoutIn) * time.Second))
 			written, err := w.Write(buf[:n])
 			if err != nil {
 				return err
@@ -284,7 +277,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, fill *cac
 
 func (s *Server) proxyWithoutCache(w http.ResponseWriter, r *http.Request) {
 	s.cacheStatus(w, "BYPASS")
-	resp, err := s.proxy.Proxy(r)
+	resp, err := requestRuntime(r).proxy.Proxy(r)
 	if err != nil {
 		s.upstreamError(w, r, err)
 		return
@@ -310,8 +303,8 @@ func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error
 	}
 	http.Error(w, "Upstream unavailable", status)
 }
-func (s *Server) cacheSizeAllowed(key []byte, info *cache.CacheHTTPInfo, length int64) bool {
-	if length > int64(s.config.MaxCacheObjectBytes) || len(key) > cache.MaxIndexKeyBytes {
+func (s *Server) cacheSizeAllowed(r *http.Request, key []byte, info *cache.CacheHTTPInfo, length int64) bool {
+	if length > int64(requestRuntime(r).config.MaxCacheObjectBytes) || len(key) > cache.MaxIndexKeyBytes {
 		return false
 	}
 	size := len(info.RequestURL)

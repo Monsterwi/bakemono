@@ -66,6 +66,9 @@ func WithTransport(transport http.RoundTripper) Option {
 	}
 }
 
+// Reloadable reports whether a new configured proxy can preserve transport behavior.
+func (h *HTTPProxy) Reloadable() bool { return !h.customTransport }
+
 // WithTrustedProxies accepts forwarded identity only from these CIDR networks.
 func WithTrustedProxies(networks []string) Option {
 	return func(h *HTTPProxy) error {

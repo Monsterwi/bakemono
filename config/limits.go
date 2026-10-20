@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"github.com/Monsterwi/razor/balancer"
+	"net/netip"
+	"net/url"
 	"strconv"
 )
 
@@ -44,6 +47,8 @@ func (c *Config) resourceFields() []struct {
 // Load validates explicit records before returning, including explicit zeros.
 func (c *Config) WithDefaults() *Config {
 	out := *c
+	out.UpstreamTargets = append([]string(nil), c.UpstreamTargets...)
+	out.TrustedProxies = append([]string(nil), c.TrustedProxies...)
 	if out.resourceDefaults {
 		return &out
 	}
@@ -57,6 +62,24 @@ func (c *Config) WithDefaults() *Config {
 	return &out
 }
 func (c *Config) Validate() error {
+	if len(c.UpstreamTargets) == 0 {
+		return fmt.Errorf("at least one upstream is required")
+	}
+	for _, raw := range c.UpstreamTargets {
+		target, err := url.Parse(raw)
+		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" || target.User != nil || target.Fragment != "" {
+			return fmt.Errorf("invalid upstream URL")
+		}
+	}
+	if _, err := balancer.Build(c.UpstreamAlgo, c.UpstreamTargets); err != nil {
+		return err
+	}
+	for _, network := range c.TrustedProxies {
+		if _, err := netip.ParsePrefix(network); err != nil {
+			return fmt.Errorf("invalid trusted proxy network")
+		}
+	}
+
 	if err := c.validateNetwork(); err != nil {
 		return err
 	}

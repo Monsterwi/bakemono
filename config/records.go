@@ -50,23 +50,18 @@ func LoadRecordsConfig(filePath string) (*RecordsConfig, error) {
 			continue
 		}
 
-		// Parse CONFIG lines: CONFIG <name> <type> <value>
-		if strings.HasPrefix(line, "CONFIG ") {
-			parts := strings.Fields(line)
-			if len(parts) < 4 {
-				logger.Warnf("Invalid config line %d: %s", lineNum, line)
-				continue
-			}
-
-			configName := parts[1]
-			configType := parts[2]
-			configValue := strings.Join(parts[3:], " ")
-
-			rc.configs[configName] = RecordValue{
-				Type:  configType,
-				Value: configValue,
-			}
+		parts := strings.Fields(line)
+		if len(parts) < 4 || parts[0] != "CONFIG" {
+			return nil, fmt.Errorf("invalid configuration syntax on line %d", lineNum)
 		}
+		if parts[2] != "STRING" && parts[2] != "INT" && parts[2] != "FLOAT" {
+			return nil, fmt.Errorf("invalid configuration type on line %d", lineNum)
+		}
+		if rc.Has(parts[1]) {
+			return nil, fmt.Errorf("duplicate configuration key %s", parts[1])
+		}
+		rc.configs[parts[1]] = RecordValue{Type: parts[2], Value: strings.Join(parts[3:], " ")}
+
 	}
 
 	if err := scanner.Err(); err != nil {
