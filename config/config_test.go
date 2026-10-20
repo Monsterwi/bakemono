@@ -15,6 +15,7 @@ func TestLoad(t *testing.T) {
 CONFIG proxy.config.http.server_addr STRING :9090
 CONFIG proxy.config.http.server_ports STRING 9090
 CONFIG proxy.config.log.logfile_dir STRING /tmp/bakemono/logs
+CONFIG proxy.config.http.trusted_proxies STRING 192.0.2.0/24,2001:db8::/32
 `
 
 	storageConfigPath := filepath.Join(tmpDir, "storage.config")
@@ -34,6 +35,10 @@ CONFIG proxy.config.log.logfile_dir STRING /tmp/bakemono/logs
 	cfg, err := Load(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	if len(cfg.TrustedProxies) != 2 || cfg.TrustedProxies[0] != "192.0.2.0/24" || cfg.TrustedProxies[1] != "2001:db8::/32" {
+		t.Fatalf("trusted proxies = %v", cfg.TrustedProxies)
 	}
 
 	// Verify loaded values

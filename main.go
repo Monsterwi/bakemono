@@ -86,7 +86,7 @@ func main() {
 	logger.Infof("Cache initialized with %d stripes", len(globalCache.Stripes))
 
 	// 4. Initialize Upstream
-	httpProxy, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo)
+	httpProxy, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo, proxy.WithTrustedProxies(cfg.TrustedProxies))
 	if err != nil {
 		logger.Fatalf("Failed to init proxy: %v", err)
 	}

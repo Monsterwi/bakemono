@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -19,106 +21,216 @@ var (
 	XRealIP       = http.CanonicalHeaderKey("X-Real-IP")
 	XProxy        = http.CanonicalHeaderKey("X-Proxy")
 	XForwardedFor = http.CanonicalHeaderKey("X-Forwarded-For")
-)
-
-var (
-	ReverseProxy = "Balancer-Reverse-Proxy"
+	ReverseProxy  = "Balancer-Reverse-Proxy"
 )
 
 var transport = &http.Transport{
 	MaxIdleConnsPerHost: 256,
-	MaxConnsPerHost:     0,
 	IdleConnTimeout:     90 * time.Second,
+	DisableCompression:  true,
 }
 
-// HTTPProxy refers to a reverse proxy in the balancer
+// HTTPProxy shares a connection pool across upstream requests.
 type HTTPProxy struct {
-	hostMap map[string]*httputil.ReverseProxy
-	lb      balancer.Balancer
-
-	sync.RWMutex // protect alive
-	alive        map[string]bool
+	trustedProxies []netip.Prefix
+	targets        map[string]*url.URL
+	lb             balancer.Balancer
+	transport      http.RoundTripper
+	sync.RWMutex
+	alive map[string]bool
 }
 
-// NewHTTPProxy create  new reverse proxy with url and balancer algorithm
-func NewHTTPProxy(targetHosts []string, algorithm string) (
-	*HTTPProxy, error) {
+// Option configures a proxy before it starts serving requests.
+type Option func(*HTTPProxy) error
 
-	hosts := make([]string, 0)
-	hostMap := make(map[string]*httputil.ReverseProxy)
-	alive := make(map[string]bool)
+// WithTransport supplies a shared transport, for example with private CA roots.
+// The caller owns its connection pool and must disable transparent decompression.
+func WithTransport(transport http.RoundTripper) Option {
+	return func(h *HTTPProxy) error {
+		if transport == nil {
+			return fmt.Errorf("upstream transport is nil")
+		}
+		h.transport = transport
+		return nil
+	}
+}
+
+// WithTrustedProxies accepts forwarded identity only from these CIDR networks.
+func WithTrustedProxies(networks []string) Option {
+	return func(h *HTTPProxy) error {
+		for _, network := range networks {
+			prefix, err := netip.ParsePrefix(network)
+			if err != nil {
+				return fmt.Errorf("trusted proxy %q: %w", network, err)
+			}
+			h.trustedProxies = append(h.trustedProxies, prefix)
+		}
+		return nil
+	}
+}
+
+func (h *HTTPProxy) trusted(ip netip.Addr) bool {
+	for _, prefix := range h.trustedProxies {
+		if prefix.Contains(ip.Unmap()) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *HTTPProxy) forwarding(r *http.Request) (chain, clientIP, scheme string) {
+	clientIP = GetIP(r)
+	chain = clientIP
+	scheme = "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	peer, err := netip.ParseAddr(clientIP)
+	if err != nil || !h.trusted(peer) {
+		return
+	}
+	headers := r.Header.Clone()
+	stripHopHeaders(headers)
+	if proto := headers.Get("X-Forwarded-Proto"); proto == "http" || proto == "https" {
+		scheme = proto
+	}
+	// Walk from the trusted peer toward the client; ignore any untrusted prefix.
+	values := strings.Split(strings.Join(headers.Values(XForwardedFor), ","), ",")
+	for i := len(values) - 1; i >= 0; i-- {
+		ip, err := netip.ParseAddr(strings.TrimSpace(values[i]))
+		if err != nil {
+			break
+		}
+		clientIP = ip.Unmap().String()
+		chain = clientIP + ", " + chain
+		if !h.trusted(ip) {
+			break
+		}
+	}
+	return
+}
+
+// NewHTTPProxy preserves each upstream's scheme, authority, base path and query.
+func NewHTTPProxy(targetHosts []string, algorithm string, options ...Option) (*HTTPProxy, error) {
+	h := &HTTPProxy{targets: make(map[string]*url.URL), alive: make(map[string]bool), transport: transport}
+	for _, option := range options {
+		if err := option(h); err != nil {
+			return nil, err
+		}
+	}
+	hosts := make([]string, 0, len(targetHosts))
 	for _, targetHost := range targetHosts {
-		url, err := url.Parse(targetHost)
+		target, err := url.Parse(targetHost)
 		if err != nil {
 			return nil, err
 		}
-		proxy := httputil.NewSingleHostReverseProxy(url)
-
-		originDirector := proxy.Director
-		proxy.Director = func(req *http.Request) {
-			originDirector(req)
-			req.Header.Set(XProxy, ReverseProxy)
-			req.Header.Set(XRealIP, GetIP(req))
+		if (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" || target.User != nil || target.Fragment != "" {
+			return nil, fmt.Errorf("invalid upstream URL %q", targetHost)
 		}
-
-		host := GetHost(url)
-		alive[host] = true // initial mark alive
-		hostMap[host] = proxy
-		hosts = append(hosts, host)
+		key := target.String()
+		if _, exists := h.targets[key]; exists {
+			continue
+		}
+		h.targets[key] = target
+		h.alive[key] = true
+		hosts = append(hosts, key)
 	}
-
-	lb, err := balancer.Build(algorithm, hosts)
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("at least one upstream is required")
+	}
+	var err error
+	h.lb, err = balancer.Build(algorithm, hosts)
 	if err != nil {
 		return nil, err
 	}
-
-	return &HTTPProxy{
-		hostMap: hostMap,
-		lb:      lb,
-		alive:   alive,
-	}, nil
+	return h, nil
 }
 
-// ServeHTTP implements a proxy to the http server
+func (h *HTTPProxy) rewrite(p *httputil.ProxyRequest, target *url.URL) {
+	stripHopHeaders(p.Out.Header)
+	// Cache identity and the origin must see the same query bytes.
+	p.Out.URL.RawQuery = p.In.URL.RawQuery
+	p.SetURL(target)
+	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP"} {
+		p.Out.Header.Del(name)
+	}
+	chain, ip, scheme := h.forwarding(p.In)
+	if ip != "" {
+		p.Out.Header.Set(XForwardedFor, chain)
+		p.Out.Header.Set(XRealIP, ip)
+	}
+	p.Out.Header.Set(XProxy, ReverseProxy)
+	p.Out.Header.Set("X-Forwarded-Host", p.In.Host)
+	p.Out.Header.Set("X-Forwarded-Proto", scheme)
+	p.Out.RequestURI = ""
+	p.Out.Close = false
+}
+
+// CacheKey uses the same trusted scheme as the forwarded upstream request.
+func (h *HTTPProxy) CacheKey(r *http.Request) string {
+	_, _, scheme := h.forwarding(r)
+	copy := *r
+	target := *r.URL
+	target.Scheme = scheme
+	copy.URL = &target
+	return GetCacheKey(&copy)
+}
+
+// ServeHTTP and Proxy use the same request construction and upstream transport.
 func (h *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	host, err := h.lb.Balance(GetCacheKey(r))
+	host, err := h.lb.Balance(h.CacheKey(r))
 	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte(fmt.Sprintf("balance error: %s", err.Error())))
+		http.Error(w, "no available upstream", http.StatusBadGateway)
 		return
 	}
-
 	h.lb.Inc(host)
 	defer h.lb.Done(host)
-
-	h.hostMap[host].ServeHTTP(w, r)
+	p := &httputil.ReverseProxy{
+		Rewrite:        func(p *httputil.ProxyRequest) { h.rewrite(p, h.targets[host]) },
+		Transport:      h.transport,
+		FlushInterval:  -1,
+		ModifyResponse: func(r *http.Response) error { stripHopHeaders(r.Header); return nil },
+	}
+	p.ServeHTTP(w, r)
 }
 
+// Proxy returns an unbuffered response. The caller must close RawBody.
 func (h *HTTPProxy) Proxy(r *http.Request) (*resty.Response, error) {
-	host, err := h.lb.Balance(GetCacheKey(r))
+	host, err := h.lb.Balance(h.CacheKey(r))
 	if err != nil {
-		return nil, fmt.Errorf("balance error: %s", err.Error())
+		return nil, fmt.Errorf("balance: %w", err)
 	}
-	// log.Printf("balance host: %s, key: %s", host, cacheKey)
 	h.lb.Inc(host)
-	defer h.lb.Done(host)
-
-	proxyURL := "http://" + host + r.URL.RequestURI()
-
-	client := resty.New().
-		SetDoNotParseResponse(true).
-		SetTransport(transport).
-		SetTimeout(30 * time.Second)
-	for k, v := range r.Header {
-		for _, vv := range v {
-			client.SetHeader(k, vv)
-		}
+	out := r.Clone(r.Context())
+	h.rewrite(&httputil.ProxyRequest{In: r, Out: out}, h.targets[host])
+	resp, err := h.transport.RoundTrip(out)
+	if err != nil {
+		h.lb.Done(host)
+		return nil, err
 	}
-	client.SetHeader(XRealIP, GetIP(r))
-	client.SetHeader(XProxy, ReverseProxy)
-	client.SetHeader(XForwardedFor, GetIP(r))
+	stripHopHeaders(resp.Header)
+	resp.Body = &trackedBody{ReadCloser: resp.Body, done: func() { h.lb.Done(host) }}
+	return &resty.Response{RawResponse: resp}, nil
+}
 
-	return client.R().Get(proxyURL)
+type trackedBody struct {
+	io.ReadCloser
+	once sync.Once
+	done func()
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.once.Do(b.done)
+	}
+	return n, err
+}
+
+func (b *trackedBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.done)
+	return err
 }
 
 // health check start
@@ -138,7 +250,7 @@ func (h *HTTPProxy) SetAlive(url string, alive bool) {
 
 // HealthCheck enable a health check goroutine for each agent
 func (h *HTTPProxy) HealthCheck(interval uint) {
-	for host := range h.hostMap {
+	for host := range h.targets {
 		go h.healthCheck(host, interval)
 	}
 }
@@ -147,11 +259,11 @@ func (h *HTTPProxy) HealthCheck(interval uint) {
 func (h *HTTPProxy) healthCheck(host string, interval uint) {
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	for range ticker.C {
-		if !IsBackendAlive(host) && h.ReadAlive(host) {
+		if !IsBackendAlive(GetHost(h.targets[host])) && h.ReadAlive(host) {
 			logger.Infof("Site unreachable, remove %s from load balancer.", host)
 			h.SetAlive(host, false)
 			h.lb.Remove(host)
-		} else if IsBackendAlive(host) && !h.ReadAlive(host) {
+		} else if IsBackendAlive(GetHost(h.targets[host])) && !h.ReadAlive(host) {
 			logger.Infof("Site reachable, add %s to load balancer.", host)
 			h.SetAlive(host, true)
 			h.lb.Add(host)
@@ -167,19 +279,26 @@ var ConnectionTimeout = 3 * time.Second
 
 // GetIP get client IP
 func GetIP(r *http.Request) string {
-	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if len(r.Header.Get(XForwardedFor)) != 0 {
-		xff := r.Header.Get(XForwardedFor)
-		s := strings.Index(xff, ", ")
-		if s == -1 {
-			s = len(r.Header.Get(XForwardedFor))
-		}
-		clientIP = xff[:s]
-	} else if len(r.Header.Get(XRealIP)) != 0 {
-		clientIP = r.Header.Get(XRealIP)
+	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
 	}
+	ip := net.ParseIP(clientIP)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
 
-	return clientIP
+func stripHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			header.Del(strings.TrimSpace(name))
+		}
+	}
+	for _, name := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"} {
+		header.Del(name)
+	}
 }
 
 // GetHost get the hostname, looks like IP:Port
@@ -201,8 +320,7 @@ func IsBackendAlive(host string) bool {
 	if err != nil {
 		return false
 	}
-	resolveAddr := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
-	conn, err := net.DialTimeout("tcp", resolveAddr, ConnectionTimeout)
+	conn, err := net.DialTimeout("tcp", addr.String(), ConnectionTimeout)
 	if err != nil {
 		return false
 	}
