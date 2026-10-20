@@ -18,9 +18,10 @@ const (
 
 // Config holds the application configuration
 type Config struct {
-	MaxClientConnections int
-	resourceDefaults     bool
-	CacheWriteTimeout    int
+	MaxClientConnections                                        int
+	resourceDefaults                                            bool
+	CacheWriteTimeout                                           int
+	SharedFillMaxTasks, SharedFillMaxWaiters, SharedFillTimeout int
 	// Config directory
 	ConfigDir string
 

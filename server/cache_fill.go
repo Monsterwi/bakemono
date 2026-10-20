@@ -8,26 +8,25 @@ import (
 	"github.com/Monsterwi/razor/cache"
 )
 
-// cacheFill bounds cache-only work. A slow or oversized cache fill is abandoned
-// without canceling an otherwise healthy origin stream.
+// cacheFill bounds fragment writes and reports whether a complete object committed.
 type cacheFill struct {
-	release        func()
 	vc             *cache.CacheVC
 	cancel         context.CancelFunc
 	timeout        time.Duration
 	limit, written int64
 	stats          *counters
+	err            error
 }
 
 func (f *cacheFill) abort(err error) {
+	if f == nil {
+		return
+	}
+	f.err = err
 	if f.vc != nil {
 		f.cancel()
 		f.vc.Abort(err)
 		f.vc = nil
-		if f.release != nil {
-			f.release()
-			f.release = nil
-		}
 	}
 }
 func (f *cacheFill) write(p []byte) {
@@ -48,9 +47,12 @@ func (f *cacheFill) write(p []byte) {
 		f.abort(err)
 	}
 }
-func (f *cacheFill) commit() {
-	if f == nil || f.vc == nil {
-		return
+func (f *cacheFill) commit() error {
+	if f == nil {
+		return errors.New("cache fill unavailable")
+	}
+	if f.vc == nil {
+		return f.err
 	}
 	timer := time.AfterFunc(f.timeout, f.cancel)
 	err := f.vc.Close()
@@ -60,8 +62,5 @@ func (f *cacheFill) commit() {
 	}
 	f.cancel()
 	f.vc = nil
-	if f.release != nil {
-		f.release()
-		f.release = nil
-	}
+	return err
 }

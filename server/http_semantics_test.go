@@ -294,7 +294,7 @@ func TestInFlightRevalidationCannotOverwritePurgeOrNewerResponse(t *testing.T) {
 			if invalidate {
 				purge(s, target, "test-secret")
 			}
-			if got := fetch(s, target, http.Header{"Cache-Control": {"no-cache"}}).Body.String(); got != "new" {
+			if got := fetch(s, target, http.Header{"Cache-Control": {"no-cache"}, "X-Validation-Request": {"independent"}}).Body.String(); got != "new" {
 				t.Fatal(got)
 			}
 			close(release)
@@ -372,7 +372,7 @@ func TestUnsafeEmptyFamilyFencesEarlierOriginResponse(t *testing.T) {
 			done := make(chan struct{})
 			go func() { defer close(done); fetch(s, target, nil) }()
 			<-entered
-			fetch(s, target, nil)
+			fetch(s, target, http.Header{"X-Policy-Request": {"independent"}})
 			close(release)
 			<-done
 			if got := fetch(s, target, nil).Body.String(); got != "private" || calls.Load() != 3 {
@@ -517,21 +517,6 @@ func TestUnconditionalRetryCannotReturnAnotherUnusable304(t *testing.T) {
 	}
 }
 
-// The first downstream body byte proves the cache writer has been reserved.
-type firstBodyRecorder struct {
-	*httptest.ResponseRecorder
-	started chan struct{}
-}
-
-func (w *firstBodyRecorder) Write(p []byte) (int, error) {
-	n, err := w.ResponseRecorder.Write(p)
-	if w.started != nil {
-		close(w.started)
-		w.started = nil
-	}
-	return n, err
-}
-
 func TestUnsafeResponseFencesAlreadyReservedWriter(t *testing.T) {
 	for _, policy := range []string{"vary-star", "no-store"} {
 		t.Run(policy, func(t *testing.T) {
@@ -563,8 +548,7 @@ func TestUnsafeResponseFencesAlreadyReservedWriter(t *testing.T) {
 				fmt.Fprint(w, "new")
 			})
 			target := "http://cache.test/item"
-			active := make(chan struct{})
-			first := &firstBodyRecorder{httptest.NewRecorder(), active}
+			first := httptest.NewRecorder()
 			firstDone := make(chan struct{})
 			go func() {
 				defer close(firstDone)
@@ -572,16 +556,16 @@ func TestUnsafeResponseFencesAlreadyReservedWriter(t *testing.T) {
 			}()
 			<-firstEntered
 			unsafeDone := make(chan *httptest.ResponseRecorder, 1)
-			go func() { unsafeDone <- fetch(s, target, nil) }()
+			go func() { unsafeDone <- fetch(s, target, http.Header{"X-Policy-Request": {"independent"}}) }()
 			<-unsafeEntered
 			close(firstHeaders)
-			<-active
+			waitFillStats(t, s, func(st server.Stats) bool { return st.CacheWriters == 2 && st.Origin.Bytes > 0 })
 			close(unsafeResponse)
 			unsafe := <-unsafeDone
 			close(firstBody)
 			<-firstDone
 			got := fetch(s, target, nil)
-			if first.Body.String() != "old" || unsafe.Body.String() != "new" || got.Body.String() != "new" || calls.Load() != 3 {
+			if first.Code != http.StatusBadGateway || unsafe.Body.String() != "new" || got.Body.String() != "new" || calls.Load() != 3 {
 				t.Fatalf("first=%q unsafe=%q next=%q origin calls=%d", first.Body.String(), unsafe.Body.String(), got.Body.String(), calls.Load())
 			}
 		})

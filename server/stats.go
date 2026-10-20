@@ -17,11 +17,21 @@ type Stats struct {
 	InFlight, Queued, CacheWriters, CacheQueued, DiskQueued                                                                     int
 	BufferReserved, DiskBufferedBytes                                                                                           int64
 	Requests, Rejected, Cancelled, Hits, Misses, Bypass, Bytes, TTFBCount, TTFBNanoseconds, CacheWriteErrors, CacheWriteSkipped uint64
+	SharedFillTasks, SharedFillWaiters                                                                                          int
+	SharedFillJoined, SharedFillCompleted, SharedFillUnshareable, SharedFillFailed, SharedFillCancelled                         uint64
 	Origin                                                                                                                      proxy.Stats
 }
 
 func (s *Server) Stats() Stats {
 	st := Stats{Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load(), Origin: s.proxy.Stats()}
+	if s.fills != nil {
+		s.fills.mu.Lock()
+		st.SharedFillTasks, st.SharedFillWaiters = s.fills.active, s.fills.waiters
+		st.SharedFillJoined, st.SharedFillCompleted, st.SharedFillUnshareable = s.fills.joined, s.fills.completed, s.fills.unshareable
+		st.SharedFillFailed, st.SharedFillCancelled = s.fills.failed, s.fills.cancelled
+		s.fills.mu.Unlock()
+	}
+
 	if s.admission != nil {
 		b := s.admission.Stats()
 		st.InFlight = b.InFlight

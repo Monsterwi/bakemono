@@ -36,12 +36,14 @@ func binaryLifecycle(t *testing.T, binary string, force bool) {
 	dir := t.TempDir()
 	body := bytes.Repeat([]byte("cache integration payload\n"), 4096)
 	finishFill := make(chan struct{})
+	fillEntered := make(chan struct{})
 	var originCalls atomic.Int64
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		originCalls.Add(1)
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		if r.URL.Path == "/draining-fill" {
+			close(fillEntered)
 			w.Write(body[:1])
 			w.(http.Flusher).Flush()
 			select {
@@ -138,11 +140,28 @@ CONFIG proxy.config.http.shutdown_timeout INT 1
 	if info, err := os.Stat(filepath.Join(dir, "cache.db")); err != nil || info.Size() == 0 {
 		t.Fatalf("temporary disk cache was not created: %v", err)
 	}
-	active, err := client.Get("http://" + address + "/draining-fill")
-	if err != nil {
-		t.Fatal(err)
+
+	type downloadResult struct {
+		body   []byte
+		err    error
+		status int
 	}
-	defer active.Body.Close()
+	download := make(chan downloadResult, 1)
+	go func() {
+		resp, err := client.Get("http://" + address + "/draining-fill")
+		if err != nil {
+			download <- downloadResult{err: err}
+			return
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		download <- downloadResult{body, err, resp.StatusCode}
+	}()
+	select {
+	case <-fillEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("origin fill did not start")
+	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
@@ -156,14 +175,14 @@ CONFIG proxy.config.http.shutdown_timeout INT 1
 	if !force {
 		close(finishFill)
 	}
-	received, readErr := io.ReadAll(active.Body)
-	active.Body.Close()
+
+	result := <-download
 	if force {
-		if readErr == nil {
+		if result.err == nil && result.status == http.StatusOK {
 			t.Fatal("expired grace produced complete response")
 		}
-	} else if readErr != nil || !bytes.Equal(received, body) {
-		t.Fatalf("graceful fill truncated: bytes=%d error=%v", len(received), readErr)
+	} else if result.err != nil || result.status != http.StatusOK || !bytes.Equal(result.body, body) {
+		t.Fatalf("graceful fill: status=%d bytes=%d error=%v", result.status, len(result.body), result.err)
 	}
 	select {
 	case err := <-done:

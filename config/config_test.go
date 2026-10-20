@@ -94,7 +94,7 @@ func TestResourceDefaultsAndInvalidRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MaxRequests < 1 || cfg.MaxOriginRequests < 1 || cfg.CacheWriteBufferBytes < 1 || cfg.RequestHeaderTimeout < 1 {
+	if cfg.MaxRequests < 1 || cfg.MaxOriginRequests < 1 || cfg.CacheWriteBufferBytes < 1 || cfg.RequestHeaderTimeout < 1 || cfg.SharedFillMaxTasks < 1 || cfg.SharedFillMaxWaiters < 100 || cfg.SharedFillTimeout < 1 {
 		t.Fatalf("missing safety defaults: %+v", cfg)
 	}
 	for _, value := range []string{"0", "-1", "bad", "999999999999999999999999"} {
@@ -103,6 +103,34 @@ func TestResourceDefaultsAndInvalidRecords(t *testing.T) {
 		}
 		if _, err := Load(dir); err == nil {
 			t.Fatalf("accepted limit %q", value)
+		}
+	}
+}
+
+func TestCoalescingLimitsLoadAndRejectInvalidValues(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "storage.config"), []byte("# unused"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	records := filepath.Join(dir, "records.config")
+	if err := os.WriteFile(records, []byte("CONFIG proxy.config.cache.shared_fill_max_tasks INT 3\nCONFIG proxy.config.cache.shared_fill_max_waiters INT 100\nCONFIG proxy.config.cache.shared_fill_timeout INT 600\nCONFIG proxy.config.cache.max_object_bytes INT 209715200\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SharedFillMaxTasks != 3 || cfg.SharedFillMaxWaiters != 100 || cfg.SharedFillTimeout != 600 || cfg.MaxCacheObjectBytes != 200<<20 {
+		t.Fatalf("limits=%+v", cfg)
+	}
+	for _, field := range []string{"shared_fill_max_tasks", "shared_fill_max_waiters", "shared_fill_timeout"} {
+		for _, value := range []string{"0", "-1", "invalid", "1000001"} {
+			if err := os.WriteFile(records, []byte("CONFIG proxy.config.cache."+field+" INT "+value+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(dir); err == nil {
+				t.Fatalf("accepted %s=%s", field, value)
+			}
 		}
 	}
 }

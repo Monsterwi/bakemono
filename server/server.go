@@ -29,6 +29,7 @@ type Server struct {
 	httpServer           *http.Server
 	admission, writers   *budget.Limiter
 	counters             counters
+	fills                *fillGroup
 	ctx                  context.Context
 	cancel               context.CancelFunc
 	mu                   sync.Mutex
@@ -63,6 +64,7 @@ func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy, options ...O
 		option(s)
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.fills = &fillGroup{ctx: s.ctx, cache: c, tasks: make(map[string]*fillTask)}
 	s.initErr = cfg.Validate()
 	if s.initErr == nil {
 		s.admission = budget.New(cfg.MaxRequests, cfg.MaxQueuedRequests)
@@ -168,6 +170,7 @@ func (s *Server) ShutdownContext(ctx context.Context) error {
 			<-done
 		}
 		s.cancel()
+		s.fills.producers.Wait()
 		err = errors.Join(err, s.proxy.Close())
 		if s.cache != nil {
 			err = errors.Join(err, s.cache.Close())
