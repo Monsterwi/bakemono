@@ -70,6 +70,11 @@ func (c *Config) Validate() error {
 		if err != nil || (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" || target.User != nil || target.Fragment != "" {
 			return fmt.Errorf("invalid upstream URL")
 		}
+		if port := target.Port(); port != "" {
+			if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+				return fmt.Errorf("upstream TCP port must be between 1 and 65535")
+			}
+		}
 	}
 	if _, err := balancer.Build(c.UpstreamAlgo, c.UpstreamTargets); err != nil {
 		return err

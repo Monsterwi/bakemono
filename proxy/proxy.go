@@ -13,6 +13,7 @@ import (
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -156,6 +157,11 @@ func NewHTTPProxy(targetHosts []string, algorithm string, options ...Option) (*H
 		}
 		if (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" || target.User != nil || target.Fragment != "" {
 			return nil, fmt.Errorf("invalid upstream URL %q", targetHost)
+		}
+		if port := target.Port(); port != "" {
+			if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+				return nil, fmt.Errorf("upstream TCP port must be between 1 and 65535")
+			}
 		}
 		key := target.String()
 		if _, exists := h.targets[key]; exists {

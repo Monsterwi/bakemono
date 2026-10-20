@@ -587,3 +587,42 @@ func TestReloadRejectsRestartOnlySettings(t *testing.T) {
 		t.Fatal("restart-only edit changed current version")
 	}
 }
+
+func TestReloadInvalidUpstreamPortKeepsVersionAndOrigin(t *testing.T) {
+	var calls atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Cache-Control", "no-store")
+		fmt.Fprint(w, "original origin")
+	}))
+	defer origin.Close()
+	cfg := config.GetDefaultConfig()
+	s := lifecycleServer(t, origin.URL, cfg)
+	front := httptest.NewServer(s)
+	defer front.Close()
+	for _, port := range []string{"0", "65536", "18446744073709551616"} {
+		t.Run(port, func(t *testing.T) {
+			before := s.Stats().RuntimeVersion
+			candidate := *cfg
+			candidate.UpstreamTargets = []string{"http://127.0.0.1:" + port}
+			if err := s.Reload(&candidate); err == nil {
+				t.Fatal("invalid upstream replaced running configuration")
+			}
+			if got := s.Stats().RuntimeVersion; got != before {
+				t.Fatalf("rejected candidate advanced version %d -> %d", before, got)
+			}
+			response, err := front.Client().Get(front.URL + "/still-serving")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil || response.StatusCode != http.StatusOK || string(body) != "original origin" {
+				t.Fatalf("old service lost: status=%d body=%q error=%v", response.StatusCode, body, err)
+			}
+		})
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("old origin calls=%d, want 3", calls.Load())
+	}
+}

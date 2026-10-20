@@ -18,6 +18,8 @@ jobs:
         run: |
           make build
           go build ./...
+      - name: Test acceptance tool cleanup
+        run: python3 -m unittest discover -s tools -p '*_test.py'
       - name: Test including real binary MISS to HIT
         run: make test
       - name: Race tests including real binary
