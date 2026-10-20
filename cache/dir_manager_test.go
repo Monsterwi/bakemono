@@ -77,10 +77,6 @@ func TestDirManager_Marshal_Unmarshal(t *testing.T) {
 	dm.Init(123457)
 	dm.InitEmptyDirs()
 
-	for seg := segId(0); Offset(seg) < dm.SegmentsNum; seg++ {
-		dm.DirFreeStart[seg] = uint16(seg)
-	}
-
 	// marshal
 	data, err := dm.MarshalBinary()
 	if err != nil {

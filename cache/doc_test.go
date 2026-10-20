@@ -51,7 +51,7 @@ func TestDocChecksum(t *testing.T) {
 		data := []byte{1, 2, 3, 4, 5}
 
 		sum := d.CalculateChecksum(data)
-		// 1+2+3+4+5 = 15
-		convey.So(sum, convey.ShouldEqual, 15)
+		// IEEE CRC32 over the zero-checksum header followed by the payload.
+		convey.So(sum, convey.ShouldEqual, uint32(3141439560))
 	})
 }

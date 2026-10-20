@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 
 func TestCacheReadWrite(t *testing.T) {
 	convey.Convey("Cache Read/Write (RWW)", t, func() {
-		tmpFile := "test_stripe_rww.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_rww.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -97,7 +98,7 @@ func TestCacheReadWrite(t *testing.T) {
 
 func TestCacheDiskPersistence(t *testing.T) {
 	convey.Convey("Cache Disk Persistence", t, func() {
-		tmpFile := "test_stripe_disk.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_disk.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -141,8 +142,7 @@ func TestCacheDiskPersistence(t *testing.T) {
 
 func TestCacheWriterFlush(t *testing.T) {
 	convey.Convey("CacheWriter Flush", t, func() {
-		stripe := NewStripe("test_stripe_flush", 1024*1024, 0)
-		defer os.Remove("test_stripe_flush")
+		stripe := NewStripe(filepath.Join(t.TempDir(), "test_stripe_flush"), 1024*1024, 0)
 		stripe.Init(1024 * 1024 / 512)
 		stripe.Open() // Need to open to have Fd
 		defer stripe.Close()
@@ -166,7 +166,7 @@ func TestCacheWriterFlush(t *testing.T) {
 
 func TestStripePersistence(t *testing.T) {
 	convey.Convey("Stripe Header Persistence", t, func() {
-		tmpFile := "test_stripe_persist.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_persist.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -211,7 +211,7 @@ func TestStripePersistence(t *testing.T) {
 
 func TestCacheRamCacheIntegration(t *testing.T) {
 	convey.Convey("Cache RamCache Integration", t, func() {
-		tmpFile := "test_stripe_ram.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_ram.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -257,7 +257,7 @@ func TestCacheRamCacheIntegration(t *testing.T) {
 func TestCacheMultiFragment(t *testing.T) {
 	convey.Convey("Cache Multi-Fragment Read/Write", t, func() {
 		// Use a larger file size to accommodate multiple 1MB fragments
-		tmpFile := "test_stripe_multi.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_multi.dat")
 		fileSize := int64(10 * 1024 * 1024) // 10MB
 		f, _ := os.Create(tmpFile)
 		f.Close()
@@ -317,7 +317,7 @@ func TestCacheMultiFragment(t *testing.T) {
 
 func TestCacheRemove(t *testing.T) {
 	convey.Convey("Cache Remove (PURGE)", t, func() {
-		tmpFile := "test_stripe_remove.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_remove.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -377,7 +377,7 @@ func TestCacheRemove(t *testing.T) {
 	})
 
 	convey.Convey("Cache Remove (PURGE) without RamCache", t, func() {
-		tmpFile := "test_stripe_remove_no_ram.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_remove_no_ram.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -414,7 +414,7 @@ func TestCacheRemove(t *testing.T) {
 	})
 
 	convey.Convey("Cache Remove (PURGE) Multi-Fragment", t, func() {
-		tmpFile := "test_stripe_remove_multifrag.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_remove_multifrag.dat")
 		fileSize := int64(10 * 1024 * 1024) // 10MB
 		f, _ := os.Create(tmpFile)
 		f.Close()

@@ -7,7 +7,7 @@ import (
 
 const (
 	StripeHeaderMagic = 0xBADBABE
-	StripeHeaderVer   = 1
+	StripeHeaderVer   = 2
 	StripeHeaderSize  = 24 // 4+4+8+4+4
 )
 

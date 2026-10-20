@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 
 func TestEvacuation(t *testing.T) {
 	convey.Convey("Evacuation Logic", t, func() {
-		tmpFile := "test_stripe_evac.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_evac.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
