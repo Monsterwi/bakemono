@@ -189,8 +189,16 @@ func SetCacheStatus(w http.ResponseWriter, status string) {
 // SetLogField sets a custom field on the response writer for logging
 // This is the generic API for adding any custom field to access logs
 func SetLogField(w http.ResponseWriter, key string, value interface{}) {
-	if rw, ok := w.(*responseWriter); ok {
-		rw.SetField(key, value)
+	for {
+		if rw, ok := w.(*responseWriter); ok {
+			rw.SetField(key, value)
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = u.Unwrap()
 	}
 }
 

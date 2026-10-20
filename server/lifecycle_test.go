@@ -1,0 +1,397 @@
+package server_test
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/Monsterwi/razor/balancer"
+	"github.com/Monsterwi/razor/cache"
+	appconfig "github.com/Monsterwi/razor/config"
+	"github.com/Monsterwi/razor/proxy"
+	"github.com/Monsterwi/razor/server"
+)
+
+func lifecycleServer(t *testing.T, origin string, cfg *appconfig.Config) *server.Server {
+	t.Helper()
+	cfg.UpstreamTargets = []string{origin}
+	cfg.UpstreamAlgo = balancer.R2Balancer
+	c, err := cache.NewCache(1, []string{filepath.Join(t.TempDir(), "cache")}, []int64{32 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Init(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server.New(cfg, c, p)
+	t.Cleanup(func() { s.Shutdown() })
+	return s
+}
+func TestServerAdmissionCancellationAndDrain(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { entered <- struct{}{}; <-r.Context().Done() }))
+	defer origin.Close()
+	cfg := appconfig.GetDefaultConfig()
+	cfg.MaxRequests = 1
+	cfg.MaxQueuedRequests = 1
+	s := lifecycleServer(t, origin.URL, cfg)
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://front.test/one", nil).WithContext(firstCtx))
+	}()
+	<-entered
+	queuedCtx, cancelQueued := context.WithCancel(context.Background())
+	defer cancelQueued()
+	queuedDone := make(chan struct{})
+	go func() {
+		defer close(queuedDone)
+		s.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://front.test/two", nil).WithContext(queuedCtx))
+	}()
+	deadline := time.After(time.Second)
+	for s.Stats().Queued != 1 {
+		select {
+		case <-deadline:
+			t.Fatal("request did not queue")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	rejected := httptest.NewRecorder()
+	s.ServeHTTP(rejected, httptest.NewRequest("GET", "http://front.test/three", nil))
+	if rejected.Code != 503 {
+		t.Fatalf("overload status=%d", rejected.Code)
+	}
+	cancelQueued()
+	<-queuedDone
+	drainCtx, stop := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer stop()
+	if err := s.ShutdownContext(drainCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("drain error=%v", err)
+	}
+	<-firstDone
+	rejected = httptest.NewRecorder()
+	s.ServeHTTP(rejected, httptest.NewRequest("GET", "http://front.test/four", nil))
+	if rejected.Code != 503 {
+		t.Fatal("accepted request after shutdown")
+	}
+	stats := s.Stats()
+	if stats.InFlight != 0 || stats.Queued != 0 || stats.Origin.InFlight != 0 || stats.Cancelled < 2 || stats.Rejected < 2 {
+		t.Fatalf("stats=%+v", stats)
+	}
+}
+func TestCacheObjectBudgetBypassesWithoutTruncation(t *testing.T) {
+	payload := "abcdef"
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		io.WriteString(w, payload)
+	}))
+	defer origin.Close()
+	cfg := appconfig.GetDefaultConfig()
+	cfg.MaxCacheObjectBytes = 3
+	s := lifecycleServer(t, origin.URL, cfg)
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest("GET", "http://front.test/object", nil))
+		if w.Body.String() != payload {
+			t.Fatalf("body=%q", w.Body.String())
+		}
+	}
+	st := s.Stats()
+	if st.Origin.Requests != 2 || st.CacheWriters != 0 || st.CacheWriteSkipped != 2 {
+		t.Fatalf("stats=%+v", st)
+	}
+}
+
+func TestListenerBoundsSlowHeadersAndClients(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.URL.Path == "/small" {
+			io.WriteString(w, "ok")
+			return
+		}
+		chunk := make([]byte, 64<<10)
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+		}
+	}))
+	defer origin.Close()
+	cfg := appconfig.GetDefaultConfig()
+	cfg.RequestHeaderTimeout = 1
+	cfg.TransactionTimeoutIn = 1
+	cfg.MaxClientConnections = 1
+	cfg.LogfileDir = t.TempDir()
+	s := lifecycleServer(t, origin.URL, cfg)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(listener) }()
+	defer func() { s.Shutdown(); <-done }()
+	address := listener.Addr().String()
+	slow, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slow.Close()
+	io.WriteString(slow, "GET /small HTTP/1.1\r\nHost: front.test\r\nX-Slow:")
+	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get("http://" + address + "/small")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || string(body) != "ok" {
+		t.Fatalf("slow header blocked progress: body=%q error=%v", body, err)
+	}
+	blocked, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocked.Close()
+	blocked.(*net.TCPConn).SetReadBuffer(1024)
+	io.WriteString(blocked, "GET /large HTTP/1.1\r\nHost: front.test\r\n\r\n")
+	deadline := time.After(5 * time.Second)
+	for {
+		st := s.Stats()
+		if st.Requests >= 2 && st.InFlight == 0 && st.Origin.InFlight == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("slow client retained work: %+v", st)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
+
+func TestCacheWriterQueueCancellationAndOverflow(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		if r.URL.Path == "/held" {
+			io.WriteString(w, "a")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		io.WriteString(w, "complete")
+	}))
+	defer origin.Close()
+	cfg := appconfig.GetDefaultConfig()
+	cfg.MaxCacheWriters = 1
+	cfg.MaxQueuedCacheWriters = 1
+	s := lifecycleServer(t, origin.URL, cfg)
+	frontend := httptest.NewServer(s)
+	defer frontend.Close()
+	first, err := frontend.Client().Get(frontend.URL + "/held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Body.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, "GET", frontend.URL+"/queued", nil)
+	queued := make(chan error, 1)
+	go func() {
+		resp, err := frontend.Client().Do(request)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		queued <- err
+	}()
+	deadline := time.After(time.Second)
+	for s.Stats().CacheQueued != 1 {
+		select {
+		case <-deadline:
+			t.Fatal("writer did not queue")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	third, err := frontend.Client().Get(frontend.URL + "/overflow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(third.Body)
+	third.Body.Close()
+	if err != nil || string(body) != "complete" {
+		t.Fatalf("cache overload truncated origin: %q %v", body, err)
+	}
+	cancel()
+	if err := <-queued; !errors.Is(err, context.Canceled) {
+		t.Fatalf("queue cancel=%v", err)
+	}
+	first.Body.Close()
+	deadline = time.After(time.Second)
+	for {
+		st := s.Stats()
+		if st.CacheWriters == 0 && st.CacheQueued == 0 && st.InFlight == 0 {
+			if st.BufferReserved != 0 || st.CacheWriteSkipped < 1 {
+				t.Fatalf("stats=%+v", st)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("writer resources retained: %+v", st)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestOversizedStreamingFillReleasesReservationBeforeDownloadEnds(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		io.WriteString(w, "abcdef")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer origin.Close()
+	cfg := appconfig.GetDefaultConfig()
+	cfg.MaxCacheWriters = 1
+	cfg.MaxCacheObjectBytes = 3
+	s := lifecycleServer(t, origin.URL, cfg)
+	frontend := httptest.NewServer(s)
+	defer frontend.Close()
+	resp, err := frontend.Client().Get(frontend.URL + "/large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	prefix := make([]byte, 6)
+	if _, err = io.ReadFull(resp.Body, prefix); err != nil || string(prefix) != "abcdef" {
+		t.Fatalf("prefix=%q error=%v", prefix, err)
+	}
+	deadline := time.After(time.Second)
+	for {
+		st := s.Stats()
+		if st.CacheWriteSkipped == 1 && st.CacheWriters == 0 {
+			if st.InFlight != 1 || st.BufferReserved != 0 {
+				t.Fatalf("stats=%+v", st)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("oversized fill retained reservation: %+v", st)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestCacheCommitFailureDoesNotTruncateOrigin(t *testing.T) {
+	var calls atomic.Int64
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Cache-Control", "public, max-age=60")
+		io.WriteString(w, "complete origin body")
+	}))
+	defer origin.Close()
+	cfg := appconfig.GetDefaultConfig()
+	cfg.UpstreamTargets = []string{origin.URL}
+	cfg.UpstreamAlgo = balancer.R2Balancer
+	c, err := cache.NewCache(1, []string{filepath.Join(t.TempDir(), "cache")}, []int64{32 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Init(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server.New(cfg, c, p)
+	defer s.Shutdown()
+	if err = c.Stripes[0].Fd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest("GET", "http://front.test/object", nil))
+		if w.Code != 200 || w.Body.String() != "complete origin body" {
+			t.Fatalf("cache error interrupted origin: %d %q", w.Code, w.Body.String())
+		}
+	}
+	st := s.Stats()
+	if calls.Load() != 2 || st.CacheWriteErrors == 0 || st.CacheWriters != 0 || st.BufferReserved != 0 {
+		t.Fatalf("failed cache commit was reused or leaked: calls=%d stats=%+v", calls.Load(), st)
+	}
+	if err = s.Shutdown(); err == nil {
+		t.Fatal("storage shutdown failure was swallowed")
+	}
+}
+
+func TestSlowUploadCannotHoldOriginOrHandlerAfterEarlyResponse(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NewResponseController(w).EnableFullDuplex()
+		io.WriteString(w, "early")
+	}))
+	defer origin.Close()
+	cfg := appconfig.GetDefaultConfig()
+	cfg.TransactionTimeoutIn = 1
+	cfg.LogfileDir = t.TempDir()
+	s := lifecycleServer(t, origin.URL, cfg)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(listener) }()
+	defer func() { s.Shutdown(); <-done }()
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(4 * time.Second))
+	io.WriteString(conn, "GET /upload HTTP/1.1\r\nHost: front.test\r\nContent-Length: 100\r\n\r\nx")
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || string(body) != "early" {
+		t.Fatalf("early response=%q error=%v", body, err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		st := s.Stats()
+		if st.InFlight == 0 && st.Origin.InFlight == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("slow upload held resources: %+v", st)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}

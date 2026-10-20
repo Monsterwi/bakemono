@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Monsterwi/razor/cache"
 	"github.com/Monsterwi/razor/logger"
+	"github.com/Monsterwi/razor/proxy"
 )
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
@@ -46,19 +48,19 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		_, fresh := responseAge(info, time.Now())
 		if loadErr == nil && fresh {
 			defer vc.Close()
-			logger.SetCacheStatus(w, "HIT")
+			s.cacheStatus(w, "HIT")
 			s.serveCacheHit(w, r, vc, info)
 			return
 		}
 		vc.Close()
 	}
-	logger.SetCacheStatus(w, "MISS")
+	s.cacheStatus(w, "MISS")
 	s.serveCacheMiss(w, r, key)
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
 	purgedKeys := s.cache.Purge(key)
-	logger.SetCacheStatus(w, "PURGE")
+	s.cacheStatus(w, "PURGE")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "PURGED %s\n", strings.Join(purgedKeys, ", "))
 }
@@ -77,7 +79,7 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache
 		w.Header().Set("Age", strconv.FormatInt(int64(age/time.Second), 10))
 	}
 	w.WriteHeader(info.Status)
-	if err := streamResponse(w, vc, nil, r); err != nil {
+	if err := s.streamResponse(w, vc, nil, r); err != nil {
 		logger.Errorf("Cache response transfer failed: %v", err)
 		panic(http.ErrAbortHandler)
 	}
@@ -87,7 +89,7 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 	requested := time.Now()
 	resp, err := s.proxy.Proxy(r)
 	if err != nil {
-		http.Error(w, "Upstream Error", http.StatusBadGateway)
+		s.upstreamError(w, r, err)
 		return
 	}
 	defer resp.RawBody().Close()
@@ -98,18 +100,31 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 	info.RequestURL = r.URL.String()
 	info.Status = resp.StatusCode()
 	info.ResponseHeaders = resp.Header().Clone()
-	var vc *cache.CacheVC
-	if _, ok := responseAge(info, time.Now()); ok && len(resp.RawResponse.Trailer) == 0 {
-		vc, err = s.cache.OpenWrite(key, 0)
-		if err == nil {
-			vc.SetHTTPInfo(info)
-			// Only the successful EOF path below may commit.
-			defer vc.Abort(errors.New("cache fill incomplete"))
+	var fill *cacheFill
+	if _, ok := responseAge(info, time.Now()); ok && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(key, info, resp.RawResponse.ContentLength) {
+		release, acquireErr := s.writers.Acquire(r.Context(), time.Duration(s.config.QueueTimeout)*time.Second)
+		if acquireErr == nil {
+			cacheCtx, cacheCancel := context.WithCancel(r.Context())
+			defer cacheCancel()
+			vc, err := s.cache.OpenWriteContext(cacheCtx, key, 0)
+			if err == nil {
+				vc.SetHTTPInfo(info)
+				// Only the successful EOF path below may commit.
+				fill = &cacheFill{release: release, vc: vc, cancel: cacheCancel, timeout: time.Duration(s.config.CacheWriteTimeout) * time.Second, limit: int64(s.config.MaxCacheObjectBytes), stats: &s.counters}
+				defer fill.abort(errors.New("cache fill incomplete"))
+			} else {
+				release()
+				s.counters.cacheSkipped.Add(1)
+			}
+		} else {
+			s.counters.cacheSkipped.Add(1)
 		}
+	} else {
+		s.counters.cacheSkipped.Add(1)
 	}
 	copyHeaders(w.Header(), resp.Header())
 	w.WriteHeader(resp.StatusCode())
-	if err = streamResponse(w, resp.RawBody(), vc, r); err != nil {
+	if err = s.streamResponse(w, resp.RawBody(), fill, r); err != nil {
 		panic(http.ErrAbortHandler)
 	}
 	if err = resp.RawBody().Close(); err != nil {
@@ -118,14 +133,10 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 	if r.Context().Err() != nil || len(resp.RawResponse.Trailer) != 0 {
 		return
 	}
-	if vc != nil {
-		if err = vc.Close(); err != nil {
-			logger.Errorf("Cache commit failed: %v", err)
-		}
-	}
+	fill.commit()
 }
 
-func streamResponse(w http.ResponseWriter, body io.Reader, vc *cache.CacheVC, r *http.Request) error {
+func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, fill *cacheFill, r *http.Request) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := body.Read(buf)
@@ -133,6 +144,7 @@ func streamResponse(w http.ResponseWriter, body io.Reader, vc *cache.CacheVC, r 
 			if err := r.Context().Err(); err != nil {
 				return err
 			}
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(s.config.TransactionTimeoutIn) * time.Second))
 			written, err := w.Write(buf[:n])
 			if err != nil {
 				return err
@@ -143,13 +155,7 @@ func streamResponse(w http.ResponseWriter, body io.Reader, vc *cache.CacheVC, r 
 			if err := http.NewResponseController(w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
 				return err
 			}
-			if vc != nil {
-				if _, err := vc.Write(buf[:n]); err != nil {
-					vc.Abort(err)
-					// Cache failure must not interrupt an otherwise usable origin response.
-					vc = nil
-				}
-			}
+			fill.write(buf[:n])
 		}
 		if readErr == io.EOF {
 			return nil
@@ -161,18 +167,43 @@ func streamResponse(w http.ResponseWriter, body io.Reader, vc *cache.CacheVC, r 
 }
 
 func (s *Server) proxyWithoutCache(w http.ResponseWriter, r *http.Request) {
-	logger.SetCacheStatus(w, "BYPASS")
+	s.cacheStatus(w, "BYPASS")
 	resp, err := s.proxy.Proxy(r)
 	if err != nil {
-		http.Error(w, "Upstream Error", http.StatusBadGateway)
+		s.upstreamError(w, r, err)
 		return
 	}
 	defer resp.RawBody().Close()
 	copyHeaders(w.Header(), resp.Header())
 	w.WriteHeader(resp.StatusCode())
 	if r.Method != http.MethodHead {
-		if err := streamResponse(w, resp.RawBody(), nil, r); err != nil {
+		if err := s.streamResponse(w, resp.RawBody(), nil, r); err != nil {
 			panic(http.ErrAbortHandler)
 		}
 	}
+}
+
+func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error) {
+	status := http.StatusBadGateway
+	if errors.Is(err, proxy.ErrOverloaded) {
+		status = http.StatusServiceUnavailable
+		s.counters.rejected.Add(1)
+	}
+	if timeout, ok := err.(interface{ Timeout() bool }); ok && timeout.Timeout() {
+		status = http.StatusGatewayTimeout
+	}
+	http.Error(w, "Upstream unavailable", status)
+}
+func (s *Server) cacheSizeAllowed(key []byte, info *cache.CacheHTTPInfo, length int64) bool {
+	if length > int64(s.config.MaxCacheObjectBytes) || len(key) > 64<<10 {
+		return false
+	}
+	size := len(info.RequestURL)
+	for k, values := range info.ResponseHeaders {
+		size += len(k)
+		for _, v := range values {
+			size += len(v)
+		}
+	}
+	return size <= 64<<10
 }

@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,10 +12,12 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/Monsterwi/razor/internal/budget"
 	"time"
 
 	"github.com/Monsterwi/razor/balancer"
-	"github.com/Monsterwi/razor/logger"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -24,18 +28,22 @@ var (
 	ReverseProxy  = "Balancer-Reverse-Proxy"
 )
 
-var transport = &http.Transport{
-	MaxIdleConnsPerHost: 256,
-	IdleConnTimeout:     90 * time.Second,
-	DisableCompression:  true,
-}
-
 // HTTPProxy shares a connection pool across upstream requests.
 type HTTPProxy struct {
-	trustedProxies []netip.Prefix
-	targets        map[string]*url.URL
-	lb             balancer.Balancer
-	transport      http.RoundTripper
+	counters
+	limits          Limits
+	budgets         map[string]*budget.Limiter
+	customTransport bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	healthMu        sync.Mutex
+	healthWG        sync.WaitGroup
+	healthCancel    context.CancelFunc
+	healthStopped   bool
+	trustedProxies  []netip.Prefix
+	targets         map[string]*url.URL
+	lb              balancer.Balancer
+	transport       http.RoundTripper
 	sync.RWMutex
 	alive map[string]bool
 }
@@ -51,6 +59,7 @@ func WithTransport(transport http.RoundTripper) Option {
 			return fmt.Errorf("upstream transport is nil")
 		}
 		h.transport = transport
+		h.customTransport = true
 		return nil
 	}
 }
@@ -112,7 +121,8 @@ func (h *HTTPProxy) forwarding(r *http.Request) (chain, clientIP, scheme string)
 
 // NewHTTPProxy preserves each upstream's scheme, authority, base path and query.
 func NewHTTPProxy(targetHosts []string, algorithm string, options ...Option) (*HTTPProxy, error) {
-	h := &HTTPProxy{targets: make(map[string]*url.URL), alive: make(map[string]bool), transport: transport}
+	h := &HTTPProxy{targets: make(map[string]*url.URL), alive: make(map[string]bool), limits: DefaultLimits()}
+	h.ctx, h.cancel = context.WithCancel(context.Background())
 	for _, option := range options {
 		if err := option(h); err != nil {
 			return nil, err
@@ -141,6 +151,10 @@ func NewHTTPProxy(targetHosts []string, algorithm string, options ...Option) (*H
 	var err error
 	h.lb, err = balancer.Build(algorithm, hosts)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.ConfigureLimits(h.limits); err != nil {
+		h.cancel()
 		return nil, err
 	}
 	return h, nil
@@ -183,11 +197,16 @@ func (h *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no available upstream", http.StatusBadGateway)
 		return
 	}
-	h.lb.Inc(host)
-	defer h.lb.Done(host)
 	p := &httputil.ReverseProxy{
-		Rewrite:        func(p *httputil.ProxyRequest) { h.rewrite(p, h.targets[host]) },
-		Transport:      h.transport,
+		Rewrite:   func(p *httputil.ProxyRequest) { h.rewrite(p, h.targets[host]) },
+		Transport: originTransport{h, host},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			status := http.StatusBadGateway
+			if errors.Is(err, ErrOverloaded) {
+				status = http.StatusServiceUnavailable
+			}
+			http.Error(w, "Upstream unavailable", status)
+		},
 		FlushInterval:  -1,
 		ModifyResponse: func(r *http.Response) error { stripHopHeaders(r.Header); return nil },
 	}
@@ -200,27 +219,35 @@ func (h *HTTPProxy) Proxy(r *http.Request) (*resty.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("balance: %w", err)
 	}
-	h.lb.Inc(host)
 	out := r.Clone(r.Context())
 	h.rewrite(&httputil.ProxyRequest{In: r, Out: out}, h.targets[host])
-	resp, err := h.transport.RoundTrip(out)
+	resp, err := h.roundTrip(out, host)
 	if err != nil {
-		h.lb.Done(host)
 		return nil, err
 	}
 	stripHopHeaders(resp.Header)
-	resp.Body = &trackedBody{ReadCloser: resp.Body, done: func() { h.lb.Done(host) }}
 	return &resty.Response{RawResponse: resp}, nil
 }
 
 type trackedBody struct {
 	io.ReadCloser
-	once sync.Once
-	done func()
+	once          sync.Once
+	done          func()
+	cancel        context.CancelFunc
+	idle          time.Duration
+	bytes, errors *atomic.Uint64
 }
 
 func (b *trackedBody) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(b.idle, b.cancel)
 	n, err := b.ReadCloser.Read(p)
+	timer.Stop()
+	if n > 0 {
+		b.bytes.Add(uint64(n))
+	}
+	if err != nil && err != io.EOF {
+		b.errors.Add(1)
+	}
 	if err != nil {
 		b.once.Do(b.done)
 	}
@@ -250,26 +277,47 @@ func (h *HTTPProxy) SetAlive(url string, alive bool) {
 
 // HealthCheck enable a health check goroutine for each agent
 func (h *HTTPProxy) HealthCheck(interval uint) {
+	h.healthMu.Lock()
+	defer h.healthMu.Unlock()
+	if interval == 0 || interval > 86400 || h.healthStopped || h.healthCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(h.ctx)
+	h.healthCancel = cancel
 	for host := range h.targets {
-		go h.healthCheck(host, interval)
+		h.healthWG.Add(1)
+		go func(host string) {
+			defer h.healthWG.Done()
+			h.healthCheck(ctx, host, time.Duration(interval)*time.Second)
+		}(host)
 	}
 }
-
-// healthCheck goroutine
-func (h *HTTPProxy) healthCheck(host string, interval uint) {
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	for range ticker.C {
-		if !IsBackendAlive(GetHost(h.targets[host])) && h.ReadAlive(host) {
-			logger.Infof("Site unreachable, remove %s from load balancer.", host)
-			h.SetAlive(host, false)
-			h.lb.Remove(host)
-		} else if IsBackendAlive(GetHost(h.targets[host])) && !h.ReadAlive(host) {
-			logger.Infof("Site reachable, add %s to load balancer.", host)
-			h.SetAlive(host, true)
-			h.lb.Add(host)
+func (h *HTTPProxy) healthCheck(ctx context.Context, host string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		conn, err := (&net.Dialer{Timeout: ConnectionTimeout}).DialContext(ctx, "tcp", GetHost(h.targets[host]))
+		alive := err == nil
+		if conn != nil {
+			conn.Close()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if alive != h.ReadAlive(host) {
+			h.SetAlive(host, alive)
+			if alive {
+				h.lb.Add(host)
+			} else {
+				h.lb.Remove(host)
+			}
 		}
 	}
-
 }
 
 // health check end

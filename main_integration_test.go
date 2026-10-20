@@ -22,18 +22,36 @@ import (
 // storage and a loopback origin. The access log marks handler completion, so the
 // second request cannot race the first request's cache commit.
 func TestBinaryCacheMissThenHit(t *testing.T) {
-	dir := t.TempDir()
-	binary := filepath.Join(dir, "bakemono")
+	binary := filepath.Join(t.TempDir(), "bakemono")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build local binary: %v\n%s", err, output)
 	}
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("grace-expiry=%t", force), func(t *testing.T) { binaryLifecycle(t, binary, force) })
+	}
+}
+
+func binaryLifecycle(t *testing.T, binary string, force bool) {
+	dir := t.TempDir()
 	body := bytes.Repeat([]byte("cache integration payload\n"), 4096)
+	finishFill := make(chan struct{})
 	var originCalls atomic.Int64
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		originCalls.Add(1)
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		if r.URL.Path == "/draining-fill" {
+			w.Write(body[:1])
+			w.(http.Flusher).Flush()
+			select {
+			case <-finishFill:
+			case <-r.Context().Done():
+				return
+			}
+			w.Write(body[1:])
+			return
+		}
 		_, _ = w.Write(body)
 	}))
 	defer origin.Close()
@@ -55,6 +73,7 @@ CONFIG proxy.config.http.parent_proxy.upstream_targets STRING %s
 CONFIG proxy.config.http.keep_alive_no_activity_timeout_in INT 5
 CONFIG proxy.config.http.transaction_no_activity_timeout_in INT 10
 CONFIG proxy.config.http.transaction_no_activity_timeout_out INT 10
+CONFIG proxy.config.http.shutdown_timeout INT 1
 `, port, dir, origin.URL)
 	for name, data := range map[string]string{
 		"records.config": config,
@@ -119,13 +138,40 @@ CONFIG proxy.config.http.transaction_no_activity_timeout_out INT 10
 	if info, err := os.Stat(filepath.Join(dir, "cache.db")); err != nil || info.Size() == 0 {
 		t.Fatalf("temporary disk cache was not created: %v", err)
 	}
+	active, err := client.Get("http://" + address + "/draining-fill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Body.Close()
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
+	}
+	waitFor(t, "listener stops intake", func() bool {
+		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if conn != nil {
+			conn.Close()
+		}
+		return err != nil
+	})
+	if !force {
+		close(finishFill)
+	}
+	received, readErr := io.ReadAll(active.Body)
+	active.Body.Close()
+	if force {
+		if readErr == nil {
+			t.Fatal("expired grace produced complete response")
+		}
+	} else if readErr != nil || !bytes.Equal(received, body) {
+		t.Fatalf("graceful fill truncated: bytes=%d error=%v", len(received), readErr)
 	}
 	select {
 	case err := <-done:
 		stopped = true
-		if err != nil {
+		if force && err == nil {
+			t.Fatal("expired grace returned successful process exit")
+		}
+		if !force && err != nil {
 			t.Fatalf("shutdown: %v", err)
 		}
 	case <-time.After(15 * time.Second):

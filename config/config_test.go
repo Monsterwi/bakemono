@@ -71,3 +71,29 @@ func TestGetDefaultConfig(t *testing.T) {
 		t.Errorf("Expected 2 default upstream targets, got %d", len(cfg.UpstreamTargets))
 	}
 }
+
+func TestResourceDefaultsAndInvalidRecords(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "storage.config"), []byte("# unused"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	records := filepath.Join(dir, "records.config")
+	if err := os.WriteFile(records, []byte("# defaults"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxRequests < 1 || cfg.MaxOriginRequests < 1 || cfg.CacheWriteBufferBytes < 1 || cfg.RequestHeaderTimeout < 1 {
+		t.Fatalf("missing safety defaults: %+v", cfg)
+	}
+	for _, value := range []string{"0", "-1", "bad", "999999999999999999999999"} {
+		if err := os.WriteFile(records, []byte("CONFIG proxy.config.http.max_requests INT "+value+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(dir); err == nil {
+			t.Fatalf("accepted limit %q", value)
+		}
+	}
+}
