@@ -2,6 +2,7 @@ package cache
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/smartystreets/goconvey/convey"
@@ -9,7 +10,7 @@ import (
 
 func TestStripe(t *testing.T) {
 	convey.Convey("Stripe", t, func() {
-		tmpFile := "test_stripe.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -32,7 +33,7 @@ func TestStripe(t *testing.T) {
 
 func TestStripeSaveLoad(t *testing.T) {
 	convey.Convey("Stripe Persistence", t, func() {
-		tmpFile := "test_stripe_persistence.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_persistence.dat")
 		defer os.Remove(tmpFile)
 
 		// Test 1: Save and Load empty stripe
@@ -268,13 +269,12 @@ func TestStripeSaveLoad(t *testing.T) {
 				err = s.Open()
 				convey.So(err, convey.ShouldBeNil)
 
-				// Modify state
-				s.WritePos += int64(1024 * (i + 1))
-				s.Phase = i%2 == 0
-
-				// Add directory entry
+				// Persist real complete objects rather than untrusted directory pointers.
 				key := []byte{byte('a' + i)}
-				_, err = s.DirMgr.Set(key, Offset(s.WritePos), 1024, s.Phase)
+				writer := NewCacheWriter(s, key)
+				_, err = writer.Write([]byte("persisted"))
+				convey.So(err, convey.ShouldBeNil)
+				err = writer.Close()
 				convey.So(err, convey.ShouldBeNil)
 
 				// Save

@@ -41,6 +41,8 @@ type Stripe struct {
 	closing                  bool
 	closeOnce                sync.Once
 	closeErr                 error
+	session                  [16]byte
+	releaseOwnership         func()
 	stopChan                 chan struct{}
 	wg                       sync.WaitGroup
 	EvacMgr                  *EvacuationTable
@@ -51,9 +53,10 @@ type Stripe struct {
 }
 
 type evacuationRecord struct {
-	key, data  []byte
-	old        Dir
-	generation uint64
+	key, data    []byte
+	old          Dir
+	generation   uint64
+	invalidation uint64
 }
 type StripeOption func(*Stripe)
 
@@ -100,14 +103,20 @@ func (s *Stripe) Open() error {
 	if err != nil {
 		return err
 	}
+	if err = s.acquireOwnership(f); err != nil {
+		_ = f.Close()
+		return err
+	}
 	s.Fd = f
 	s.disk = f
-	if err = s.Load(); err != nil {
-		if err = s.Save(); err != nil {
-			_ = f.Close()
-			s.Fd = nil
-			return err
-		}
+	_ = s.Load()
+	// Reads may evacuate data, so even a read-only session must mark dirty first.
+	if err = s.markSession(); err != nil {
+		_ = f.Close()
+		s.Fd = nil
+		s.disk = nil
+		s.releaseOwnership()
+		return err
 	}
 	s.AggBuffer.initPosition(s.WritePos, s.Phase)
 	if s.Phase {
@@ -124,6 +133,7 @@ func (s *Stripe) Close() error {
 		s.mu.Lock()
 		s.closing = true
 		s.mu.Unlock()
+		s.abortOpenWriters(ErrCacheClosed)
 		s.AggBuffer.stopAdds()
 		s.evacCancel()
 		if s.SM != nil {
@@ -134,7 +144,7 @@ func (s *Stripe) Close() error {
 		s.wg.Wait()
 		s.ioMu.Lock()
 		defer s.ioMu.Unlock()
-		saveErr := s.saveSnapshot()
+		saveErr := s.saveSnapshot(true)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.disk == nil {
@@ -142,6 +152,10 @@ func (s *Stripe) Close() error {
 			return
 		}
 		closeErr := s.disk.Close()
+		if s.releaseOwnership != nil {
+			s.releaseOwnership()
+			s.releaseOwnership = nil
+		}
 		s.Fd = nil
 		s.disk = nil
 		s.closeErr = errors.Join(flushErr, saveErr, closeErr)
@@ -149,15 +163,14 @@ func (s *Stripe) Close() error {
 	return s.closeErr
 }
 
-// Save acknowledges queued bytes before persisting a metadata snapshot. This
-// in-place checkpoint is not crash-atomic; successful WriteAt alone is not fsync.
+// Save syncs data but leaves the active session unrecoverable after a crash.
 func (s *Stripe) Save() error {
 	if err := s.FlushAggBufferSync(); err != nil {
 		return err
 	}
 	s.ioMu.Lock()
 	defer s.ioMu.Unlock()
-	return s.saveSnapshot()
+	return s.saveSnapshot(false)
 }
 func writeFullAt(f stripeFile, p []byte, off int64) error {
 	n, err := f.WriteAt(p, off)
@@ -174,68 +187,6 @@ func (s *Stripe) failLocked(err error) error {
 	return s.storageErr
 }
 
-// Caller holds ioMu; snapshot publication is atomic, disk I/O never holds mu.
-func (s *Stripe) saveSnapshot() error {
-	s.mu.Lock()
-	if s.storageErr != nil {
-		err := s.storageErr
-		s.mu.Unlock()
-		return err
-	}
-	if s.disk == nil {
-		s.mu.Unlock()
-		return ErrCacheClosed
-	}
-	h := StripeHeader{Magic: StripeHeaderMagic, Version: StripeHeaderVer, WritePos: s.WritePos, Phase: s.Phase}
-	header, err := h.MarshalBinary()
-	if err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	dirs, err := s.DirMgr.MarshalBinary()
-	f := s.disk
-	s.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	if err = writeFullAt(f, header, s.Skip); err == nil {
-		err = writeFullAt(f, dirs, s.Skip+int64(len(header)))
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.failLocked(err)
-}
-
-func (s *Stripe) Load() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.disk == nil {
-		return ErrCacheClosed
-	}
-	buf := make([]byte, StripeHeaderSize)
-	if _, err := s.disk.ReadAt(buf, s.Skip); err != nil {
-		return err
-	}
-	var h StripeHeader
-	if err := h.UnmarshalBinary(buf); err != nil {
-		return err
-	}
-	if h.Magic != StripeHeaderMagic || h.Version != StripeHeaderVer || h.WritePos < s.Start || h.WritePos > s.Skip+s.Len {
-		return fmt.Errorf("invalid stripe header")
-	}
-	dirs := make([]byte, s.DirMgr.BinarySize())
-	if _, err := s.disk.ReadAt(dirs, s.Skip+int64(len(buf))); err != nil {
-		return err
-	}
-	if err := s.DirMgr.UnmarshalBinary(dirs); err != nil {
-		return err
-	}
-	s.WritePos, s.Phase, s.Header = h.WritePos, h.Phase, &h
-	return nil
-}
 func (s *Stripe) StartBackgroundFlusher() { s.wg.Add(1); go s.diskWriter() }
 func (s *Stripe) diskWriter() {
 	defer s.wg.Done()
@@ -355,6 +306,9 @@ func (s *Stripe) collectEvacuationData(start, end int64) []evacuationRecord {
 		if _, err := s.disk.ReadAt(data, e.Offset); err != nil {
 			continue
 		}
+		if doc.validate(data) != nil || doc.TotalLen > uint64(s.Skip+s.Len-s.Start) {
+			continue
+		}
 		gen := s.generation
 		if d.phase() != s.Phase {
 			if gen == 0 {
@@ -362,7 +316,7 @@ func (s *Stripe) collectEvacuationData(start, end int64) []evacuationRecord {
 			}
 			gen--
 		}
-		result = append(result, evacuationRecord{key: e.LogicalKey, data: data, old: d, generation: gen})
+		result = append(result, evacuationRecord{key: e.LogicalKey, data: data, old: d, generation: gen, invalidation: s.OpenDir.Generation()})
 		bytes += size
 	}
 	return result
@@ -384,7 +338,7 @@ func (s *Stripe) evacuate() {
 				}
 				s.mu.Lock()
 				hit, _, current := s.DirMgr.Get(v.key)
-				if !s.closing && s.storageErr == nil && hit && current.offset() == v.old.offset() && current.phase() == v.old.phase() && v.generation+1 >= s.generation && s.allocationValid(a, len(v.data)) {
+				if !s.closing && s.storageErr == nil && v.invalidation == s.OpenDir.Generation() && hit && current.offset() == v.old.offset() && current.phase() == v.old.phase() && v.generation+1 >= s.generation && s.allocationValid(a, len(v.data)) {
 					_, err = s.DirMgr.Set(v.key, Offset(a.offset), len(v.data), a.generation%2 != 0)
 					if err == nil && s.RamCache != nil {
 						s.RamCache.Put(v.key, v.data)

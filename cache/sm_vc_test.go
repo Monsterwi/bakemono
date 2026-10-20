@@ -2,6 +2,7 @@ package cache
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 
 func TestStripeSM(t *testing.T) {
 	convey.Convey("StripeSM Background Flush", t, func() {
-		tmpFile := "test_stripe_sm.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_stripe_sm.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)
@@ -44,7 +45,7 @@ func TestStripeSM(t *testing.T) {
 
 func TestCacheVC(t *testing.T) {
 	convey.Convey("CacheVC Lifecycle", t, func() {
-		tmpFile := "test_cache_vc.dat"
+		tmpFile := filepath.Join(t.TempDir(), "test_cache_vc.dat")
 		f, _ := os.Create(tmpFile)
 		f.Close()
 		defer os.Remove(tmpFile)

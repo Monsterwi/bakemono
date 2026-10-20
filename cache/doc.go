@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 )
 
 const (
@@ -42,24 +43,29 @@ func init() {
 // In Go, this would just be the data slice passed separately usually, but here we might operate on a buffer.
 // This helper assumes usage where we have a full buffer containing Doc + Header + Data.
 
-// CalculateChecksum calculates the checksum of the document data (Header + Data).
-// It excludes the Doc struct itself.
+// CalculateChecksum covers the identity, lengths, version, metadata and body.
 func (d *Doc) CalculateChecksum(data []byte) uint32 {
-	// data should be the content after the Doc struct (Header + Body)
-	// ensure len(data) matches d.Len - DocHeaderSize
-	expectedLen := int(d.Len) - DocHeaderSize
-	if len(data) < expectedLen {
-		return 0 // Or error? ATS assumes valid pointers.
+	if d.Len < DocHeaderSize || uint64(d.Len-DocHeaderSize) > uint64(len(data)) {
+		return 0
 	}
+	header := *d
+	header.Checksum = 0
+	encoded, _ := header.MarshalBinary()
+	sum := crc32.Update(0, crc32.IEEETable, encoded)
+	return crc32.Update(sum, crc32.IEEETable, data[:d.Len-DocHeaderSize])
+}
 
-	// Use only the valid part of data corresponding to this fragment
-	payload := data[:expectedLen]
-
-	var sum uint32
-	for _, b := range payload {
-		sum += uint32(b)
+func (d *Doc) validate(data []byte) error {
+	if d.Magic != DocMagic || d.VMajor != docIdentityVersion || d.VMinor != 0 || d.Unused != 0 {
+		return fmt.Errorf("unsupported cache document")
 	}
-	return sum
+	if d.Len < DocHeaderSize || d.Len > AggBufferSize || uint64(d.Len) > uint64(len(data)) || d.HLen > d.Len-DocHeaderSize || d.DataLen() > TargetFragmentSize {
+		return fmt.Errorf("invalid cache fragment length")
+	}
+	if d.Checksum != d.CalculateChecksum(data[DocHeaderSize:]) {
+		return fmt.Errorf("cache document checksum mismatch")
+	}
+	return nil
 }
 
 func (d *Doc) MarshalBinary() ([]byte, error) {
