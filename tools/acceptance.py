@@ -302,7 +302,7 @@ class Client:
         c = connection or http.client.HTTPConnection("127.0.0.1", product.port, timeout=120)
         start = time.monotonic()
         row = {"product": product.kind, "path": path, "case": case, "time": time.time(), "method": method, "status": 0,
-               "bytes": 0, "ttfb_ms": None, "error": None}
+               "bytes": 0, "ttfb_ms": None, "error": None, "request_range": (headers or {}).get("Range")}
         digest = hashlib.sha256()
         try:
             c.request(method, path, headers={"Host": "bench.local", "Accept-Encoding": "identity", **(headers or {})})
@@ -344,8 +344,11 @@ class Client:
         assert not result["error"], result
         return result
 
-    def batch(self, product, origin, name, path, concurrency, count=None, duration=None, headers=None, bounds=None, slow=0, allowed=()):
+    def batch(self, product, origin, name, path, concurrency, count=None, duration=None, headers=None, bounds=None, slow=0, allowed=(), ranges=None):
         expected = self.expected(path, bounds=bounds)
+        variants = [(headers, expected)] if ranges is None else [
+            ({**(headers or {}), "Range": "bytes=%d-%d" % limits}, self.expected(path, bounds=limits))
+            for limits in ranges]
         before = origin.snapshot()
         initial = product.resource()
         logs_before = (product.dir / "process.log").stat().st_size
@@ -369,13 +372,14 @@ class Client:
         barrier = threading.Barrier(concurrency)
         start = time.monotonic()
         def worker(index):
+            request_headers, request_expected = variants[index % len(variants)]
             c = http.client.HTTPConnection("127.0.0.1", product.port, timeout=120)
             rows = []
             barrier.wait()
             try:
                 while (duration is not None and time.monotonic() - start < duration) or (count is not None and len(rows) < count):
-                    rows.append(self.request(product, path, headers=headers, expected=expected,
-                                             status=206 if bounds else 200, slow=slow, connection=c, case=name))
+                    rows.append(self.request(product, path, headers=request_headers, expected=request_expected,
+                                             status=206 if bounds or ranges else 200, slow=slow, connection=c, case=name))
             finally:
                 c.close()
             return rows
@@ -466,6 +470,13 @@ def functional(args, fixtures, output):
         client.checked(product, path, headers={"Range": "bytes=209715200-"}, expected=None, status=416)
         client.checked(product, path, headers={"Range": "bytes=0-16", "If-Range": '"old"'})
         record("200MiB native Range / suffix / open /416 / If-Range mismatch")
+        overlap = [(i * 8 * MIB, (i * 8 + 16) * MIB - 1) for i in range(4)]
+        for concurrency in (8, 32):
+            summary = client.batch(product, origin, f"different-overlapping-ranges-c{concurrency}",
+                                   "/large-overlap-stress", concurrency, count=1, ranges=overlap)
+            assert summary["origin"]["bytes"] == (40 * MIB if concurrency == 8 else 0), summary
+            assert summary["origin"]["get"] == (40 if concurrency == 8 else 0), summary
+        record("8/32 clients with four overlapping16MiB ranges:40MiB union fetched once")
         changed = "/large-version-swap"
         origin.rules[changed] = {"switch_after_get": 1}
         bounds = (0, 2 * MIB - 1)
@@ -579,6 +590,8 @@ def functional(args, fixtures, output):
         result = client.request(product, "/small-health-range", headers={"Range": "bytes=0-16"}, expected=client.expected("/small-health-range", bounds=(0, 16)), status=206)
         if result["status"] == 206:
             assert not result["error"], result
+        else:
+            assert result["status"] == 502 and result["error"] == "status 502, expected 206", result
         # An explicit observed availability limitation, never counted as a passed HIT.
         evidence.append({"name": "fresh Range with all origins unhealthy", "result": "LIMITATION" if result["status"] != 206 else "PASS",
                          "status": result["status"], "explanation": "Range selects a healthy pinned origin before cache lookup; full-object HIT remains available."})
