@@ -2,11 +2,16 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/Monsterwi/razor/config"
+	"github.com/Monsterwi/razor/logger"
 	"github.com/Monsterwi/razor/server"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -349,5 +354,52 @@ func TestFailedFillWakesHundredSubscribersWithoutRetry(t *testing.T) {
 	})
 	if calls.Load() != 1 || s.Stats().SharedFillFailed != 1 {
 		t.Fatalf("origin=%d stats=%+v", calls.Load(), s.Stats())
+	}
+}
+
+func TestSharedFillLogsFinalCacheOutcome(t *testing.T) {
+	s, _ := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/private" {
+			w.Header().Set("Cache-Control", "private")
+			fmt.Fprint(w, "private")
+			return
+		}
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		w.Header().Set("ETag", `"one"`)
+		if r.Header.Get("If-None-Match") == `"one"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		fmt.Fprint(w, "body")
+	})
+	path := filepath.Join(t.TempDir(), "access.log")
+	logged := logger.AccessLogMiddleware(path)(s)
+	fetch(logged, "http://cache.test/item", nil)
+	fetch(logged, "http://cache.test/item", nil)
+	fetch(logged, "http://cache.test/item", http.Header{"Cache-Control": {"no-cache"}})
+	fetch(logged, "http://cache.test/private", nil)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	expected := []string{"MISS", "HIT", "REVALIDATE", "BYPASS"}
+	if len(lines) != len(expected) {
+		t.Fatalf("access logs=%s", data)
+	}
+	for i, line := range lines {
+		var entry struct {
+			Status string `json:"cache_status"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Status != expected[i] {
+			t.Fatalf("request %d: got %s want %s", i, entry.Status, expected[i])
+		}
+	}
+	st := s.Stats()
+	if st.Misses != 1 || st.Hits != 1 || st.Bypass != 1 {
+		t.Fatalf("cache outcome counters overlap: %+v", st)
 	}
 }

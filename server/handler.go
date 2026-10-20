@@ -59,7 +59,6 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		s.proxyWithoutCache(w, r)
 		return
 	}
-	s.cacheStatus(w, "MISS")
 	s.serveSharedMiss(w, r, key, token)
 }
 

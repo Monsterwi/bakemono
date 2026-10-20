@@ -34,7 +34,7 @@ func (s *Server) fetchFill(task *fillTask, r *http.Request, key []byte, resource
 	if stored != nil {
 		defer stored.Close()
 		if requestFresh(r, previous, s.now()) {
-			return fillResult{key: stored.Key}
+			return fillResult{key: stored.Key, status: "HIT"}
 		}
 	}
 	release, err := resources.writers.Acquire(task.ctx, time.Duration(resources.config.QueueTimeout)*time.Second)
@@ -75,7 +75,7 @@ func (s *Server) fetchFill(task *fillTask, r *http.Request, key []byte, resource
 				err = s.cache.UpdateHTTPInfo(ctx, task.token, stored, merged)
 				cancel()
 				if err == nil {
-					return fillResult{key: stored.Key}
+					return fillResult{key: stored.Key, status: "REVALIDATE"}
 				}
 			} else {
 				_ = s.cache.InvalidateFill(task.token)

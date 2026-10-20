@@ -43,8 +43,9 @@ type fillTask struct {
 }
 
 type fillResult struct {
-	key []byte
-	err error
+	key    []byte
+	err    error
+	status string
 }
 
 // captureFillResources is the single ownership seam for detached producers.
@@ -143,6 +144,8 @@ func (g *fillGroup) finish(task *fillTask) {
 func (task *fillTask) publish(result fillResult) { task.result = result; close(task.done) }
 
 func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []byte, token *cache.FillToken) {
+	status := "MISS"
+	defer func() { s.cacheStatus(w, status) }()
 	resources := s.captureFillResources(r)
 	task, creator, err := s.fills.join(fillIdentity(r, key, resources.version), token, resources.config)
 	if err != nil {
@@ -168,6 +171,7 @@ func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []b
 	case <-task.done:
 	}
 	if creator && errors.Is(task.result.err, errUnshareable) {
+		status = "BYPASS"
 		select {
 		case resp := <-task.private:
 			defer func() { close(task.privateDone); <-task.exited }()
@@ -224,6 +228,9 @@ func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []b
 		return
 	}
 
+	if task.result.status != "" {
+		status = task.result.status
+	}
 	s.serveCacheHit(w, r, vc, info)
 }
 
