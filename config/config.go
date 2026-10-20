@@ -26,6 +26,7 @@ type Config struct {
 
 	// Server configuration
 	ServerPort int
+	PurgeToken string // Empty disables HTTP PURGE; authenticate with Bearer token.
 
 	// Upstream configuration
 	UpstreamTargets []string
@@ -91,6 +92,7 @@ func Load(configDir string) (*Config, error) {
 
 	// Apply configuration from records.config
 	// cfg.ServerAddr = rc.GetString("proxy.config.http.server_addr", cfg.ServerAddr)
+	cfg.PurgeToken = rc.GetString("proxy.config.http.purge_token", "")
 	cfg.ServerPort = rc.GetInt("proxy.config.http.server_ports", cfg.ServerPort)
 	cfg.LogfileDir = rc.GetString("proxy.config.log.logfile_dir", cfg.LogfileDir)
 	cfg.AccessLogFilename = rc.GetString("proxy.config.log.access_log_filename", cfg.AccessLogFilename)

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,10 +60,23 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
-	purgedKeys := s.cache.Purge(key)
+	if s.config.PurgeToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.config.PurgeToken)) != 1 {
+		logger.SetLogField(w, "purge_authorized", false)
+		http.Error(w, "PURGE forbidden", http.StatusForbidden)
+		return
+	}
+	logger.SetLogField(w, "purge_authorized", true)
+	purgedKeys, err := s.cache.PurgeSelector(key, strings.HasSuffix(r.URL.EscapedPath(), "/") && r.URL.RawQuery == "")
+	if err != nil {
+		logger.SetLogField(w, "purge_result", "unavailable")
+		http.Error(w, "PURGE unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	logger.SetLogField(w, "purge_count", len(purgedKeys))
+	logger.SetLogField(w, "purge_result", "complete")
 	s.cacheStatus(w, "PURGE")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "PURGED %s\n", strings.Join(purgedKeys, ", "))
+	fmt.Fprintln(w, "PURGED")
 }
 
 func copyHeaders(dst, src http.Header) {
@@ -87,6 +101,7 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache
 
 func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []byte) {
 	requested := time.Now()
+	token, tokenErr := s.cache.BeginFill(key, key)
 	resp, originHeaders, err := s.proxy.ProxyWithOriginHeaders(r)
 	if err != nil {
 		s.upstreamError(w, r, err)
@@ -103,12 +118,12 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 	_, cacheable := responseAge(info, time.Now())
 	info.ResponseHeaders = resp.Header().Clone()
 	var fill *cacheFill
-	if cacheable && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(key, info, resp.RawResponse.ContentLength) {
+	if tokenErr == nil && cacheable && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(key, info, resp.RawResponse.ContentLength) {
 		release, acquireErr := s.writers.Acquire(r.Context(), time.Duration(s.config.QueueTimeout)*time.Second)
 		if acquireErr == nil {
 			cacheCtx, cacheCancel := context.WithCancel(r.Context())
 			defer cacheCancel()
-			vc, err := s.cache.OpenWriteContext(cacheCtx, key, 0)
+			vc, err := s.cache.OpenWriteFill(cacheCtx, token, 0)
 			if err == nil {
 				vc.SetHTTPInfo(info)
 				// Only the successful EOF path below may commit.
@@ -197,7 +212,7 @@ func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error
 	http.Error(w, "Upstream unavailable", status)
 }
 func (s *Server) cacheSizeAllowed(key []byte, info *cache.CacheHTTPInfo, length int64) bool {
-	if length > int64(s.config.MaxCacheObjectBytes) || len(key) > 64<<10 {
+	if length > int64(s.config.MaxCacheObjectBytes) || len(key) > cache.MaxIndexKeyBytes {
 		return false
 	}
 	size := len(info.RequestURL)

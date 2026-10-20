@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-
-	"github.com/Monsterwi/razor/logger"
 )
 
 // Cache is the main entry point, managing multiple stripes (volumes).
@@ -58,13 +56,19 @@ func NewCacheFromStore(store *Store, nStripes int) (*Cache, error) {
 }
 
 func (c *Cache) Init() error {
-	for _, s := range c.Stripes {
+	for i, s := range c.Stripes {
 		// Calculate blocks (assuming 512 sector size for calculation)
 		blocks := s.Len / 512
 		if err := s.Init(blocks); err != nil {
+			for _, opened := range c.Stripes[:i] {
+				_ = opened.Close()
+			}
 			return err
 		}
 		if err := s.Open(); err != nil {
+			for _, opened := range c.Stripes[:i] {
+				_ = opened.Close()
+			}
 			return err
 		}
 	}
@@ -128,76 +132,45 @@ func (c *Cache) OpenWrite(key []byte, opts int) (*CacheVC, error) {
 }
 
 func (c *Cache) OpenWriteContext(ctx context.Context, key []byte, opts int) (*CacheVC, error) {
-	stripe := c.KeyToStripe(key)
-	if stripe == nil {
-		return nil, fmt.Errorf("no stripe found")
-	}
-
-	if err := ctx.Err(); err != nil {
+	token, err := c.BeginFill(key, key)
+	if err != nil {
 		return nil, err
 	}
-	vc, err := NewCacheVCWrite(stripe, key)
-	if err == nil {
-		vc.writer.ctx = ctx
-	}
-	return vc, err
+	return c.OpenWriteFill(ctx, token, opts)
 }
 
 // Remove deletes an entry from the cache.
 // This corresponds to Cache::remove() in ATS.
 // It supports multi-fragment removal automatically.
 func (c *Cache) Remove(key []byte) error {
+	if len(key) == 0 {
+		return errors.New("empty cache key")
+	}
 	stripe := c.KeyToStripe(key)
 	if stripe == nil {
-		return fmt.Errorf("no stripe found")
+		return errors.New("no stripe found")
 	}
-
-	vc, err := NewCacheVCRemove(stripe, key)
-	if err != nil {
-		return err
+	stripe.mu.Lock()
+	if stripe.closing {
+		stripe.mu.Unlock()
+		return ErrCacheClosed
 	}
-
-	return vc.Remove()
+	stripe.OpenDir.generation.Add(1)
+	writer := stripe.removeLocked(key)
+	stripe.mu.Unlock()
+	if writer != nil {
+		writer.Abort(ErrInvalidated)
+	}
+	return nil
 }
 
-// PurgeByPrefix removes all cache entries that match the given prefix.
-// It returns a list of purged keys.
+// Purge preserves the legacy trailing-slash prefix convention.
 func (c *Cache) Purge(key []byte) []string {
-	// key ends with '/'
-	prefixPurge := false
-	if key[len(key)-1] == '/' {
-		prefixPurge = true
+	if len(key) == 0 {
+		return nil
 	}
-
-	if !prefixPurge {
-		c.Remove(key)
-		c.KeyToStripe(key).DirMgr.DirTrie.Delete(key)
-		return []string{string(key)}
-	}
-
-	// prefix purge
-	var purgedKeys []string
-	// Search all stripes for keys matching the prefix
-	for _, stripe := range c.Stripes {
-		if stripe == nil || stripe.DirMgr == nil || stripe.DirMgr.DirTrie == nil {
-			continue
-		}
-
-		// Get all keys matching the prefix from this stripe's trie
-		matchedKeys := stripe.DirMgr.DirTrie.Get(key)
-		for _, keyStr := range matchedKeys {
-			key := []byte(keyStr)
-			// Remove the key from cache
-			if err := c.Remove(key); err != nil {
-				logger.Errorf("Failed to purge key %s: %v", string(key), err)
-				continue
-			}
-			stripe.DirMgr.DirTrie.Delete(key)
-			purgedKeys = append(purgedKeys, keyStr)
-		}
-	}
-
-	return purgedKeys
+	keys, _ := c.PurgeSelector(key, key[len(key)-1] == '/')
+	return keys
 }
 
 // FragmentKey generates a key for the Nth fragment.
@@ -229,5 +202,5 @@ func (c *Cache) OpenReadCommitted(key []byte) (*CacheVC, error) {
 	if stripe.OpenDir.Get(key) != nil {
 		return nil, fmt.Errorf("cache write in progress")
 	}
-	return &CacheVC{Stripe: stripe, Key: key, reading: true, reader: NewCacheReader(stripe, key)}, nil
+	return &CacheVC{Stripe: stripe, Key: append([]byte(nil), key...), generation: stripe.OpenDir.Generation(), reading: true, reader: NewCacheReader(stripe, key)}, nil
 }

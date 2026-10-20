@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -286,5 +287,29 @@ func TestAccessLogRecordsStatusCommittedByFlush(t *testing.T) {
 	}
 	if recorder.Code != http.StatusOK || entry.Status != http.StatusOK {
 		t.Fatalf("wire status = %d; logged status = %d", recorder.Code, entry.Status)
+	}
+}
+
+func TestPurgeAccessLogDoesNotExposeSelector(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	handler := AccessLogMiddleware(path)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		SetLogField(w, "purge_authorized", true)
+		SetLogField(w, "purge_count", 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest("PURGE", "http://cache.test/private-selector?secret=value", nil)
+	req.Header.Set("Authorization", "Bearer administration-secret")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"private-selector", "secret=value", "administration-secret"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("PURGE access log exposed %s", secret)
+		}
+	}
+	if !strings.Contains(string(data), "purge_count") || !strings.Contains(string(data), "purge_authorized") {
+		t.Fatal("PURGE audit fields missing")
 	}
 }

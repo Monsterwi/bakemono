@@ -157,12 +157,19 @@ func AccessLogMiddleware(accessLogPath string) func(http.Handler) http.Handler {
 			latency := time.Since(start)
 			latencyMs := float64(latency.Microseconds()) / 1000.0
 
+			// PURGE selectors may carry credentials; audit outcome without the URL.
+			path, query := r.URL.Path, r.URL.RawQuery
+			if r.Method == "PURGE" {
+				path = "[redacted]"
+				query = ""
+			}
+
 			// Build base log fields
 			fields := []zapcore.Field{
 				zap.Int("status", ww.statusCode),
 				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.String("query", r.URL.RawQuery),
+				zap.String("path", path),
+				zap.String("query", query),
 				zap.String("remote_addr", r.RemoteAddr),
 				zap.String("user-agent", r.UserAgent()),
 				zap.Float64("latency", latencyMs), // 单位：毫秒
