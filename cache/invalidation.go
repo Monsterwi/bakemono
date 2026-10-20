@@ -204,3 +204,11 @@ func (s *Stripe) abortOpenWriters(err error) {
 		writer.Abort(err)
 	}
 }
+
+// CheckFill reports whether a pre-origin token still belongs to the current
+// invalidation epochs. Unlike writer CAS, a completed publication may change heads.
+func (c *Cache) CheckFill(token *FillToken) error {
+	unlock := c.lockStripes()
+	defer unlock()
+	return c.checkFillEpochsLocked(token)
+}

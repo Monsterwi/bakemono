@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -42,13 +41,32 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token, _ := s.cache.BeginFill(key, key)
-	var selected *cache.CacheVC
-	var selectedInfo *cache.CacheHTTPInfo
+	selected, selectedInfo, lookupErr := s.lookupCached(key, r)
+	if lookupErr != nil {
+		s.proxyWithoutCache(w, r)
+		return
+	}
+	if selected != nil {
+		if requestFresh(r, selectedInfo, s.now()) {
+			defer selected.Close()
+			s.cacheStatus(w, "HIT")
+			s.serveCacheHit(w, r, selected, selectedInfo)
+			return
+		}
+		selected.Close()
+	}
+	if r.Method == http.MethodHead {
+		s.proxyWithoutCache(w, r)
+		return
+	}
+	s.serveSharedMiss(w, r, key, token)
+}
+
+func (s *Server) lookupCached(key []byte, r *http.Request) (*cache.CacheVC, *cache.CacheHTTPInfo, error) {
 	// shortcut: bound negotiation fanout; excess variants safely bypass caching.
 	keys, keysErr := s.cache.KeysForSelectorLimit(key, maxHTTPVariants)
 	if keysErr != nil {
-		s.proxyWithoutCache(w, r)
-		return
+		return nil, nil, keysErr
 	}
 	for _, candidate := range keys {
 		vc, err := s.cache.OpenReadCommitted([]byte(candidate))
@@ -62,25 +80,11 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		}
 		fields, valid := varyFields(info.ResponseHeaders)
 		if _, safe := responsePolicy(info, s.now()); valid && safe && string(representationKey(key, r.Header, fields)) == candidate {
-			selected, selectedInfo = vc, info
-			break
+			return vc, info, nil
 		}
 		vc.Close()
 	}
-	if selected != nil {
-		defer selected.Close()
-		if requestFresh(r, selectedInfo, s.now()) {
-			s.cacheStatus(w, "HIT")
-			s.serveCacheHit(w, r, selected, selectedInfo)
-			return
-		}
-	}
-	if r.Method == http.MethodHead && selected == nil {
-		s.proxyWithoutCache(w, r)
-		return
-	}
-	s.cacheStatus(w, "MISS")
-	s.serveCacheMiss(w, r, key, token, selected, selectedInfo)
+	return nil, nil, nil
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
@@ -125,134 +129,13 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache
 	if r.Method == http.MethodHead {
 		return
 	}
-	if err := s.streamResponse(w, vc, nil, r); err != nil {
+	if err := s.streamResponse(w, vc, r); err != nil {
 		logger.Errorf("Cache response transfer failed: %v", err)
 		panic(http.ErrAbortHandler)
 	}
 }
 
-func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []byte, token *cache.FillToken, stored *cache.CacheVC, previous *cache.CacheHTTPInfo) {
-	originRequest := r
-	if stored != nil {
-		originRequest = r.Clone(r.Context())
-		originRequest.Header.Del("If-None-Match")
-		originRequest.Header.Del("If-Modified-Since")
-		if tag := previous.ResponseHeaders.Get("ETag"); validETag(tag) {
-			originRequest.Header.Set("If-None-Match", tag)
-		} else if modified := previous.ResponseHeaders.Get("Last-Modified"); modified != "" {
-			originRequest.Header.Set("If-Modified-Since", modified)
-		}
-	}
-	for attempt := 0; attempt < 2; attempt++ {
-		requested := s.now()
-		resp, originHeaders, err := s.proxy.ProxyWithOriginHeaders(originRequest)
-		if err != nil {
-			s.upstreamError(w, r, err)
-			return
-		}
-		defer resp.RawBody().Close()
-		if attempt > 0 && resp.StatusCode() == http.StatusNotModified {
-			http.Error(w, "Unusable origin validation", http.StatusBadGateway)
-			return
-		}
-		info := cache.NewCacheHTTPInfo()
-		info.RequestTime, info.ResponseTime = requested, s.now()
-		info.RequestMethod, info.RequestURL, info.Status = r.Method, r.URL.String(), resp.StatusCode()
-		info.ResponseHeaders = originHeaders
-		if stored != nil && resp.StatusCode() == http.StatusNotModified {
-			merged, valid := mergeValidation(previous, info, originRequest)
-			resp.RawBody().Close()
-			if valid && sameVary(previous.ResponseHeaders, merged.ResponseHeaders) {
-				merged.ResponseHeaders = mergeResponseHeaders(previous.ResponseHeaders, resp.Header())
-				ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.config.CacheWriteTimeout)*time.Second)
-				release, acquireErr := s.writers.Acquire(ctx, time.Duration(s.config.QueueTimeout)*time.Second)
-				updateErr := acquireErr
-				if acquireErr == nil {
-					updateErr = s.cache.UpdateHTTPInfo(ctx, token, stored, merged)
-					release()
-				}
-				cancel()
-				if updateErr == nil {
-					s.serveCacheHit(w, r, stored, merged)
-					return
-				}
-			} else if token != nil {
-				_ = s.cache.InvalidateFill(token)
-			}
-			// An unusable 304 cannot stand in for a representation. Retry once without
-			// validators, preserving the original token so PURGE cannot be bypassed.
-			stored = nil
-			originRequest = r.Clone(r.Context())
-			originRequest.Header.Del("If-None-Match")
-			originRequest.Header.Del("If-Modified-Since")
-			continue
-		}
-		_, cacheable := responsePolicy(info, s.now())
-		fields, _ := varyFields(originHeaders)
-		representation := representationKey(key, r.Header, fields)
-		info.ResponseHeaders = resp.Header().Clone()
-		keys, keysErr := s.cache.KeysForSelectorLimit(key, maxHTTPVariants)
-		if keysErr != nil {
-			cacheable = false
-			token = nil
-		}
-		var remove []string
-		for _, old := range keys {
-			if !sameRepresentationSchema(key, []byte(old), representation) {
-				remove = append(remove, old)
-			}
-		}
-		if !cacheable || r.Method == http.MethodHead {
-			if token != nil {
-				_ = s.cache.InvalidateFill(token)
-			}
-		}
-		var fill *cacheFill
-		canAdd := len(keys) < maxHTTPVariants || containsField(keys, string(representation)) || len(remove) > 0
-		if token != nil && cacheable && canAdd && r.Method == http.MethodGet && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(representation, info, resp.RawResponse.ContentLength) {
-			release, acquireErr := s.writers.Acquire(r.Context(), time.Duration(s.config.QueueTimeout)*time.Second)
-			if acquireErr == nil {
-				cacheCtx, cacheCancel := context.WithCancel(r.Context())
-				defer cacheCancel()
-				vc, writeErr := s.cache.OpenWriteFillKeyReplacing(cacheCtx, token, representation, remove)
-				if writeErr == nil {
-					vc.SetHTTPInfo(info)
-					fill = &cacheFill{release: release, vc: vc, cancel: cacheCancel, timeout: time.Duration(s.config.CacheWriteTimeout) * time.Second, limit: int64(s.config.MaxCacheObjectBytes), stats: &s.counters}
-					defer fill.abort(errors.New("cache fill incomplete"))
-				} else {
-					release()
-					s.counters.cacheSkipped.Add(1)
-				}
-			} else {
-				s.counters.cacheSkipped.Add(1)
-			}
-		} else {
-			s.counters.cacheSkipped.Add(1)
-		}
-		copyHeaders(w.Header(), resp.Header())
-		if resp.StatusCode() == http.StatusOK && clientNotModified(r, resp.Header()) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-		w.WriteHeader(resp.StatusCode())
-		if r.Method != http.MethodHead {
-			if err = s.streamResponse(w, resp.RawBody(), fill, r); err != nil {
-				panic(http.ErrAbortHandler)
-			}
-		}
-		if err = resp.RawBody().Close(); err != nil {
-			panic(http.ErrAbortHandler)
-		}
-		if r.Context().Err() != nil || len(resp.RawResponse.Trailer) != 0 {
-			return
-		}
-		fill.commit()
-		return
-	}
-	http.Error(w, "Unusable origin validation", http.StatusBadGateway)
-}
-
-func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, fill *cacheFill, r *http.Request) error {
+func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, r *http.Request) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := body.Read(buf)
@@ -271,7 +154,6 @@ func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, fill *cac
 			if err := http.NewResponseController(w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
 				return err
 			}
-			fill.write(buf[:n])
 		}
 		if readErr == io.EOF {
 			return nil
@@ -293,7 +175,7 @@ func (s *Server) proxyWithoutCache(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header())
 	w.WriteHeader(resp.StatusCode())
 	if r.Method != http.MethodHead {
-		if err := s.streamResponse(w, resp.RawBody(), nil, r); err != nil {
+		if err := s.streamResponse(w, resp.RawBody(), r); err != nil {
 			panic(http.ErrAbortHandler)
 		}
 	}
@@ -310,8 +192,8 @@ func (s *Server) upstreamError(w http.ResponseWriter, r *http.Request, err error
 	}
 	http.Error(w, "Upstream unavailable", status)
 }
-func (s *Server) cacheSizeAllowed(key []byte, info *cache.CacheHTTPInfo, length int64) bool {
-	if length > int64(s.config.MaxCacheObjectBytes) || len(key) > cache.MaxIndexKeyBytes {
+func cacheSizeAllowed(maxObjectBytes int, key []byte, info *cache.CacheHTTPInfo, length int64) bool {
+	if length > int64(maxObjectBytes) || len(key) > cache.MaxIndexKeyBytes {
 		return false
 	}
 	size := len(info.RequestURL)

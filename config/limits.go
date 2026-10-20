@@ -12,7 +12,7 @@ func (c *Config) resourceFields() []struct {
 	value              *int
 	fallback, min, max int
 } {
-	return []struct {
+	return append([]struct {
 		name               string
 		value              *int
 		fallback, min, max int
@@ -37,7 +37,7 @@ func (c *Config) resourceFields() []struct {
 		{"http.keep_alive_no_activity_timeout_in", &c.KeepAliveTimeout, 120, 1, 86400},
 		{"http.transaction_no_activity_timeout_in", &c.TransactionTimeoutIn, 30, 1, 86400},
 		{"http.transaction_no_activity_timeout_out", &c.TransactionTimeoutOut, 30, 1, 86400},
-	}
+	}, c.coalescingFields()...)
 }
 
 // WithDefaults supports embedders that historically passed an empty Config.
