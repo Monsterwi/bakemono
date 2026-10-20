@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -57,6 +58,9 @@ func (h *HTTPProxy) ConfigureLimits(l Limits) error {
 	if l.Requests < 1 || l.Queued < 0 || l.Connections < 1 || l.QueueTimeout < 0 || l.DialTimeout < 0 || l.TLSHandshakeTimeout < 0 || l.ResponseHeaderTimeout < 0 || l.BodyIdleTimeout < 0 {
 		return fmt.Errorf("invalid upstream resource limits")
 	}
+	if h.customTransport && h.roots != nil {
+		return fmt.Errorf("upstream CA file cannot be combined with a custom transport")
+	}
 	h.limits = l
 	h.budgets = make(map[string]*budget.Limiter)
 	for _, target := range h.targets {
@@ -68,6 +72,8 @@ func (h *HTTPProxy) ConfigureLimits(l Limits) error {
 	if !h.customTransport {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.Proxy = nil
+		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: h.roots}
+		tr.ForceAttemptHTTP2 = true
 		tr.DisableCompression = true
 		tr.MaxResponseHeaderBytes = 64 << 10
 		tr.MaxConnsPerHost = l.Connections

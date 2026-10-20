@@ -36,6 +36,14 @@ func main() {
 		log.Fatalf("read config error: %s", err)
 	}
 
+	var listenerTLS *tls.Config
+	if config.Schema == "https" {
+		certificate, err := tls.LoadX509KeyPair(config.SSLCertificate, config.SSLCertificateKey)
+		if err != nil {
+			log.Fatalf("load listener TLS certificate: %v", err)
+		}
+		listenerTLS = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{certificate}}
+	}
 	for _, path := range append(config.ZapConfig.OutputPaths, config.ZapConfig.ErrorOutputPaths...) {
 		if path != "stdout" && path != "stderr" {
 			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -57,7 +65,7 @@ func main() {
 	if err := engine.Init(); err != nil {
 		log.Fatal(err)
 	}
-	httpProxy, err := proxy.NewHTTPProxy(config.Upstream.ProxyPass, config.Upstream.BalanceMode)
+	httpProxy, err := proxy.NewHTTPProxy(config.Upstream.ProxyPass, config.Upstream.BalanceMode, proxy.WithCAFile(config.UpstreamCAFile))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -67,7 +75,9 @@ func main() {
 	handler := server.New(limits, engine, httpProxy)
 	defer handler.Shutdown()
 	if config.TCPHealthCheck {
-		httpProxy.HealthCheck(config.HealthCheckInterval)
+		if err := httpProxy.StartHealthChecks(proxy.HealthConfig{Interval: time.Duration(config.HealthCheckInterval) * time.Second, Timeout: 3 * time.Second, Failures: 2, Successes: 2}); err != nil {
+			log.Fatal(err)
+		}
 	}
 	cachedHandler := logger.AccessLogMiddleware(config.AccessLogPath)(handler)
 
@@ -108,7 +118,7 @@ func main() {
 	}
 	listener = netutil.LimitListener(listener, limits.MaxClientConnections)
 
-	httpServer := &http.Server{TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}, Handler: router, ReadHeaderTimeout: time.Duration(limits.RequestHeaderTimeout) * time.Second, IdleTimeout: time.Duration(limits.KeepAliveTimeout) * time.Second, MaxHeaderBytes: 64 << 10}
+	httpServer := &http.Server{TLSConfig: listenerTLS, Handler: router, ReadHeaderTimeout: time.Duration(limits.RequestHeaderTimeout) * time.Second, IdleTimeout: time.Duration(limits.KeepAliveTimeout) * time.Second, MaxHeaderBytes: 64 << 10}
 	profiling := &http.Server{Addr: "127.0.0.1:8080", ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		if err := profiling.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -121,7 +131,7 @@ func main() {
 	result := make(chan error, 1)
 	go func() {
 		if config.Schema == "https" {
-			result <- httpServer.ServeTLS(listener, config.SSLCertificate, config.SSLCertificateKey)
+			result <- httpServer.ServeTLS(listener, "", "")
 		} else {
 			result <- httpServer.Serve(listener)
 		}
