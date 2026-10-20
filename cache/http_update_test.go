@@ -294,3 +294,58 @@ func TestUnsafePolicyPreservesNewHeadAfterOffsetAndPhaseReuse(t *testing.T) {
 		t.Fatalf("old token deleted offset-reusing replacement: bytes=%d err=%v", len(got), err)
 	}
 }
+
+func TestUnsafePolicyRetiresPreviousPhaseHeadAfterCleanReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache")
+	open := func() *Cache {
+		c, err := NewCache(1, []string{path}, []int64{8 << 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = c.Init(); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	c := open()
+	write := func(key, body []byte) {
+		w, err := c.OpenWrite(key, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Write(body); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	padding := bytes.Repeat([]byte("p"), 1<<20)
+	for range 13 {
+		write([]byte("padding"), padding)
+	}
+	key := []byte("previous-phase-head")
+	write(key, []byte("old"))
+	for range 2 {
+		write([]byte("padding"), padding)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	c = open()
+	defer c.Close()
+	assertInvalidationBody(t, c, string(key), "old")
+	token, err := c.BeginFill(key, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.InvalidateFill(token); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := c.OpenReadCommitted(key); err == nil {
+		defer r.Close()
+		if body, err := io.ReadAll(r); err == nil {
+			t.Fatalf("unsafe previous-phase head survived clean reopen: %q", body)
+		}
+	}
+}
