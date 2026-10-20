@@ -17,6 +17,7 @@ type demoConfig struct {
 	RAMCacheSizeMB    uint64 `yaml:"ram_cache_size_mb"`
 	Schema            string `yaml:"schema"`
 	Port              int    `yaml:"port"`
+	UpstreamCAFile    string `yaml:"upstream_ca_file"`
 	SSLCertificate    string `yaml:"ssl_certificate"`
 	SSLCertificateKey string `yaml:"ssl_certificate_key"`
 	Location          []struct {
@@ -58,11 +59,14 @@ func readConfig(path string) (*demoConfig, error) {
 	if cfg.RAMCacheSizeMB > (1<<64-1)/(1024*1024) {
 		return nil, fmt.Errorf("invalid RAM cache size")
 	}
-	if cfg.TCPHealthCheck && cfg.HealthCheckInterval == 0 {
-		return nil, fmt.Errorf("health check interval must be positive")
+	if cfg.HealthCheckInterval > 86400 || (cfg.TCPHealthCheck && cfg.HealthCheckInterval == 0) {
+		return nil, fmt.Errorf("enabled health check interval must be between 1 and 86400 seconds")
 	}
 	if cfg.Schema == "https" && (cfg.SSLCertificate == "" || cfg.SSLCertificateKey == "") {
 		return nil, fmt.Errorf("HTTPS requires a certificate and key")
+	}
+	if cfg.Schema == "http" && (cfg.SSLCertificate != "" || cfg.SSLCertificateKey != "") {
+		return nil, fmt.Errorf("TLS certificate settings require https schema")
 	}
 	for _, location := range cfg.Location {
 		if location.Pattern == "" || location.Pattern[0] != '/' {

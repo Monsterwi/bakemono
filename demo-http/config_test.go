@@ -29,6 +29,8 @@ func TestDemoConfigRejectsInvalidSettings(t *testing.T) {
 		{"pattern: /", "pattern: relative"},
 		{"health_check_interval: 10", "health_check_interval: 0"},
 		{"schema: http", "schema: https"},
+		{"health_check_interval: 10", "health_check_interval: 86401"},
+		{"ssl_certificate:", "ssl_certificate: cert.pem"},
 	} {
 		t.Run(pair[1], func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -27,6 +28,7 @@ type Server struct {
 	cache                *cache.Cache
 	proxy                *proxy.HTTPProxy
 	httpServer           *http.Server
+	tlsConfig            *tls.Config
 	admission, writers   *budget.Limiter
 	counters             counters
 	fills                *fillGroup
@@ -72,6 +74,9 @@ func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy, options ...O
 		s.writers = budget.New(writers, cfg.MaxQueuedCacheWriters)
 		s.initErr = p.ConfigureLimits(proxy.Limits{Requests: cfg.MaxOriginRequests, Queued: cfg.MaxOriginQueuedRequests, Connections: cfg.MaxOriginConnections, QueueTimeout: time.Duration(cfg.QueueTimeout) * time.Second, DialTimeout: time.Duration(cfg.ConnectTimeout) * time.Second, TLSHandshakeTimeout: time.Duration(cfg.TLSHandshakeTimeout) * time.Second, ResponseHeaderTimeout: time.Duration(cfg.ResponseHeaderTimeout) * time.Second, BodyIdleTimeout: time.Duration(cfg.TransactionTimeoutOut) * time.Second})
 	}
+	if s.initErr == nil {
+		s.initErr = s.configureNetwork()
+	}
 	return s
 }
 
@@ -88,7 +93,7 @@ func (s *Server) Serve(listener net.Listener) error {
 		return fmt.Errorf("server already started or draining")
 	}
 	logged := logger.AccessLogMiddleware(filepath.Join(s.config.LogfileDir, s.config.AccessLogFilename))(s)
-	hs := &http.Server{Handler: logged, ReadHeaderTimeout: time.Duration(s.config.RequestHeaderTimeout) * time.Second, IdleTimeout: time.Duration(s.config.KeepAliveTimeout) * time.Second, MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return s.ctx }}
+	hs := &http.Server{TLSConfig: s.tlsConfig, Handler: logged, ReadHeaderTimeout: time.Duration(s.config.RequestHeaderTimeout) * time.Second, IdleTimeout: time.Duration(s.config.KeepAliveTimeout) * time.Second, MaxHeaderBytes: 64 << 10, BaseContext: func(net.Listener) context.Context { return s.ctx }}
 	s.httpServer = hs
 	s.background.Add(1)
 	go func() {
@@ -105,7 +110,11 @@ func (s *Server) Serve(listener net.Listener) error {
 		}
 	}()
 	s.mu.Unlock()
-	return hs.Serve(netutil.LimitListener(listener, s.config.MaxClientConnections))
+	listener = netutil.LimitListener(listener, s.config.MaxClientConnections)
+	if s.tlsConfig != nil {
+		return hs.ServeTLS(listener, "", "")
+	}
+	return hs.Serve(listener)
 }
 
 func (s *Server) Run() error {

@@ -26,8 +26,12 @@ type Config struct {
 	ConfigDir string
 
 	// Server configuration
-	ServerPort int
-	PurgeToken string // Empty disables HTTP PURGE; authenticate with Bearer token.
+	TLSCertFile, TLSKeyFile                                                            string
+	UpstreamCAFile                                                                     string
+	HealthCheckInterval, HealthCheckTimeout, HealthCheckFailures, HealthCheckSuccesses int
+	HealthCheckPath                                                                    string
+	ServerPort                                                                         int
+	PurgeToken                                                                         string // Empty disables HTTP PURGE; authenticate with Bearer token.
 
 	// Upstream configuration
 	UpstreamTargets []string
@@ -101,6 +105,9 @@ func Load(configDir string) (*Config, error) {
 	cfg.UpstreamAlgo = rc.GetString("proxy.config.http.parent_proxy.upstream_algo", cfg.UpstreamAlgo)
 	cfg.UpstreamTargets = rc.GetStringSlice("proxy.config.http.parent_proxy.upstream_targets", cfg.UpstreamTargets)
 	cfg.TrustedProxies = rc.GetStringSlice("proxy.config.http.trusted_proxies", cfg.TrustedProxies)
+	if err := cfg.loadNetwork(rc); err != nil {
+		return nil, err
+	}
 	if err := cfg.loadLimits(rc); err != nil {
 		return nil, err
 	}

@@ -48,6 +48,7 @@ func (c *Config) WithDefaults() *Config {
 		return &out
 	}
 	out.resourceDefaults = true
+	out.networkDefaults()
 	for _, f := range out.resourceFields() {
 		if *f.value == 0 {
 			*f.value = f.fallback
@@ -56,6 +57,9 @@ func (c *Config) WithDefaults() *Config {
 	return &out
 }
 func (c *Config) Validate() error {
+	if err := c.validateNetwork(); err != nil {
+		return err
+	}
 	if c.ServerPort < 0 || c.ServerPort > 65535 {
 		return fmt.Errorf("invalid server port")
 	}
