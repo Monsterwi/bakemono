@@ -150,3 +150,34 @@ func TestZeroHealthIntervalDoesNotProbe(t *testing.T) {
 		t.Fatal("disabled checks made an origin request")
 	}
 }
+
+func TestConfiguredUpstreamsSurviveHealthRemoval(t *testing.T) {
+	failed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	defer failed.Close()
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer healthy.Close()
+	p, err := proxy.NewHTTPProxy([]string{failed.URL, healthy.URL}, balancer.R2Balancer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.StartHealthChecks(proxy.HealthConfig{Interval: time.Millisecond, Timeout: time.Second, Failures: 1, Successes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for p.ReadAlive(failed.URL) {
+		if time.Now().After(deadline) {
+			t.Fatal("unhealthy origin not removed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	targets, algorithm := p.Upstreams()
+	if len(targets) != 2 || targets[0] != failed.URL || targets[1] != healthy.URL || algorithm != balancer.R2Balancer {
+		t.Fatalf("configured pool changed with health: %v %q", targets, algorithm)
+	}
+	targets[0] = "changed by caller"
+	again, _ := p.Upstreams()
+	if again[0] != failed.URL {
+		t.Fatal("caller mutated configured pool")
+	}
+}

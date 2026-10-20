@@ -1,9 +1,7 @@
 package server
 
 import (
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,13 +16,8 @@ import (
 )
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
-	// Route changes must not reuse objects populated by a previous origin policy.
-	route, _ := json.Marshal(struct {
-		Targets   []string
-		Algorithm string
-	}{s.config.UpstreamTargets, s.config.UpstreamAlgo})
-	namespace := sha256.Sum256(route)
-	key := []byte(fmt.Sprintf("%x:%s", namespace, s.proxy.CacheKey(r)))
+	runtime := requestRuntime(r)
+	key := []byte(fmt.Sprintf("%s:%s", runtime.namespace, runtime.proxy.CacheKey(r)))
 	switch r.Method {
 	case "PURGE":
 		s.handlePurge(key, w, r)
@@ -88,7 +81,7 @@ func (s *Server) lookupCached(key []byte, r *http.Request) (*cache.CacheVC, *cac
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
-	if s.config.PurgeToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.config.PurgeToken)) != 1 {
+	if requestRuntime(r).config.PurgeToken == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+requestRuntime(r).config.PurgeToken)) != 1 {
 		logger.SetLogField(w, "purge_authorized", false)
 		http.Error(w, "PURGE forbidden", http.StatusForbidden)
 		return
@@ -143,7 +136,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, r *http.R
 			if err := r.Context().Err(); err != nil {
 				return err
 			}
-			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(s.config.TransactionTimeoutIn) * time.Second))
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(requestRuntime(r).config.TransactionTimeoutIn) * time.Second))
 			written, err := w.Write(buf[:n])
 			if err != nil {
 				return err
@@ -166,7 +159,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, r *http.R
 
 func (s *Server) proxyWithoutCache(w http.ResponseWriter, r *http.Request) {
 	s.cacheStatus(w, "BYPASS")
-	resp, err := s.proxy.Proxy(r)
+	resp, err := requestRuntime(r).proxy.Proxy(r)
 	if err != nil {
 		s.upstreamError(w, r, err)
 		return

@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +37,10 @@ type HTTPProxy struct {
 	limits          Limits
 	budgets         map[string]*budget.Limiter
 	customTransport bool
+	caDigest        [32]byte
+	cacheNamespace  string
+	upstreams       []string
+	algorithm       string
 	roots           *x509.CertPool
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -65,6 +71,18 @@ func WithTransport(transport http.RoundTripper) Option {
 		return nil
 	}
 }
+
+// Reloadable reports whether a new configured proxy can preserve transport behavior.
+func (h *HTTPProxy) Reloadable() bool { return !h.customTransport }
+
+// Upstreams returns the configured pool without exposing mutable proxy state.
+func (h *HTTPProxy) Upstreams() ([]string, string) {
+	return append([]string(nil), h.upstreams...), h.algorithm
+}
+
+// CacheNamespace identifies effective routing and forwarding/trust policy. The
+// configured pool is assumed to contain interchangeable full-object replicas.
+func (h *HTTPProxy) CacheNamespace() string { return h.cacheNamespace }
 
 // WithTrustedProxies accepts forwarded identity only from these CIDR networks.
 func WithTrustedProxies(networks []string) Option {
@@ -159,6 +177,14 @@ func NewHTTPProxy(targetHosts []string, algorithm string, options ...Option) (*H
 		h.cancel()
 		return nil, err
 	}
+	policy, _ := json.Marshal(struct {
+		Targets   []string
+		Algorithm string
+		Trusted   []netip.Prefix
+		CA        [32]byte
+	}{hosts, algorithm, h.trustedProxies, h.caDigest})
+	h.upstreams, h.algorithm = append([]string(nil), hosts...), algorithm
+	h.cacheNamespace = fmt.Sprintf("%x", sha256.Sum256(policy))
 	return h, nil
 }
 

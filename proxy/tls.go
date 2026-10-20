@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ func WithCAFile(path string) Option {
 			return fmt.Errorf("upstream CA file contains no certificates")
 		}
 		h.roots = roots
+		h.caDigest = sha256.Sum256(data)
 		return nil
 	}
 }

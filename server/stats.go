@@ -14,6 +14,8 @@ type counters struct{ requests, rejected, cancelled, hits, misses, bypass, bytes
 // Stats contains only aggregate, bounded-cardinality counters. BufferReserved is
 // the conservative payload reservation for active writers, not a total RSS cap.
 type Stats struct {
+	RuntimeVersion                                                                                                              uint64
+	RetiredRuntimes                                                                                                             int
 	InFlight, Queued, CacheWriters, CacheQueued, DiskQueued                                                                     int
 	BufferReserved, DiskBufferedBytes                                                                                           int64
 	Requests, Rejected, Cancelled, Hits, Misses, Bypass, Bytes, TTFBCount, TTFBNanoseconds, CacheWriteErrors, CacheWriteSkipped uint64
@@ -23,25 +25,36 @@ type Stats struct {
 }
 
 func (s *Server) Stats() Stats {
-	st := Stats{Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load(), Origin: s.proxy.Stats()}
+	st := Stats{Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load()}
+	s.mu.Lock()
+	st.Origin = s.closedOrigin
+	if s.current != nil {
+		st.RuntimeVersion = s.current.version
+	}
+	if s.retired != nil {
+		st.RetiredRuntimes = 1
+	}
+	for _, rt := range []*runtimeSnapshot{s.current, s.retired} {
+		if rt == nil {
+			continue
+		}
+		b := rt.admission.Stats()
+		st.InFlight += b.InFlight
+		st.Queued += b.Queued
+		b = rt.writers.Stats()
+		st.CacheWriters += b.InFlight
+		st.CacheQueued += b.Queued
+		st.BufferReserved += int64(b.InFlight) * int64(rt.config.CacheWriterReservation())
+		addOriginStats(&st.Origin, rt.proxy.Stats())
+	}
+	s.mu.Unlock()
+
 	if s.fills != nil {
 		s.fills.mu.Lock()
 		st.SharedFillTasks, st.SharedFillWaiters = s.fills.active, s.fills.waiters
 		st.SharedFillJoined, st.SharedFillCompleted, st.SharedFillUnshareable = s.fills.joined, s.fills.completed, s.fills.unshareable
 		st.SharedFillFailed, st.SharedFillCancelled = s.fills.failed, s.fills.cancelled
 		s.fills.mu.Unlock()
-	}
-
-	if s.admission != nil {
-		b := s.admission.Stats()
-		st.InFlight = b.InFlight
-		st.Queued = b.Queued
-	}
-	if s.writers != nil {
-		b := s.writers.Stats()
-		st.CacheWriters = b.InFlight
-		st.CacheQueued = b.Queued
-		st.BufferReserved = int64(b.InFlight) * int64(s.config.CacheWriterReservation())
 	}
 	if s.cache != nil {
 		for _, stripe := range s.cache.Stripes {
@@ -93,4 +106,15 @@ func (w *responseMetrics) FlushError() error {
 		w.WriteHeader(200)
 	}
 	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func addOriginStats(a *proxy.Stats, b proxy.Stats) {
+	a.InFlight += b.InFlight
+	a.Queued += b.Queued
+	a.Rejected += b.Rejected
+	a.Requests += b.Requests
+	a.Errors += b.Errors
+	a.Bytes += b.Bytes
+	a.TTFBCount += b.TTFBCount
+	a.TTFBNanoseconds += b.TTFBNanoseconds
 }

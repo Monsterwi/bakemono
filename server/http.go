@@ -17,15 +17,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	runtime := s.current
+	runtime.refs++
 	s.handlers.Add(1)
 	s.mu.Unlock()
 	started := time.Now()
 	defer s.handlers.Done()
+	defer s.releaseRuntime(runtime)
 	ctx, cancel := context.WithCancel(r.Context())
 	stop := context.AfterFunc(s.ctx, cancel)
 	defer func() { stop(); cancel() }()
-	r = r.WithContext(ctx)
-	release, err := s.admission.Acquire(ctx, time.Duration(s.config.QueueTimeout)*time.Second)
+	r = withRequestRuntime(r, ctx, runtime)
+	release, err := runtime.admission.Acquire(ctx, time.Duration(runtime.config.QueueTimeout)*time.Second)
 	if err != nil {
 		if ctx.Err() != nil {
 			s.counters.cancelled.Add(1)
@@ -47,7 +50,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer http.NewResponseController(tracked).SetWriteDeadline(time.Time{})
 	defer http.NewResponseController(tracked).SetReadDeadline(time.Time{})
 	if r.Body != nil && r.Body != http.NoBody {
-		r.Body = &requestBody{ReadCloser: r.Body, controller: http.NewResponseController(tracked), idle: time.Duration(s.config.TransactionTimeoutIn) * time.Second}
+		r.Body = &requestBody{ReadCloser: r.Body, controller: http.NewResponseController(tracked), idle: time.Duration(runtime.config.TransactionTimeoutIn) * time.Second}
 		defer r.Body.Close()
 	}
 	s.handler(tracked, r)
