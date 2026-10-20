@@ -514,3 +514,74 @@ func TestUnconditionalRetryCannotReturnAnotherUnusable304(t *testing.T) {
 		t.Fatalf("unusable retry=%d calls=%d", got.Code, calls.Load())
 	}
 }
+
+// The first downstream body byte proves the cache writer has been reserved.
+type firstBodyRecorder struct {
+	*httptest.ResponseRecorder
+	started chan struct{}
+}
+
+func (w *firstBodyRecorder) Write(p []byte) (int, error) {
+	n, err := w.ResponseRecorder.Write(p)
+	if w.started != nil {
+		close(w.started)
+		w.started = nil
+	}
+	return n, err
+}
+
+func TestUnsafeResponseFencesAlreadyReservedWriter(t *testing.T) {
+	for _, policy := range []string{"vary-star", "no-store"} {
+		t.Run(policy, func(t *testing.T) {
+			firstEntered, unsafeEntered := make(chan struct{}), make(chan struct{})
+			firstHeaders, unsafeResponse, firstBody := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var serial atomic.Int32
+			s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+				switch serial.Add(1) {
+				case 1:
+					close(firstEntered)
+					<-firstHeaders
+					w.Header().Set("Cache-Control", "public,max-age=3600")
+					w.Header().Set("Content-Length", "3")
+					fmt.Fprint(w, "o")
+					w.(http.Flusher).Flush()
+					<-firstBody
+					fmt.Fprint(w, "ld")
+					return
+				case 2:
+					close(unsafeEntered)
+					<-unsafeResponse
+				}
+				if policy == "vary-star" {
+					w.Header().Set("Cache-Control", "public,max-age=3600")
+					w.Header().Set("Vary", "*")
+				} else {
+					w.Header().Set("Cache-Control", "no-store")
+				}
+				fmt.Fprint(w, "new")
+			})
+			target := "http://cache.test/item"
+			active := make(chan struct{})
+			first := &firstBodyRecorder{httptest.NewRecorder(), active}
+			firstDone := make(chan struct{})
+			go func() {
+				defer close(firstDone)
+				s.ServeHTTP(first, httptest.NewRequest("GET", target, nil))
+			}()
+			<-firstEntered
+			unsafeDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() { unsafeDone <- fetch(s, target, nil) }()
+			<-unsafeEntered
+			close(firstHeaders)
+			<-active
+			close(unsafeResponse)
+			unsafe := <-unsafeDone
+			close(firstBody)
+			<-firstDone
+			got := fetch(s, target, nil)
+			if first.Body.String() != "old" || unsafe.Body.String() != "new" || got.Body.String() != "new" || calls.Load() != 3 {
+				t.Fatalf("first=%q unsafe=%q next=%q origin calls=%d", first.Body.String(), unsafe.Body.String(), got.Body.String(), calls.Load())
+			}
+		})
+	}
+}

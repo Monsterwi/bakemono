@@ -3,7 +3,6 @@ module github.com/Monsterwi/razor
 go 1.26.10
 
 require (
-	github.com/derekparker/trie v0.0.0-20230829180723-39f4de51ef7d
 	github.com/go-resty/resty/v2 v2.17.0
 	github.com/goccy/go-yaml v1.18.0
 	github.com/lafikl/consistent v0.0.0-20220512074542-bdd3606bfc3e

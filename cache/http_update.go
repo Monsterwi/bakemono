@@ -42,15 +42,27 @@ func (c *Cache) lockStripes() func() {
 	}
 }
 
-func (c *Cache) checkFillLocked(token *FillToken) error {
-	if token == nil || len(token.stripes) != len(c.Stripes) || len(token.wraps) != len(c.Stripes) || len(token.policies) != len(c.Stripes) {
+func (c *Cache) checkFillEpochsLocked(token *FillToken) error {
+	if token == nil || len(token.stripes) != len(c.Stripes) || len(token.generations) != len(c.Stripes) || len(token.wraps) != len(c.Stripes) || len(token.policies) != len(c.Stripes) {
 		return ErrInvalidated
 	}
 	for i, s := range c.Stripes {
 		if s.closing {
 			return ErrCacheClosed
 		}
-		if token.stripes[i] != s || token.generations[i] != s.OpenDir.Generation() || token.wraps[i] != s.generation || token.policies[i] != s.OpenDir.policyEpoch(token.selector).Load() {
+		if token.stripes[i] != s || token.generations[i] != s.OpenDir.Generation() || token.policies[i] != s.OpenDir.policyEpoch(token.selector).Load() {
+			return ErrInvalidated
+		}
+	}
+	return nil
+}
+
+func (c *Cache) checkFillLocked(token *FillToken) error {
+	if err := c.checkFillEpochsLocked(token); err != nil {
+		return err
+	}
+	for i, s := range c.Stripes {
+		if token.wraps[i] != s.generation {
 			return ErrInvalidated
 		}
 	}
@@ -124,21 +136,41 @@ func (c *Cache) OpenWriteFillKeyReplacing(ctx context.Context, token *FillToken,
 	return vc, nil
 }
 
-// InvalidateFill removes an unsafe family only while the pre-origin snapshot still
-// owns it. The bounded policy epoch also fences pre-origin empty-family fills.
+// InvalidateFill fences unfinished fills and removes only snapshot-owned heads.
+// A writer reservation must not prevent fencing, but newer committed heads survive.
 func (c *Cache) InvalidateFill(token *FillToken) error {
 	unlock := c.lockStripes()
-	if err := c.checkFillLocked(token); err != nil {
+	if err := c.checkFillEpochsLocked(token); err != nil {
+		unlock()
+		return err
+	}
+	heads, err := c.fillSnapshotLocked(token.selector)
+	if err != nil {
 		unlock()
 		return err
 	}
 	var writers []*CacheWriter
-	for _, s := range c.Stripes {
+	for i, s := range c.Stripes {
 		s.OpenDir.policyEpoch(token.selector).Add(1)
-	}
-	for _, head := range token.snapshot {
-		if w := head.stripe.removeLocked([]byte(head.key)); w != nil {
-			writers = append(writers, w)
+		for _, head := range heads {
+			if head.stripe != s {
+				continue
+			}
+			remove := !head.present && head.writer != nil
+			// Wrapped offsets can match a newer head; only unchanged storage owns it.
+			if token.wraps[i] == s.generation {
+				for _, old := range token.snapshot {
+					if head == old {
+						remove = true
+						break
+					}
+				}
+			}
+			if remove {
+				if w := s.removeLocked([]byte(head.key)); w != nil {
+					writers = append(writers, w)
+				}
+			}
 		}
 	}
 	unlock()
