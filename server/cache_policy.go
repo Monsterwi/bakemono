@@ -39,6 +39,15 @@ func responseAge(info *cache.CacheHTTPInfo, now time.Time) (time.Duration, bool)
 		return 0, false
 	}
 	h := info.ResponseHeaders
+	for _, line := range h.Values("Connection") {
+		for _, name := range strings.Split(line, ",") {
+			switch http.CanonicalHeaderKey(strings.TrimSpace(name)) {
+			case "Cache-Control", "Age", "Date", "Set-Cookie", "Vary", "Content-Range", "Trailer":
+				// Removed freshness metadata must not make a stored object younger.
+				return 0, false
+			}
+		}
+	}
 	for _, name := range []string{"Set-Cookie", "Vary", "Content-Range", "Trailer"} {
 		if hasHeader(h, name) {
 			return 0, false

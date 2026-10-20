@@ -87,7 +87,7 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache
 
 func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []byte) {
 	requested := time.Now()
-	resp, err := s.proxy.Proxy(r)
+	resp, originHeaders, err := s.proxy.ProxyWithOriginHeaders(r)
 	if err != nil {
 		s.upstreamError(w, r, err)
 		return
@@ -99,9 +99,11 @@ func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []by
 	info.RequestMethod = r.Method
 	info.RequestURL = r.URL.String()
 	info.Status = resp.StatusCode()
+	info.ResponseHeaders = originHeaders
+	_, cacheable := responseAge(info, time.Now())
 	info.ResponseHeaders = resp.Header().Clone()
 	var fill *cacheFill
-	if _, ok := responseAge(info, time.Now()); ok && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(key, info, resp.RawResponse.ContentLength) {
+	if cacheable && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(key, info, resp.RawResponse.ContentLength) {
 		release, acquireErr := s.writers.Acquire(r.Context(), time.Duration(s.config.QueueTimeout)*time.Second)
 		if acquireErr == nil {
 			cacheCtx, cacheCancel := context.WithCancel(r.Context())
