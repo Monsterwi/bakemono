@@ -435,3 +435,26 @@ func TestBackendProbeAcceptsIPv6Authority(t *testing.T) {
 		t.Fatal("IPv6 backend reported unreachable")
 	}
 }
+
+func TestNewHTTPProxyValidatesUpstreamTCPPort(t *testing.T) {
+	for _, target := range []string{"http://origin.test", "https://origin.test", "http://origin.test:80", "https://origin.test:443", "http://origin.test:65535", "https://[::1]:65535"} {
+		t.Run(target, func(t *testing.T) {
+			p, err := proxy.NewHTTPProxy([]string{target}, balancer.R2Balancer)
+			if err != nil {
+				t.Fatalf("valid upstream rejected: %v", err)
+			}
+			p.Close()
+		})
+	}
+	for _, port := range []string{"0", "65536", "18446744073709551616"} {
+		t.Run(port, func(t *testing.T) {
+			p, err := proxy.NewHTTPProxy([]string{"http://127.0.0.1:" + port}, balancer.R2Balancer)
+			if p != nil {
+				p.Close()
+			}
+			if err == nil {
+				t.Fatal("invalid destination TCP port accepted")
+			}
+		})
+	}
+}

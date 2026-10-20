@@ -34,3 +34,24 @@ func TestLoadRejectsMalformedRecognizedSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateUpstreamTCPPort(t *testing.T) {
+	for _, target := range []string{"http://origin.test", "https://origin.test", "http://origin.test:80", "https://origin.test:443", "http://origin.test:65535", "https://[::1]:65535"} {
+		t.Run(target, func(t *testing.T) {
+			cfg := config.GetDefaultConfig()
+			cfg.UpstreamTargets = []string{target}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("valid upstream rejected: %v", err)
+			}
+		})
+	}
+	for _, port := range []string{"0", "65536", "18446744073709551616"} {
+		t.Run(port, func(t *testing.T) {
+			cfg := config.GetDefaultConfig()
+			cfg.UpstreamTargets = []string{"http://127.0.0.1:" + port}
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid destination TCP port accepted")
+			}
+		})
+	}
+}

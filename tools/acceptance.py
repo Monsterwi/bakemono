@@ -6,6 +6,7 @@ ATS is optional for functional runs, required by --mode benchmark/all.
 """
 import argparse
 import concurrent.futures
+from contextlib import ExitStack, suppress
 import hashlib
 import http.client
 import http.server
@@ -241,29 +242,43 @@ class Product:
 
     def start(self):
         self.log = (self.dir / "process.log").open("a")
-        self.proc = subprocess.Popen(self.command, stdout=self.log, stderr=self.log, env=self.env)
-        def ready():
-            assert self.proc.poll() is None, f"{self.kind} exited: {self.proc.returncode}; inspect {self.dir}/process.log"
-            try:
-                with socket.create_connection(("127.0.0.1", self.port), timeout=.1):
-                    return True
-            except OSError:
-                return False
-        wait_for(ready, self.kind + " listening", 30)
-        time.sleep(.1)
+        self.proc = None
+        try:
+            self.proc = subprocess.Popen(self.command, stdout=self.log, stderr=self.log, env=self.env)
+            def ready():
+                assert self.proc.poll() is None, f"{self.kind} exited: {self.proc.returncode}; inspect {self.dir}/process.log"
+                try:
+                    with socket.create_connection(("127.0.0.1", self.port), timeout=.1):
+                        return True
+                except OSError:
+                    return False
+            wait_for(ready, self.kind + " listening", 30)
+            time.sleep(.1)
+        except BaseException:
+            # A failed constructor has no caller-owned Product to stop.
+            if self.proc is not None:
+                with suppress(Exception):
+                    self.proc.kill()
+                with suppress(Exception):
+                    self.proc.wait(timeout=5)
+            with suppress(Exception):
+                self.log.close()
+            raise
 
     def stop(self, crash=False):
-        if self.proc and self.proc.poll() is None:
-            self.proc.send_signal(signal.SIGKILL if crash else signal.SIGTERM)
-            try:
-                code = self.proc.wait(15)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait()
-                raise AssertionError("process failed to join on shutdown")
-            if not crash:
-                assert code == 0, (self.kind, "shutdown", code)
-        self.log.close()
+        try:
+            if self.proc and self.proc.poll() is None:
+                self.proc.send_signal(signal.SIGKILL if crash else signal.SIGTERM)
+                try:
+                    code = self.proc.wait(15)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait()
+                    raise AssertionError("process failed to join on shutdown")
+                if not crash:
+                    assert code == 0, (self.kind, "shutdown", code)
+        finally:
+            self.log.close()
 
     def reload(self, overrides):
         assert self.kind == "bakemono"
@@ -422,16 +437,20 @@ class Client:
 
 
 def functional(args, fixtures, output):
-    origin = Origin(fixtures, output / "origin-functional.json")
-    alternate = Origin(fixtures, output / "origin-alternate.json", version=2)
-    client = Client(fixtures, output)
-    product = Product("bakemono", output / "functional", origin, args)
-    evidence = []
-    def record(name, **details):
-        evidence.append({"name": name, "result": "PASS", **details})
-        save(output / "functional.json", evidence)
-        print("PASS " + name, flush=True)
-    try:
+    with ExitStack() as cleanup:
+        origin = Origin(fixtures, output / "origin-functional.json")
+        cleanup.callback(origin.close)
+        alternate = Origin(fixtures, output / "origin-alternate.json", version=2)
+        cleanup.callback(alternate.close)
+        client = Client(fixtures, output)
+        cleanup.callback(client.raw.close)
+        product = Product("bakemono", output / "functional", origin, args)
+        cleanup.callback(product.stop)
+        evidence = []
+        def record(name, **details):
+            evidence.append({"name": name, "result": "PASS", **details})
+            save(output / "functional.json", evidence)
+            print("PASS " + name, flush=True)
         path = "/small-cache"
         for _ in range(2):
             client.checked(product, path)
@@ -609,6 +628,7 @@ def functional(args, fixtures, output):
         client.checked(product, "/small-after-overload")
         product.stop()
         product = Product("bakemono", output / "capacity", origin, args, capacity=32)
+        cleanup.callback(product.stop)
         for i in range(160):
             client.checked(product, f"/small-wrap-{i}")
         client.checked(product, "/small-wrap-0")
@@ -623,17 +643,13 @@ def functional(args, fixtures, output):
         for state in ("MISS", "HIT", "REVALIDATE", "BYPASS", "PURGE"):
             assert f'"cache_status":"{state}"' in access, state
         record("main access-log MISS/HIT/REVALIDATE/BYPASS/PURGE observed")
-    finally:
-        product.stop()
-        client.raw.close()
-        origin.close()
-        alternate.close()
-
 
 def benchmark(args, fixtures, output):
-    origin = Origin(fixtures, output / "origin-benchmark.json")
-    client = Client(fixtures, output)
-    try:
+    with ExitStack() as cleanup:
+        origin = Origin(fixtures, output / "origin-benchmark.json")
+        cleanup.callback(origin.close)
+        client = Client(fixtures, output)
+        cleanup.callback(client.raw.close)
         for kind in ("bakemono", "ats"):
             product = Product(kind, output / (kind + "-benchmark"), origin, args)
             try:
@@ -668,10 +684,6 @@ def benchmark(args, fixtures, output):
                     time.sleep(.1)
             finally:
                 product.stop()
-    finally:
-        client.raw.close()
-        origin.close()
-
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
