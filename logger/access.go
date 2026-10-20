@@ -36,8 +36,25 @@ func newResponseWriter(w http.ResponseWriter) *responseWriter {
 	}
 }
 
+// Unwrap lets ResponseController reach streaming and connection capabilities.
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
+
+// FlushError records the implicit 200 committed by a streaming flush.
+func (rw *responseWriter) FlushError() error {
+	if !rw.wroteOnce {
+		rw.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(rw.ResponseWriter).Flush()
+}
+
 // WriteHeader captures the status code
 func (rw *responseWriter) WriteHeader(code int) {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		if !rw.wroteOnce {
+			rw.ResponseWriter.WriteHeader(code)
+		}
+		return
+	}
 	if !rw.wroteOnce {
 		rw.statusCode = code
 		rw.wroteOnce = true

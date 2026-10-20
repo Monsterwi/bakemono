@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -227,4 +228,63 @@ func TestResponseWriterDefaultStatus(t *testing.T) {
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
 		(len(s) > 0 && (s[:len(substr)] == substr || contains(s[1:], substr))))
+}
+
+func TestAccessLogPreservesResponseControllerFlush(t *testing.T) {
+	flushed := make(chan error, 1)
+	handler := AccessLogMiddleware(filepath.Join(t.TempDir(), "access.log"))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("first"))
+		flushed <- http.NewResponseController(w).Flush()
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if err := <-flushed; err != nil {
+		t.Fatalf("flush through middleware: %v", err)
+	}
+	if !recorder.Flushed {
+		t.Fatal("underlying response was not flushed")
+	}
+}
+
+func TestAccessLogPreservesFinalStatusAfterEarlyHints(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	handler := AccessLogMiddleware(path)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusEarlyHints)
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	resp, err := server.Client().Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTeapot {
+		t.Fatalf("final status = %d", resp.StatusCode)
+	}
+}
+
+func TestAccessLogRecordsStatusCommittedByFlush(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "access.log")
+	handler := AccessLogMiddleware(path)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := http.NewResponseController(w).Flush(); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry struct {
+		Status int `json:"status"`
+	}
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusOK || entry.Status != http.StatusOK {
+		t.Fatalf("wire status = %d; logged status = %d", recorder.Code, entry.Status)
+	}
 }

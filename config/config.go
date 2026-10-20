@@ -27,6 +27,7 @@ type Config struct {
 	// Upstream configuration
 	UpstreamTargets []string
 	UpstreamAlgo    string
+	TrustedProxies  []string
 
 	// Logging configuration
 	LogfileDir        string
@@ -88,6 +89,7 @@ func Load(configDir string) (*Config, error) {
 	cfg.ErrorLogFilename = rc.GetString("proxy.config.log.error_log_filename", cfg.ErrorLogFilename)
 	cfg.UpstreamAlgo = rc.GetString("proxy.config.http.parent_proxy.upstream_algo", cfg.UpstreamAlgo)
 	cfg.UpstreamTargets = rc.GetStringSlice("proxy.config.http.parent_proxy.upstream_targets", cfg.UpstreamTargets)
+	cfg.TrustedProxies = rc.GetStringSlice("proxy.config.http.trusted_proxies", cfg.TrustedProxies)
 	cfg.KeepAliveTimeout = rc.GetInt("proxy.config.http.keep_alive_no_activity_timeout_in", cfg.KeepAliveTimeout)
 	cfg.TransactionTimeoutIn = rc.GetInt("proxy.config.http.transaction_no_activity_timeout_in", cfg.TransactionTimeoutIn)
 	cfg.TransactionTimeoutOut = rc.GetInt("proxy.config.http.transaction_no_activity_timeout_out", cfg.TransactionTimeoutOut)
