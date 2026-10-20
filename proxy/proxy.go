@@ -183,7 +183,7 @@ func NewHTTPProxy(targetHosts []string, algorithm string, options ...Option) (*H
 		Trusted   []netip.Prefix
 		CA        [32]byte
 	}{hosts, algorithm, h.trustedProxies, h.caDigest})
-	h.upstreams, h.algorithm = hosts, algorithm
+	h.upstreams, h.algorithm = append([]string(nil), hosts...), algorithm
 	h.cacheNamespace = fmt.Sprintf("%x", sha256.Sum256(policy))
 	return h, nil
 }

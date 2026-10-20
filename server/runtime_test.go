@@ -426,3 +426,126 @@ func waitRuntime(t *testing.T, s *server.Server, ready func(server.Stats) bool) 
 		time.Sleep(time.Millisecond)
 	}
 }
+
+func TestConcurrentReloadSerializesOneLiveTransition(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	oldOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(entered); <-release; io.WriteString(w, "old") }))
+	defer oldOrigin.Close()
+	cfg := config.GetDefaultConfig()
+	s := lifecycleServer(t, oldOrigin.URL, cfg)
+	old := make(chan *httptest.ResponseRecorder, 1)
+	go func() { old <- fetch(s, "http://front.test/held", nil) }()
+	<-entered
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { <-start; results <- s.Reload(cfg) }()
+	}
+	close(start)
+	successes, busy := 0, 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, server.ErrReloadBusy) {
+			busy++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 || busy != 1 || s.Stats().RuntimeVersion != 2 {
+		t.Fatalf("concurrent reload: successes=%d busy=%d stats=%+v", successes, busy, s.Stats())
+	}
+	close(release)
+	if got := <-old; got.Body.String() != "old" {
+		t.Fatal(got.Body.String())
+	}
+}
+
+func TestReloadAndPurgeFenceCancelledCreatorsSharedFill(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int64
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		if n == 1 {
+			close(entered)
+			<-release
+			io.WriteString(w, "old")
+			return
+		}
+		io.WriteString(w, "fresh")
+	}))
+	defer origin.Close()
+	cfg := config.GetDefaultConfig()
+	cfg.PurgeToken = "test-reload-token"
+	s := lifecycleServer(t, origin.URL, cfg)
+	front := httptest.NewServer(s)
+	defer front.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, "GET", front.URL+"/object", nil)
+	creator := make(chan error, 1)
+	go func() {
+		response, err := front.Client().Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		creator <- err
+	}()
+	<-entered
+	follower := make(chan int, 1)
+	go func() {
+		response, err := front.Client().Get(front.URL + "/object")
+		if err != nil {
+			follower <- 0
+			return
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		follower <- response.StatusCode
+	}()
+	waitRuntime(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 })
+	cancel()
+	if err := <-creator; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	next := *cfg
+	next.CacheWriteTimeout++
+	if err := s.Reload(&next); err != nil {
+		t.Fatal(err)
+	}
+	request, _ = http.NewRequest("PURGE", front.URL+"/object", nil)
+	request.Header.Set("Authorization", "Bearer "+cfg.PurgeToken)
+	response, err := front.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if response.StatusCode != 200 {
+		t.Fatal(response.StatusCode)
+	}
+	getFresh := func() {
+		t.Helper()
+		response, err := front.Client().Get(front.URL + "/object")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || string(body) != "fresh" {
+			t.Fatalf("new generation: %q %v", body, err)
+		}
+	}
+	getFresh()
+	close(release)
+	if status := <-follower; status != http.StatusServiceUnavailable {
+		t.Fatalf("old shared result escaped PURGE: %d", status)
+	}
+	waitRuntime(t, s, func(st server.Stats) bool { return st.RetiredRuntimes == 0 && st.SharedFillTasks == 0 })
+	getFresh()
+	if calls.Load() != 2 {
+		t.Fatalf("stale fill replaced new cache: origins=%d", calls.Load())
+	}
+}
