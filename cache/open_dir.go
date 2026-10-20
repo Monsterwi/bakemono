@@ -2,6 +2,7 @@ package cache
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,8 +40,9 @@ func NewOpenDirEntry(w *CacheWriter) *OpenDirEntry {
 
 // OpenDir manages concurrent access to documents being written.
 type OpenDir struct {
-	mutex   sync.RWMutex
-	entries map[string]*OpenDirEntry
+	mutex      sync.RWMutex
+	entries    map[string]*OpenDirEntry
+	generation atomic.Uint64
 }
 
 func NewOpenDir() *OpenDir {
@@ -133,3 +135,6 @@ func (od *OpenDir) Release(key []byte, expected *OpenDirEntry) {
 }
 
 func (entry *OpenDirEntry) signalReady() { entry.readyOnce.Do(func() { close(entry.ReadySignal) }) }
+
+// Generation fences queued work across invalidation. Purges advance it under Stripe.mu.
+func (od *OpenDir) Generation() uint64 { return od.generation.Load() }
