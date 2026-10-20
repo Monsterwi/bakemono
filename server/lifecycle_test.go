@@ -31,7 +31,7 @@ func lifecycleServer(t *testing.T, origin string, cfg *appconfig.Config) *server
 	if err = c.Init(); err != nil {
 		t.Fatal(err)
 	}
-	p, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo)
+	p, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo, proxy.WithTrustedProxies(cfg.TrustedProxies), proxy.WithCAFile(cfg.UpstreamCAFile))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,7 +17,6 @@ import (
 
 	"github.com/Monsterwi/razor/cache"
 	appconfig "github.com/Monsterwi/razor/config"
-	"github.com/Monsterwi/razor/internal/budget"
 	"github.com/Monsterwi/razor/logger"
 	"github.com/Monsterwi/razor/proxy"
 	"golang.org/x/net/netutil"
@@ -25,11 +24,13 @@ import (
 
 type Server struct {
 	config               *appconfig.Config
+	startupFiles         [32]byte
 	cache                *cache.Cache
-	proxy                *proxy.HTTPProxy
+	current, retired     *runtimeSnapshot
+	closedOrigin         proxy.Stats
+	reloadMu             sync.Mutex
 	httpServer           *http.Server
 	tlsConfig            *tls.Config
-	admission, writers   *budget.Limiter
 	counters             counters
 	fills                *fillGroup
 	ctx                  context.Context
@@ -61,22 +62,36 @@ func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy, options ...O
 		cfg = appconfig.GetDefaultConfig()
 	}
 	cfg = cfg.WithDefaults()
-	s := &Server{config: cfg, cache: c, proxy: p, backgroundStop: make(chan struct{}), now: time.Now}
+	// Preserve embedders that supplied only budgets and an already built proxy.
+	if len(cfg.UpstreamTargets) == 0 || cfg.UpstreamAlgo == "" {
+		targets, algorithm := p.Upstreams()
+		if len(cfg.UpstreamTargets) == 0 {
+			cfg.UpstreamTargets = targets
+		}
+		if cfg.UpstreamAlgo == "" {
+			cfg.UpstreamAlgo = algorithm
+		}
+	}
+	s := &Server{config: cfg, cache: c, backgroundStop: make(chan struct{}), now: time.Now}
 	for _, option := range options {
 		option(s)
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.fills = &fillGroup{ctx: s.ctx, cache: c, tasks: make(map[string]*fillTask)}
-	s.initErr = cfg.Validate()
+	s.startupFiles, s.initErr = runtimeFiles(cfg)
 	if s.initErr == nil {
-		s.admission = budget.New(cfg.MaxRequests, cfg.MaxQueuedRequests)
-		writers := min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation())
-		s.writers = budget.New(writers, cfg.MaxQueuedCacheWriters)
-		s.initErr = p.ConfigureLimits(proxy.Limits{Requests: cfg.MaxOriginRequests, Queued: cfg.MaxOriginQueuedRequests, Connections: cfg.MaxOriginConnections, QueueTimeout: time.Duration(cfg.QueueTimeout) * time.Second, DialTimeout: time.Duration(cfg.ConnectTimeout) * time.Second, TLSHandshakeTimeout: time.Duration(cfg.TLSHandshakeTimeout) * time.Second, ResponseHeaderTimeout: time.Duration(cfg.ResponseHeaderTimeout) * time.Second, BodyIdleTimeout: time.Duration(cfg.TransactionTimeoutOut) * time.Second})
+		s.current, s.initErr = newRuntime(cfg, p, 1)
 	}
 	if s.initErr == nil {
 		s.initErr = s.configureNetwork()
 	}
+	if s.initErr == nil {
+		s.initErr = s.current.startHealth()
+	}
+	if s.initErr != nil {
+		p.Close()
+	}
+
 	return s
 }
 
@@ -126,22 +141,37 @@ func (s *Server) Run() error {
 		return errors.Join(err, s.Shutdown())
 	}
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(quit)
 	result := make(chan error, 1)
 	go func() { result <- s.Serve(listener) }()
-	select {
-	case <-quit:
-		return s.Shutdown()
-	case err := <-result:
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
+	for {
+		select {
+		case received := <-quit:
+			if received == syscall.SIGHUP {
+				cfg, reloadErr := appconfig.Load(s.config.ConfigDir)
+				if reloadErr == nil {
+					reloadErr = s.Reload(cfg)
+				}
+				if reloadErr != nil {
+					logger.Errorf("Configuration reload rejected: %v", reloadErr)
+				} else {
+					logger.Infof("Configuration reloaded: version=%d", s.Stats().RuntimeVersion)
+				}
+				continue
+			}
+			return s.Shutdown()
+		case err := <-result:
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			return errors.Join(err, s.Shutdown())
 		}
-		return errors.Join(err, s.Shutdown())
 	}
+
 }
 func (s *Server) Shutdown() error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.config.ShutdownTimeout)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.shutdownTimeout())*time.Second)
 	defer cancel()
 	return s.ShutdownContext(ctx)
 }
@@ -151,12 +181,20 @@ func (s *Server) Shutdown() error {
 // for it is required to avoid writes against a closed cache file.
 func (s *Server) ShutdownContext(ctx context.Context) error {
 	s.shutdown.Do(func() {
+		s.reloadMu.Lock()
 		s.mu.Lock()
 		s.draining = true
 		hs := s.httpServer
+		current, retired := s.current, s.retired
 		close(s.backgroundStop)
 		s.mu.Unlock()
-		s.proxy.StopBackground()
+		s.reloadMu.Unlock()
+		if current != nil {
+			current.proxy.StopBackground()
+		}
+		if retired != nil {
+			retired.proxy.StopBackground()
+		}
 		s.background.Wait()
 		var err error
 		if hs != nil {
@@ -180,11 +218,25 @@ func (s *Server) ShutdownContext(ctx context.Context) error {
 		}
 		s.cancel()
 		s.fills.producers.Wait()
-		err = errors.Join(err, s.proxy.Close())
+		s.mu.Lock()
+		s.closeRetiredLocked()
+		if s.current != nil {
+			err = errors.Join(err, s.current.proxy.Close())
+		}
+		s.mu.Unlock()
 		if s.cache != nil {
 			err = errors.Join(err, s.cache.Close())
 		}
 		s.shutdownErr = err
 	})
 	return s.shutdownErr
+}
+
+func (s *Server) shutdownTimeout() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current != nil {
+		return s.current.config.ShutdownTimeout
+	}
+	return s.config.ShutdownTimeout
 }

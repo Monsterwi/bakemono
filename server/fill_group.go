@@ -56,10 +56,12 @@ type fillResources struct {
 	writers *budget.Limiter
 	release func()
 	version uint64
+	runtime *runtimeSnapshot
 }
 
 func (s *Server) captureFillResources(r *http.Request) fillResources {
-	return fillResources{s.config, s.proxy, s.writers, func() {}, 0}
+	rt := requestRuntime(r)
+	return fillResources{config: rt.config, proxy: rt.proxy, writers: rt.writers, release: s.retainRuntime(rt), version: rt.version, runtime: rt}
 }
 
 func fillIdentity(r *http.Request, key []byte, version uint64) string {
@@ -156,7 +158,7 @@ func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []b
 	}
 	defer s.fills.leave(task, creator)
 	if creator {
-		originRequest := r.Clone(task.ctx)
+		originRequest := withRequestRuntime(r.Clone(task.ctx), task.ctx, resources.runtime)
 		go func() {
 			defer s.fills.finish(task)
 			defer resources.release()
