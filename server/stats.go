@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -14,6 +15,7 @@ type counters struct{ requests, rejected, cancelled, hits, misses, bypass, bytes
 // Stats contains only aggregate, bounded-cardinality counters. BufferReserved is
 // the conservative payload reservation for active writers, not a total RSS cap.
 type Stats struct {
+	Goroutines                                                                                                                  int
 	RuntimeVersion                                                                                                              uint64
 	RetiredRuntimes                                                                                                             int
 	InFlight, Queued, CacheWriters, CacheQueued, DiskQueued                                                                     int
@@ -25,7 +27,7 @@ type Stats struct {
 }
 
 func (s *Server) Stats() Stats {
-	st := Stats{Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load()}
+	st := Stats{Goroutines: runtime.NumGoroutine(), Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load()}
 	s.mu.Lock()
 	st.Origin = s.closedOrigin
 	if s.current != nil {
