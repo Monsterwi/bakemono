@@ -66,15 +66,8 @@ func TestAggregateWriteBuffer_DoubleBuffering(t *testing.T) {
 		convey.So(err, convey.ShouldBeNil)
 		convey.So(offset1, convey.ShouldEqual, 0)
 
-		// 2. Trigger Flush manually (simulates High Water Mark or manual flush)
-		// We call FlushSync in a goroutine because it waits for completion
-		flushDone := make(chan bool)
-		go func() {
-			buf.FlushSync()
-			flushDone <- true
-		}()
-
-		// 3. Receive Task 1
+		// Add reached the high-water mark and queued the first buffer.
+		// Receiving its task establishes the ordering before writing buffer 2.
 		var task1 FlushTask
 		select {
 		case task1 = <-buf.GetFlushChan():
@@ -96,17 +89,12 @@ func TestAggregateWriteBuffer_DoubleBuffering(t *testing.T) {
 		// 5. Simulate Task 1 completion
 		buf.NotifyFlushDone()
 
-		// FlushSync should return now
-		select {
-		case <-flushDone:
-		case <-time.After(100 * time.Millisecond):
-			t.Fatal("FlushSync did not return")
-		}
-
 		// 6. Now check that buffer 1 data is still there
 		// Trigger flush for buffer 1
+		convey.So(buf.GetBufferPos(), convey.ShouldEqual, len(data2))
+		flushDone := make(chan error, 1)
 		go func() {
-			buf.FlushSync()
+			flushDone <- buf.FlushSync()
 		}()
 
 		select {
@@ -115,6 +103,12 @@ func TestAggregateWriteBuffer_DoubleBuffering(t *testing.T) {
 			buf.NotifyFlushDone()
 		case <-time.After(100 * time.Millisecond):
 			t.Fatal("Timeout waiting for task 2")
+		}
+		select {
+		case err := <-flushDone:
+			convey.So(err, convey.ShouldBeNil)
+		case <-time.After(time.Second):
+			t.Fatal("FlushSync did not return after both buffers completed")
 		}
 	})
 }
