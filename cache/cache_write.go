@@ -38,13 +38,15 @@ type CacheWriter struct {
 		allocation allocation
 		size       int
 	}
-	ctx        context.Context
-	cancel     context.CancelFunc
-	generation uint64
-	policy     uint64
-	selector   []byte
-	version    uint64
-	od         *OpenDirEntry // Reference to OpenDir entry
+	ctx           context.Context
+	cancel        context.CancelFunc
+	fenceSelector []byte
+	fencePolicy   uint64
+	generation    uint64
+	policy        uint64
+	selector      []byte
+	version       uint64
+	od            *OpenDirEntry // Reference to OpenDir entry
 }
 
 func NewCacheWriter(s *Stripe, key []byte) *CacheWriter {
@@ -457,7 +459,7 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 	if w.Stripe.closing {
 		return ErrCacheClosed
 	}
-	if w.generation != w.Stripe.OpenDir.Generation() || w.policy != w.Stripe.OpenDir.policyEpoch(w.selector).Load() || (w.od != nil && w.Stripe.OpenDir.Get(w.Key) != w.od) {
+	if (len(w.fenceSelector) > 0 && w.fencePolicy != w.Stripe.OpenDir.policyEpoch(w.fenceSelector).Load()) || w.generation != w.Stripe.OpenDir.Generation() || w.policy != w.Stripe.OpenDir.policyEpoch(w.selector).Load() || (w.od != nil && w.Stripe.OpenDir.Get(w.Key) != w.od) {
 		return ErrInvalidated
 	}
 	if !w.Stripe.allocationValid(a, len(fullData)) {

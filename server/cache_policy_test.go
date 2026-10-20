@@ -203,7 +203,11 @@ func TestRequestBypassAndRangeCannotPoisonOrdinaryGet(t *testing.T) {
 	headers := []http.Header{{"Cookie": {"session=alice"}}, {"Cache-Control": {"no-store"}}, {"Range": {"bytes=0-2"}}}
 	for _, h := range headers {
 		t.Run(fmt.Sprint(h), func(t *testing.T) {
-			s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+			var calls atomic.Int32
+			s, _ := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					calls.Add(1)
+				}
 				w.Header().Set("Cache-Control", "public, max-age=3600")
 				if r.Header.Get("Range") != "" {
 					w.Header().Set("Content-Range", "bytes 0-2/8")
