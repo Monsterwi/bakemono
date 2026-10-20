@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bocchi-the-cache/bakemono"
+	"github.com/Monsterwi/razor/cache"
 )
 
 const LOOP = 50000
@@ -16,20 +16,16 @@ const LOOP = 50000
 func main() {
 	// read path from args
 
-	//_ = os.Remove("/tmp/bakemono-test.vol")
+	//_ = os.Remove("/tmp/bakemono-pressure-concurrent/cache.db")
 
-	cfg, err := bakemono.NewDefaultVolOptions("/tmp/bakemono-test.vol", 1024*512*100000, 8000, 1024)
+	v, err := cache.NewCache(1, []string{"/tmp/bakemono-pressure-concurrent/cache.db"}, []int64{1024 * 512 * 100000})
 	if err != nil {
 		panic(err)
 	}
-	v := &bakemono.Vol{}
-	corrupted, err := v.Init(cfg)
-	if err != nil {
+	if err := v.Init(); err != nil {
 		panic(err)
 	}
-	if corrupted {
-		log.Printf("vol is corrupted, but fixed. ignore this if first time running.")
-	}
+	defer v.Close()
 
 	for i := 0; i < 100000; i++ {
 		log.Printf("--------------------------------- start loop #%d", i)
@@ -60,7 +56,7 @@ func main() {
 }
 
 type RW struct {
-	v   *bakemono.Vol
+	v   *cache.Cache
 	mp  *sync.Map
 	key int64
 }
@@ -97,7 +93,15 @@ func (rw *RW) WLoop() {
 			log.Printf("++ set key-%d-%d", randomKey, i)
 		}
 		rw.mp.Store(fmt.Sprintf("key-%d-%d", randomKey, i), randomSize)
-		err := rw.v.Set([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)), randomData)
+		writer, err := rw.v.OpenWrite([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)), 0)
+		if err != nil {
+			panic(err)
+		}
+		_, err = writer.Write(randomData)
+		closeErr := writer.Close()
+		if closeErr != nil {
+			panic(closeErr)
+		}
 		if err != nil {
 			panic(err)
 		}
@@ -122,25 +126,24 @@ func (rw *RW) RLoop() {
 
 		serial := rand2.Intn(LOOP)
 
-		hit, reader, err := rw.v.Get([]byte(fmt.Sprintf("key-%d-%d", randomKey, serial)))
-		if !hit {
-			counter["miss"]++
-		} else {
-			counter["hit"]++
-		}
+		reader, err := rw.v.OpenRead([]byte(fmt.Sprintf("key-%d-%d", randomKey, serial)))
 		if err != nil {
-			log.Printf("err: %v", err)
+			log.Printf("OpenRead: %v", err)
+			counter["miss"]++
 			continue
 		}
-		if !hit {
+		// OpenRead is lazy; loading the first fragment establishes a cache hit.
+		if _, err := reader.LoadHTTPInfo(); err != nil {
+			reader.Close()
+			counter["miss"]++
 			continue
 		}
-
+		counter["hit"]++
 		randomSize := rw.GetContentSize(randomKey, serial)
-
 		randomData := rw.GetContent(randomKey, 1024*randomSize)
 
 		data, err := io.ReadAll(reader)
+		reader.Close()
 		if err != nil {
 			log.Printf("ReadAll err: %v", err)
 			continue

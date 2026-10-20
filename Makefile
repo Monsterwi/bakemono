@@ -1,4 +1,4 @@
-.PHONY: build clean
+.PHONY: build clean test test-race test-integration pressure-app universal all
 
 VERSION=0.0.1
 BIN=bakemono
@@ -8,7 +8,9 @@ DOCKER_CMD=docker
 GO_ENV=CGO_ENABLED=0
 Revision=$(shell git rev-parse --short HEAD)
 GO_FLAGS=-ldflags="-X main.Version=$(VERSION) -X 'main.Revision=$(Revision)' -X 'main.Time=`date`' -extldflags -static"
-GO=$(GO_ENV) $(shell which go)
+GO=go
+# Pin local Make targets and CI to the same maintained patch.
+export GOTOOLCHAIN=go$(shell awk '$$1 == "go" { print $$2 }' go.mod)
 
 build:
 	@$(GO_ENV) $(GO) build $(GO_FLAGS) -o $(BIN) $(DIR_SRC)
@@ -20,7 +22,13 @@ universal:
 	@rm -f ${BIN}_amd64 ${BIN}_arm64
 
 test:
-	@$(GO) test ./...
+	@$(GO) test ./... -timeout 120s
+
+test-race:
+	@CGO_ENABLED=1 GOFLAGS=-race $(GO) test ./... -timeout 180s
+
+test-integration:
+	@$(GO) test . -run '^TestBinaryCacheMissThenHit$$' -count=1 -timeout 120s
 
 clean:
 	@$(GO) clean ./...

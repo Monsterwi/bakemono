@@ -188,8 +188,8 @@ func TestRamCacheOtter_Overwrite(t *testing.T) {
 }
 
 func TestRamCacheOtter_Eviction(t *testing.T) {
-	// Create a small cache that will trigger eviction
-	cache := NewRamCache(3)
+	// Capacity is measured in bytes: three six-byte values fit.
+	cache := NewRamCache(18)
 
 	// Fill the cache
 	for i := 0; i < 3; i++ {
@@ -200,6 +200,9 @@ func TestRamCacheOtter_Eviction(t *testing.T) {
 			t.Fatalf("Put() error = %v", err)
 		}
 	}
+
+	// Drain asynchronous maintenance before observing the configured capacity.
+	cache.CleanUp()
 
 	// Verify all entries are present
 	for i := 0; i < 3; i++ {
@@ -220,16 +223,20 @@ func TestRamCacheOtter_Eviction(t *testing.T) {
 		t.Fatalf("Put() error = %v", err)
 	}
 
-	// Cache size should not exceed maximum
-	cache.CleanUp()
-	items := cache.Items()
-	if items > 3 {
-		t.Errorf("Items() = %d, want <= 3", items)
+	// CleanUp synchronously drains pending writes and eviction.
+	if size := cache.Size(); size > 18 {
+		t.Errorf("Size() = %d bytes, want <= 18", size)
+	}
+	if items := cache.Items(); items != 3 {
+		t.Errorf("Items() = %d, want 3", items)
+	}
+	if cache.Stats().Evictions == 0 {
+		t.Error("expected an eviction after exceeding the byte capacity")
 	}
 }
 
 func TestRamCacheOtter_LargeData(t *testing.T) {
-	cache := NewRamCache(10)
+	cache := NewRamCache(64 * 1024)
 
 	// Test with large data
 	largeData := make([]byte, 64*1024) // 64KB
@@ -243,6 +250,7 @@ func TestRamCacheOtter_LargeData(t *testing.T) {
 		t.Fatalf("Put() error = %v", err)
 	}
 
+	cache.CleanUp()
 	got, found := cache.Get(key)
 	if !found {
 		t.Fatalf("Get() not found")

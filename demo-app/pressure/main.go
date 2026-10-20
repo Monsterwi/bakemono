@@ -8,26 +8,22 @@ import (
 	rand2 "math/rand"
 	"time"
 
-	"github.com/bocchi-the-cache/bakemono"
+	"github.com/Monsterwi/razor/cache"
 )
 
 const LOOP = 5000
 
 func main() {
-	//_ = os.Remove("/tmp/bakemono-test.vol")
+	//_ = os.Remove("/tmp/bakemono-pressure/cache.db")
 
-	cfg, err := bakemono.NewDefaultVolOptions("/tmp/bakemono-test.vol", 1024*5120*1000, 8000, 1024)
+	v, err := cache.NewCache(1, []string{"/tmp/bakemono-pressure/cache.db"}, []int64{1024 * 5120 * 1000})
 	if err != nil {
 		panic(err)
 	}
-	v := &bakemono.Vol{}
-	corrupted, err := v.Init(cfg)
-	if err != nil {
+	if err := v.Init(); err != nil {
 		panic(err)
 	}
-	if corrupted {
-		log.Printf("vol is corrupted, but fixed. ignore this if first time running.")
-	}
+	defer v.Close()
 
 	for i := 0; i < 100000; i++ {
 		log.Printf("--------------------------------- start loop #%d", i)
@@ -35,7 +31,7 @@ func main() {
 	}
 }
 
-func CacheRWLoop(v *bakemono.Vol) {
+func CacheRWLoop(v *cache.Cache) {
 	// pad randomData with random data
 	randomKey := rand2.Int63()
 	randomSize := rand2.Intn(512)
@@ -48,7 +44,15 @@ func CacheRWLoop(v *bakemono.Vol) {
 		if i%10000 == 0 {
 			log.Printf("++ set key-%d-%d", randomKey, i)
 		}
-		err := v.Set([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)), randomData)
+		writer, err := v.OpenWrite([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)), 0)
+		if err != nil {
+			panic(err)
+		}
+		_, err = writer.Write(randomData)
+		closeErr := writer.Close()
+		if closeErr != nil {
+			panic(closeErr)
+		}
 		if err != nil {
 			panic(err)
 		}
@@ -67,21 +71,20 @@ func CacheRWLoop(v *bakemono.Vol) {
 		if i%10000 == 0 {
 			log.Printf("-- get key-%d", i)
 		}
-		hit, reader, err := v.Get([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)))
-		if !hit {
-			counter["miss"]++
-		} else {
-			counter["hit"]++
-		}
+		reader, err := v.OpenRead([]byte(fmt.Sprintf("key-%d-%d", randomKey, i)))
 		if err != nil {
 			panic(err)
 		}
-
-		if !hit {
+		// OpenRead is lazy; loading the first fragment establishes a cache hit.
+		if _, err := reader.LoadHTTPInfo(); err != nil {
+			reader.Close()
+			counter["miss"]++
 			continue
 		}
+		counter["hit"]++
 
 		data, err := io.ReadAll(reader)
+		reader.Close()
 		if err != nil {
 			panic(err)
 		}

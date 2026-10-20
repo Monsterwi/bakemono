@@ -1,2 +1,22 @@
-- name: codecov
-  uses: codecov/codecov-action@v3
+name: coverage
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Collect coverage
+        run: go test ./... -coverprofile=coverage.out -timeout 120s
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
