@@ -215,18 +215,26 @@ func (h *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Proxy returns an unbuffered response. The caller must close RawBody.
 func (h *HTTPProxy) Proxy(r *http.Request) (*resty.Response, error) {
+	resp, _, err := h.ProxyWithOriginHeaders(r)
+	return resp, err
+}
+
+// ProxyWithOriginHeaders also returns a header snapshot before hop-by-hop removal
+// so cache admission cannot lose privacy or freshness signals.
+func (h *HTTPProxy) ProxyWithOriginHeaders(r *http.Request) (*resty.Response, http.Header, error) {
 	host, err := h.lb.Balance(h.CacheKey(r))
 	if err != nil {
-		return nil, fmt.Errorf("balance: %w", err)
+		return nil, nil, fmt.Errorf("balance: %w", err)
 	}
 	out := r.Clone(r.Context())
 	h.rewrite(&httputil.ProxyRequest{In: r, Out: out}, h.targets[host])
 	resp, err := h.roundTrip(out, host)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	originHeaders := resp.Header.Clone()
 	stripHopHeaders(resp.Header)
-	return &resty.Response{RawResponse: resp}, nil
+	return &resty.Response{RawResponse: resp}, originHeaders, nil
 }
 
 type trackedBody struct {

@@ -112,6 +112,44 @@ func TestResponseCacheAdmission(t *testing.T) {
 	}
 }
 
+func TestConnectionCannotEraseCacheAdmissionHeaders(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"Vary", "Accept-Language"},
+		{"Set-Cookie", "session=private"},
+		{"Age", "100"},
+		{"Age", "1"},
+		{"Date", "Mon, 02 Jan 2006 15:04:05 GMT"},
+		{"Date", time.Now().Add(-30 * time.Second).UTC().Format(http.TimeFormat)},
+		{"Content-Range", "bytes 0-2/10"},
+	} {
+		t.Run(tc.name+"/"+tc.value, func(t *testing.T) {
+			s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", "public, max-age=60")
+				w.Header().Set("Connection", tc.name)
+				w.Header().Set(tc.name, tc.value)
+				w.Header().Add("X-Multi", "one")
+				w.Header().Add("X-Multi", "two")
+				fmt.Fprint(w, r.Header.Get("Accept-Language"))
+			})
+			for _, language := range []string{"alice", "bob"} {
+				got := fetch(s, "http://cache.test/item", http.Header{"Accept-Language": {language}})
+				if got.Body.String() != language {
+					t.Errorf("response body=%q want %q", got.Body.String(), language)
+				}
+				if got.Header().Get(tc.name) != "" || got.Header().Get("Connection") != "" {
+					t.Errorf("hop headers forwarded: %v", got.Header())
+				}
+				if len(got.Header().Values("X-Multi")) != 2 {
+					t.Errorf("end-to-end headers lost: %v", got.Header())
+				}
+			}
+			if calls.Load() != 2 {
+				t.Fatalf("Connection erased %s admission: %d origin calls", tc.name, calls.Load())
+			}
+		})
+	}
+}
+
 func TestTruncatedOriginDoesNotCommit(t *testing.T) {
 	s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=3600")

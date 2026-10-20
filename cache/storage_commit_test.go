@@ -216,6 +216,39 @@ func TestCommittedReaderNeverMixesReplacementFragments(t *testing.T) {
 	}
 }
 
+func TestCommittedReplacementReadErrorIsTerminal(t *testing.T) {
+	for _, ram := range []uint64{0, 4 << 20} {
+		t.Run(fmt.Sprintf("ram-%d", ram), func(t *testing.T) {
+			c, _ := openStorageTest(t, filepath.Join(t.TempDir(), "stripe"), 16<<20, 0, ram)
+			key := []byte("committed-replacement-reader")
+			writeStorageObject(t, c, string(key), bytes.Repeat([]byte("a"), 2*TargetFragmentSize))
+			r, err := c.OpenReadCommitted(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			if _, err = r.LoadHTTPInfo(); err != nil {
+				t.Fatal(err)
+			}
+			writeStorageObject(t, c, string(key), bytes.Repeat([]byte("b"), 2*TargetFragmentSize))
+
+			buf := make([]byte, 2*TargetFragmentSize)
+			n, firstErr := r.Read(buf)
+			if n != TargetFragmentSize || !bytes.Equal(buf[:n], bytes.Repeat([]byte("a"), n)) {
+				t.Errorf("read returned replacement bytes or wrong prefix length: n=%d", n)
+			}
+			if firstErr == nil || firstErr == io.EOF {
+				t.Errorf("cross-fragment read hid replacement failure: %v", firstErr)
+			}
+			for range 2 {
+				if n, err := r.Read(buf); n != 0 || err == nil || err == io.EOF || err != firstErr {
+					t.Errorf("terminal failure changed or exposed more data: n=%d err=%v first=%v", n, err, firstErr)
+				}
+			}
+		})
+	}
+}
+
 func TestStorageSaveFailureClosesEveryStripe(t *testing.T) {
 	c, a := openStorageTest(t, filepath.Join(t.TempDir(), "a"), 1<<20, 0, 0)
 	_, b := openStorageTest(t, filepath.Join(t.TempDir(), "b"), 1<<20, 0, 0)

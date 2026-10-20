@@ -29,7 +29,8 @@ type CacheReader struct {
 	totalLen      uint64 // Total length from Fragment 0's Doc (cached)
 
 	// Internal
-	buf []byte // Buffer for reading data (contains [DocHeader][Info][Data])
+	buf     []byte // Buffer for reading data (contains [DocHeader][Info][Data])
+	readErr error
 
 	mutex sync.Mutex
 }
@@ -82,6 +83,9 @@ func (r *CacheReader) LoadHTTPInfo() (*CacheHTTPInfo, error) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
+	if r.readErr != nil {
+		return nil, r.readErr
+	}
 	if r.Info != nil {
 		return r.Info, nil
 	}
@@ -125,6 +129,16 @@ func (r *CacheReader) LoadHTTPInfo() (*CacheHTTPInfo, error) {
 func (r *CacheReader) Read(p []byte) (n int, err error) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+
+	if r.readErr != nil {
+		return 0, r.readErr
+	}
+	defer func() {
+		if err != nil && err != io.EOF {
+			r.readErr = err
+			r.buf = nil
+		}
+	}()
 
 	// RWW Path (Assumes single fragment in buffer usually, or simpler stream)
 	if r.writer != nil {
@@ -173,10 +187,7 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 			// Load next fragment
 			r.fragmentIndex++
 			if err := r.loadFragment(r.fragmentIndex); err != nil {
-				if totalBytesRead > 0 {
-					return totalBytesRead, nil
-				}
-				return 0, err
+				return totalBytesRead, err
 			}
 			r.offset = 0 // Reset offset for new fragment
 		}
@@ -184,10 +195,7 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 		// Parse Doc to get HLen for data offset calculation
 		doc, err := r.parseDocFromBuf()
 		if err != nil {
-			if totalBytesRead > 0 {
-				return totalBytesRead, nil
-			}
-			return 0, err
+			return totalBytesRead, err
 		}
 
 		// Calculate available data in current fragment (from r.buf)
@@ -228,7 +236,15 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 
 // loadFragment performs the directory lookup and data load pipeline.
 // Logic flow aligned with ATS CacheVC::handleRead.
-func (r *CacheReader) loadFragment(idx int) error {
+func (r *CacheReader) loadFragment(idx int) (err error) {
+	defer func() {
+		if err != nil {
+			// An unsuccessful validation must never leave bytes for a later Read.
+			r.buf = nil
+			r.readErr = err
+		}
+	}()
+
 	// 1. Determine Key
 	currentKey := FragmentKey(r.FirstKey, idx)
 	r.Key = currentKey
@@ -243,7 +259,7 @@ func (r *CacheReader) loadFragment(idx int) error {
 	}
 	r.Dir = d
 
-	// 3. Handle Read (RAM -> Agg -> Disk)
+	// 3. Handle Read (RAM -> Disk)
 	if err := r.handleRead(); err != nil {
 		return err
 	}
@@ -286,27 +302,6 @@ func (r *CacheReader) loadFromRamCache() bool {
 	}
 	r.buf = val
 	return true
-}
-
-func (r *CacheReader) loadFromAggregationBuffer() bool {
-	if !r.Stripe.DirAggBufValid(&r.Dir) {
-		// logger.Debugf("DirAggBufValid returned false for offset %d", r.Dir.offset())
-		return false
-	}
-
-	// Dir is in range, attempt to read
-	offset := int64(r.Dir.offset())
-	size := r.Dir.approxSize()
-	buf := make([]byte, size)
-	n := r.Stripe.AggBuffer.CopyFrom(offset, buf)
-	if n > 0 {
-		// We got some data. Is it complete?
-		// AggBuffer read might be partial if it spans buffers?
-		// Assuming simple case for now.
-		r.buf = buf[:n]
-		return true
-	}
-	return false
 }
 
 func (r *CacheReader) loadFromDisk() error {
