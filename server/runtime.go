@@ -48,12 +48,7 @@ func newRuntime(cfg *appconfig.Config, p *proxy.HTTPProxy, version uint64) (*run
 	if err := p.ConfigureLimits(proxy.Limits{Requests: cfg.MaxOriginRequests, Queued: cfg.MaxOriginQueuedRequests, Connections: cfg.MaxOriginConnections, QueueTimeout: time.Duration(cfg.QueueTimeout) * time.Second, DialTimeout: time.Duration(cfg.ConnectTimeout) * time.Second, TLSHandshakeTimeout: time.Duration(cfg.TLSHandshakeTimeout) * time.Second, ResponseHeaderTimeout: time.Duration(cfg.ResponseHeaderTimeout) * time.Second, BodyIdleTimeout: time.Duration(cfg.TransactionTimeoutOut) * time.Second}); err != nil {
 		return nil, err
 	}
-	route, _ := json.Marshal(struct {
-		Targets   []string
-		Algorithm string
-		Trusted   []string
-	}{cfg.UpstreamTargets, cfg.UpstreamAlgo, cfg.TrustedProxies})
-	rt := &runtimeSnapshot{config: cfg, proxy: p, version: version, namespace: fmt.Sprintf("%x", sha256.Sum256(route)), admission: budget.New(cfg.MaxRequests, cfg.MaxQueuedRequests)}
+	rt := &runtimeSnapshot{config: cfg, proxy: p, version: version, namespace: p.CacheNamespace(), admission: budget.New(cfg.MaxRequests, cfg.MaxQueuedRequests)}
 	rt.writers = budget.New(min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation()), cfg.MaxQueuedCacheWriters)
 	return rt, nil
 }

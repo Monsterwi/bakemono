@@ -1,9 +1,14 @@
 package server_test
 
 import (
+	"context"
+	"encoding/pem"
 	"errors"
+	"fmt"
+	"github.com/Monsterwi/razor/cache"
 	"github.com/Monsterwi/razor/proxy"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -163,5 +168,261 @@ func TestReloadRejectsChangedStorageContentsAndCustomTransport(t *testing.T) {
 	defer embedded.Shutdown()
 	if err := embedded.Reload(cfg); err == nil || !strings.Contains(err.Error(), "custom") {
 		t.Fatalf("custom transport silently replaced: %v", err)
+	}
+}
+
+func TestReloadUsesActualOriginTrustContents(t *testing.T) {
+	var calls atomic.Int64
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		fmt.Fprint(w, calls.Add(1))
+	}))
+	defer origin.Close()
+	ca := filepath.Join(t.TempDir(), "roots.pem")
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: origin.Certificate().Raw})
+	if err := os.WriteFile(ca, pemBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.GetDefaultConfig()
+	cfg.UpstreamTargets = []string{origin.URL}
+	cfg.UpstreamCAFile = ca
+	c, err := cache.NewCache(1, []string{filepath.Join(t.TempDir(), "cache")}, []int64{32 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Init(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := proxy.NewHTTPProxy(cfg.UpstreamTargets, cfg.UpstreamAlgo, proxy.WithCAFile(ca))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server.New(cfg, c, p)
+	defer s.Shutdown()
+	target := "http://front.test/object"
+	if got := fetch(s, target, nil); got.Body.String() != "1" {
+		t.Fatal(got.Body.String())
+	}
+	// A trust file replaced in place must change the namespace and the transport.
+	if err := os.WriteFile(ca, append(append([]byte(nil), pemBytes...), pemBytes...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := fetch(s, target, nil); got.Body.String() != "2" {
+		t.Fatalf("changed CA contents reused old cache: %q", got.Body.String())
+	}
+	if err := os.WriteFile(ca, []byte("invalid roots"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Reload(cfg); err == nil {
+		t.Fatal("invalid trust replaced active transport")
+	}
+	if got := fetch(s, target+"?fresh", nil); got.Body.String() != "3" {
+		t.Fatalf("failed CA reload broke old transport: %q", got.Body.String())
+	}
+	if s.Stats().RuntimeVersion != 2 {
+		t.Fatal("failed trust reload advanced version")
+	}
+}
+
+func TestReloadStopsOldCheckerBeforeDownloadTransport(t *testing.T) {
+	probeEntered, probeStopped, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	closed := make(chan string, 8)
+	heldPeer := make(chan string, 1)
+	oldOrigin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			close(probeEntered)
+			<-r.Context().Done()
+			close(probeStopped)
+			return
+		}
+		heldPeer <- r.RemoteAddr
+		w.Header().Set("Cache-Control", "no-store")
+		io.WriteString(w, "a")
+		http.NewResponseController(w).Flush()
+		select {
+		case <-release:
+			io.WriteString(w, "b")
+		case <-r.Context().Done():
+		}
+	}))
+	oldOrigin.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			closed <- c.RemoteAddr().String()
+		}
+	}
+	oldOrigin.Start()
+	defer oldOrigin.Close()
+	newOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "new") }))
+	defer newOrigin.Close()
+	cfg := config.GetDefaultConfig()
+	cfg.HealthCheckInterval = 1
+	cfg.HealthCheckTimeout = 60
+	s := lifecycleServer(t, oldOrigin.URL, cfg)
+	front := httptest.NewServer(s)
+	defer front.Close()
+	select {
+	case <-probeEntered:
+	case <-time.After(time.Second):
+		t.Fatal("checker did not start")
+	}
+	response, err := front.Client().Get(front.URL + "/held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	prefix := make([]byte, 1)
+	if _, err := io.ReadFull(response.Body, prefix); err != nil {
+		t.Fatal(err)
+	}
+	peer := <-heldPeer
+	next := *cfg
+	next.UpstreamTargets = []string{newOrigin.URL}
+	next.HealthCheckInterval = 0
+	if err := s.Reload(&next); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-probeStopped:
+	case <-time.After(time.Second):
+		t.Fatal("retired checker survived publication")
+	}
+	select {
+	case got := <-closed:
+		if got == peer {
+			t.Fatal("old business transport closed before body drained")
+		}
+	default:
+	}
+	close(release)
+	body, err := io.ReadAll(response.Body)
+	if err != nil || string(body) != "b" {
+		t.Fatalf("retired body=%q %v", body, err)
+	}
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case got := <-closed:
+			if got == peer {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("retired business connection remained open")
+		}
+	}
+}
+
+func TestEmbeddedServerAcceptsEmptyConfigWithConstructedProxy(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "configured origin") }))
+	defer origin.Close()
+	p, err := proxy.NewHTTPProxy([]string{origin.URL}, "round-robin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := server.New(&config.Config{}, nil, p)
+	defer s.Shutdown()
+	got := fetch(s, "http://front.test/object", http.Header{"Authorization": {"private"}})
+	if got.Code != 200 || got.Body.String() != "configured origin" {
+		t.Fatalf("empty embed config: %d %q", got.Code, got.Body.String())
+	}
+	if err := s.Reload(&config.Config{}); err == nil {
+		t.Fatal("reload accepted absent routes")
+	}
+}
+
+func TestReloadSharedFillOutlivesCreatorCancellation(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int64
+	oldOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		close(entered)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		<-release
+		io.WriteString(w, "old-complete")
+	}))
+	defer oldOrigin.Close()
+	newOrigin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		io.WriteString(w, "new")
+	}))
+	defer newOrigin.Close()
+	cfg := config.GetDefaultConfig()
+	s := lifecycleServer(t, oldOrigin.URL, cfg)
+	frontend := httptest.NewServer(s)
+	defer frontend.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, "GET", frontend.URL+"/shared", nil)
+	creator := make(chan error, 1)
+	go func() {
+		resp, err := frontend.Client().Do(request)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		creator <- err
+	}()
+	<-entered
+	type result struct {
+		body string
+		err  error
+	}
+	follower := make(chan result, 1)
+	go func() {
+		resp, err := frontend.Client().Get(frontend.URL + "/shared")
+		if err != nil {
+			follower <- result{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		follower <- result{string(body), err}
+	}()
+	waitRuntime(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 })
+	cancel()
+	if err := <-creator; !errors.Is(err, context.Canceled) {
+		t.Fatalf("creator cancel: %v", err)
+	}
+	waitRuntime(t, s, func(st server.Stats) bool { return st.InFlight == 1 })
+	next := *cfg
+	next.UpstreamTargets = []string{newOrigin.URL}
+	next.MaxCacheObjectBytes = 4
+	if err := s.Reload(&next); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := frontend.Client().Get(frontend.URL + "/shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil || string(body) != "new" {
+		t.Fatalf("new runtime: %q %v", body, err)
+	}
+	close(release)
+	got := <-follower
+	if got.err != nil || got.body != "old-complete" {
+		t.Fatalf("old follower: %q %v", got.body, got.err)
+	}
+	waitRuntime(t, s, func(st server.Stats) bool { return st.RetiredRuntimes == 0 && st.SharedFillTasks == 0 })
+	if calls.Load() != 1 || s.Stats().Origin.Requests != 2 {
+		t.Fatalf("producer lost ownership: calls=%d stats=%+v", calls.Load(), s.Stats())
+	}
+}
+
+func waitRuntime(t *testing.T, s *server.Server, ready func(server.Stats) bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		st := s.Stats()
+		if ready(st) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime did not drain: %+v", st)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }

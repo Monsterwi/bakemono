@@ -62,6 +62,16 @@ func New(cfg *appconfig.Config, c *cache.Cache, p *proxy.HTTPProxy, options ...O
 		cfg = appconfig.GetDefaultConfig()
 	}
 	cfg = cfg.WithDefaults()
+	// Preserve embedders that supplied only budgets and an already built proxy.
+	if len(cfg.UpstreamTargets) == 0 || cfg.UpstreamAlgo == "" {
+		targets, algorithm := p.Upstreams()
+		if len(cfg.UpstreamTargets) == 0 {
+			cfg.UpstreamTargets = targets
+		}
+		if cfg.UpstreamAlgo == "" {
+			cfg.UpstreamAlgo = algorithm
+		}
+	}
 	s := &Server{config: cfg, cache: c, backgroundStop: make(chan struct{}), now: time.Now}
 	for _, option := range options {
 		option(s)
@@ -131,19 +141,34 @@ func (s *Server) Run() error {
 		return errors.Join(err, s.Shutdown())
 	}
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(quit)
 	result := make(chan error, 1)
 	go func() { result <- s.Serve(listener) }()
-	select {
-	case <-quit:
-		return s.Shutdown()
-	case err := <-result:
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
+	for {
+		select {
+		case received := <-quit:
+			if received == syscall.SIGHUP {
+				cfg, reloadErr := appconfig.Load(s.config.ConfigDir)
+				if reloadErr == nil {
+					reloadErr = s.Reload(cfg)
+				}
+				if reloadErr != nil {
+					logger.Errorf("Configuration reload rejected: %v", reloadErr)
+				} else {
+					logger.Infof("Configuration reloaded: version=%d", s.Stats().RuntimeVersion)
+				}
+				continue
+			}
+			return s.Shutdown()
+		case err := <-result:
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			return errors.Join(err, s.Shutdown())
 		}
-		return errors.Join(err, s.Shutdown())
 	}
+
 }
 func (s *Server) Shutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.shutdownTimeout())*time.Second)
