@@ -22,10 +22,10 @@ universal:
 	@rm -f ${BIN}_amd64 ${BIN}_arm64
 
 test:
-	@$(GO) test ./... -timeout 120s
+	@$(GO) test ./... -count=1 -timeout 120s
 
 test-race:
-	@CGO_ENABLED=1 GOFLAGS=-race $(GO) test ./... -timeout 180s
+	@CGO_ENABLED=1 GOFLAGS=-race $(GO) test ./... -count=1 -timeout 180s
 
 test-integration:
 	@$(GO) test . -run '^TestBinaryCacheMissThenHit$$' -count=1 -timeout 120s
