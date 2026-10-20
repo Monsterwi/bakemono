@@ -4,12 +4,13 @@
 
 # storage
 storage:
-  - path: /tmp/bakemono-test.vol
+  - path: /tmp/bakemono-demo-http/cache1.db
     size_mb: 4096
-  - path: /tmp/bakemono-test2.vol
+  - path: /tmp/bakemono-demo-http/cache2.db
     size_mb: 4096
 
-avg_chunk_size: 8000
+# Local stripes currently size their directory for 8192-byte objects;
+# the external engine's avg_chunk_size option does not apply here.
 ram_cache_size_mb: 1024
 schema: http                        # support http and https
 port: 80                            # port for balancer

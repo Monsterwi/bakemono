@@ -1,21 +1,24 @@
-name: bakemono unit test ci
+name: bakemono build and test
 
-on: [push]
+on: [push, pull_request]
+
+permissions:
+  contents: read
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Go
-        uses: actions/setup-go@v3
+      - uses: actions/checkout@v4
+      - name: Set up pinned Go
+        uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
-
-      - name: Build
-        run: make build
-
-      - name: Test
+          go-version-file: go.mod
+      - name: Build main and all demos
+        run: |
+          make build
+          go build ./...
+      - name: Test including real binary MISS to HIT
         run: make test
+      - name: Race tests including real binary
+        run: make test-race
