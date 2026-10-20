@@ -69,9 +69,7 @@ func (od *OpenDir) Add(key []byte, w *CacheWriter) (*OpenDirEntry, bool) {
 	}
 
 	entry := NewOpenDirEntry(w)
-	w.mutex.Lock()
 	w.od = entry
-	w.mutex.Unlock()
 	od.entries[k] = entry
 	return entry, true // Success (Leader)
 }
@@ -121,15 +119,14 @@ func (od *OpenDir) Acquire(key []byte) *OpenDirEntry {
 func (od *OpenDir) Release(key []byte, expected *OpenDirEntry) {
 	od.mutex.Lock()
 	defer od.mutex.Unlock()
-	entry := od.entries[string(key)]
-	if entry == nil || entry != expected {
+	if expected == nil {
 		return
 	}
-	entry.mutex.Lock()
-	entry.RefCount--
-	remove := entry.RefCount <= 0
-	entry.mutex.Unlock()
-	if remove {
+	expected.mutex.Lock()
+	expected.RefCount--
+	remove := expected.RefCount <= 0
+	expected.mutex.Unlock()
+	if remove && od.entries[string(key)] == expected {
 		delete(od.entries, string(key))
 	}
 }
@@ -138,3 +135,20 @@ func (entry *OpenDirEntry) signalReady() { entry.readyOnce.Do(func() { close(ent
 
 // Generation fences queued work across invalidation. Purges advance it under Stripe.mu.
 func (od *OpenDir) Generation() uint64 { return od.generation.Load() }
+
+func (od *OpenDir) detach(key []byte) *OpenDirEntry {
+	od.mutex.Lock()
+	defer od.mutex.Unlock()
+	entry := od.entries[string(key)]
+	delete(od.entries, string(key))
+	if entry != nil {
+		entry.mutex.Lock()
+		entry.Error = ErrInvalidated
+		entry.mutex.Unlock()
+		entry.signalReady()
+		if entry.Writer.cancel != nil {
+			entry.Writer.cancel()
+		}
+	}
+	return entry
+}

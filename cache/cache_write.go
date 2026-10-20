@@ -38,17 +38,24 @@ type CacheWriter struct {
 		allocation allocation
 		size       int
 	}
-	ctx     context.Context
-	version uint64
-	od      *OpenDirEntry // Reference to OpenDir entry
+	ctx        context.Context
+	cancel     context.CancelFunc
+	generation uint64
+	selector   []byte
+	version    uint64
+	od         *OpenDirEntry // Reference to OpenDir entry
 }
 
 func NewCacheWriter(s *Stripe, key []byte) *CacheWriter {
+	ctx, cancel := context.WithCancel(context.Background())
 	w := &CacheWriter{
-		Stripe: s,
-		ctx:    context.Background(),
-		Key:    key,
-		buffer: make([]byte, 0, 4096), // Initial buffer size
+		Stripe:     s,
+		ctx:        ctx,
+		cancel:     cancel,
+		generation: s.OpenDir.Generation(),
+		selector:   append([]byte(nil), key...),
+		Key:        append([]byte(nil), key...),
+		buffer:     make([]byte, 0, 4096), // Initial buffer size
 	}
 	var identity [8]byte
 	if _, err := rand.Read(identity[:]); err != nil {
@@ -65,7 +72,16 @@ func NewCacheWriter(s *Stripe, key []byte) *CacheWriter {
 // It abstracts away the fragment logic from the consumer.
 // It returns bytes read, and an error if read failed or EOF.
 // Uses read lock for concurrent readers, upgrades to write lock only when waiting.
-func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
+func (w *CacheWriter) ReadAt(offset int64, p []byte) (int, error) {
+	return w.ReadAtContext(context.Background(), offset, p)
+}
+
+func (w *CacheWriter) ReadAtContext(ctx context.Context, offset int64, p []byte) (n int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	stop := context.AfterFunc(ctx, func() { w.mutex.Lock(); w.cond.Broadcast(); w.mutex.Unlock() })
+	defer stop()
 	// If request size is 0, return
 	if len(p) == 0 {
 		return 0, nil
@@ -74,6 +90,10 @@ func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
 	for {
 		// Use read lock for reading data
 		w.mutex.RLock()
+		if err := ctx.Err(); err != nil {
+			w.mutex.RUnlock()
+			return 0, err
+		}
 
 		if w.err != nil {
 			err := w.err
@@ -143,6 +163,10 @@ func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
 		// Upgrade to write lock for cond.Wait()
 		w.mutex.Lock()
 		// Double-check after acquiring write lock
+		if err := ctx.Err(); err != nil {
+			w.mutex.Unlock()
+			return 0, err
+		}
 		if w.closed {
 			err := w.err
 			w.mutex.Unlock()
@@ -164,6 +188,9 @@ func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
 
 // Abort signals that the write operation failed.
 func (w *CacheWriter) Abort(err error) {
+	if w.cancel != nil {
+		w.cancel()
+	}
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 	if w.closed {
@@ -191,6 +218,9 @@ func (w *CacheWriter) abortLocked(err error) {
 		if w.Stripe.RamCache != nil {
 			w.Stripe.RamCache.Delete(fragment.key)
 		}
+	}
+	if w.Stripe.OpenDir.Get(w.Key) == w.od {
+		w.Stripe.DirMgr.DirTrie.Delete(w.Key)
 	}
 	w.Stripe.mu.Unlock()
 	w.published = nil
@@ -425,6 +455,9 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 	if w.Stripe.closing {
 		return ErrCacheClosed
 	}
+	if w.generation != w.Stripe.OpenDir.Generation() {
+		return ErrInvalidated
+	}
 	if !w.Stripe.allocationValid(a, len(fullData)) {
 		return fmt.Errorf("fragment overwritten before publication")
 	}
@@ -449,7 +482,9 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 		w.Stripe.RamCache.Put(thisKey, fullData)
 	}
 	if idx == 0 && w.Stripe.DirMgr.DirTrie != nil {
-		w.Stripe.DirMgr.DirTrie.Set(w.Key)
+		if err := w.Stripe.DirMgr.DirTrie.SetIdentity(w.Key, w.selector); err != nil {
+			return err
+		}
 	}
 	return nil
 }

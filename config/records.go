@@ -134,7 +134,11 @@ func (rc *RecordsConfig) Has(key string) bool {
 func (rc *RecordsConfig) Print() {
 	logger.Info("=== Records Configuration ===")
 	for key, val := range rc.configs {
-		logger.Infof("  %s = %s (%s)", key, val.Value, val.Type)
+		value := val.Value
+		if key == "proxy.config.http.purge_token" {
+			value = "[redacted]"
+		}
+		logger.Infof("  %s = %s (%s)", key, value, val.Type)
 	}
 	logger.Info("============================")
 }
