@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"testing"
 )
 
@@ -246,5 +247,50 @@ func TestUnsafePolicyFencesReservedWriterAfterStorageWrap(t *testing.T) {
 	}
 	if err = writer.Close(); err == nil {
 		t.Fatal("reserved writer escaped policy fence after storage wrap")
+	}
+}
+
+func TestUnsafePolicyPreservesNewHeadAfterOffsetAndPhaseReuse(t *testing.T) {
+	c, err := NewCache(1, []string{filepath.Join(t.TempDir(), "cache")}, []int64{8 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Init(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	write := func(key, body []byte) {
+		w, err := c.OpenWrite(key, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Write(body); err != nil {
+			t.Fatal(err)
+		}
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := []byte("offset-reused")
+	padding := bytes.Repeat([]byte("p"), 1<<20)
+	write(key, padding)
+	unsafe, _ := c.BeginFill(key, key)
+	// Seven equal records fit per cycle; the fifteenth reuses the first offset/phase.
+	for range 13 {
+		write([]byte("padding"), padding)
+	}
+	newer := bytes.Repeat([]byte("n"), len(padding))
+	write(key, newer)
+	if err = c.InvalidateFill(unsafe); err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.OpenReadCommitted(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil || !bytes.Equal(got, newer) {
+		t.Fatalf("old token deleted offset-reusing replacement: bytes=%d err=%v", len(got), err)
 	}
 }

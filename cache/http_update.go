@@ -157,14 +157,25 @@ func (c *Cache) InvalidateFill(token *FillToken) error {
 				continue
 			}
 			remove := !head.present && head.writer != nil
-			// Wrapped offsets can match a newer head; only unchanged storage owns it.
-			if token.wraps[i] == s.generation {
-				for _, old := range token.snapshot {
-					if head == old {
-						remove = true
+			for _, old := range token.snapshot {
+				if head != old {
+					continue
+				}
+				if !head.present {
+					remove = true
+					break
+				}
+				generation := token.wraps[i]
+				if old.dir.phase() != (generation%2 != 0) {
+					if generation == 0 {
 						break
 					}
+					generation--
 				}
+				// The original head allocation, not its phase alone, prevents offset ABA.
+				// Check its first byte: directory sizes round up beyond the allocation.
+				remove = s.allocationValid(allocation{offset: int64(old.dir.offset()), generation: generation}, 1)
+				break
 			}
 			if remove {
 				if w := s.removeLocked([]byte(head.key)); w != nil {
