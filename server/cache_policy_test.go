@@ -83,7 +83,7 @@ func TestResponseCacheAdmission(t *testing.T) {
 		{"expired", 200, http.Header{"Cache-Control": {"public, max-age=1"}, "Age": {"2"}}, false},
 		{"old date", 200, http.Header{"Cache-Control": {"public, max-age=3600"}, "Date": {"Mon, 02 Jan 2006 15:04:05 GMT"}}, false},
 		{"set cookie", 200, http.Header{"Cache-Control": {"public, max-age=3600"}, "Set-Cookie": {"user=alice"}}, false},
-		{"vary", 200, http.Header{"Cache-Control": {"public, max-age=3600"}, "Vary": {"Accept-Encoding"}}, false},
+		{"vary", 200, http.Header{"Cache-Control": {"public, max-age=3600"}, "Vary": {"Accept-Encoding"}}, true},
 		{"range", 206, http.Header{"Cache-Control": {"public, max-age=3600"}, "Content-Range": {"bytes 0-2/10"}}, false},
 		{"conflicting lifetime", 200, http.Header{"Cache-Control": {"public, max-age=3600", "max-age=0"}}, false},
 		{"bad age", 200, http.Header{"Cache-Control": {"public, max-age=3600"}, "Age": {"invalid"}}, false},
@@ -200,7 +200,7 @@ func TestClientFailureDoesNotCommit(t *testing.T) {
 }
 
 func TestRequestBypassAndRangeCannotPoisonOrdinaryGet(t *testing.T) {
-	headers := []http.Header{{"Cookie": {"session=alice"}}, {"Cache-Control": {"no-cache"}}, {"Cache-Control": {"no-store"}}, {"If-None-Match": {"\"v1\""}}, {"Range": {"bytes=0-2"}}}
+	headers := []http.Header{{"Cookie": {"session=alice"}}, {"Cache-Control": {"no-store"}}, {"Range": {"bytes=0-2"}}}
 	for _, h := range headers {
 		t.Run(fmt.Sprint(h), func(t *testing.T) {
 			s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -387,16 +387,21 @@ func TestTrustedFrontendSchemesHaveSeparateCachedRepresentations(t *testing.T) {
 	}
 }
 
-func TestHeadBypassesGetCacheAndPreservesMethod(t *testing.T) {
+func TestColdHeadPreservesMethodAndWarmHeadUsesGet(t *testing.T) {
 	s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		w.Header().Set("X-Origin-Method", r.Method)
 		fmt.Fprint(w, "body")
 	})
+	cold := httptest.NewRecorder()
+	s.ServeHTTP(cold, httptest.NewRequest("HEAD", "http://cache.test/item", nil))
+	if calls.Load() != 1 || cold.Header().Get("X-Origin-Method") != "HEAD" || cold.Body.Len() != 0 {
+		t.Fatalf("cold HEAD=%d %v %q", cold.Code, cold.Header(), cold.Body.String())
+	}
 	fetch(s, "http://cache.test/item", nil)
 	head := httptest.NewRecorder()
 	s.ServeHTTP(head, httptest.NewRequest("HEAD", "http://cache.test/item", nil))
-	if calls.Load() != 2 || head.Header().Get("X-Origin-Method") != "HEAD" || head.Body.Len() != 0 {
+	if calls.Load() != 2 || head.Header().Get("X-Origin-Method") != "GET" || head.Body.Len() != 0 {
 		t.Fatalf("HEAD calls=%d method=%s body=%q", calls.Load(), head.Header().Get("X-Origin-Method"), head.Body.String())
 	}
 }

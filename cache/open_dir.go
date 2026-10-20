@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"crypto/sha256"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,9 +41,10 @@ func NewOpenDirEntry(w *CacheWriter) *OpenDirEntry {
 
 // OpenDir manages concurrent access to documents being written.
 type OpenDir struct {
-	mutex      sync.RWMutex
-	entries    map[string]*OpenDirEntry
-	generation atomic.Uint64
+	mutex        sync.RWMutex
+	entries      map[string]*OpenDirEntry
+	generation   atomic.Uint64
+	policyEpochs [1024]atomic.Uint64
 }
 
 func NewOpenDir() *OpenDir {
@@ -151,4 +153,12 @@ func (od *OpenDir) detach(key []byte) *OpenDirEntry {
 		}
 	}
 	return entry
+}
+
+// shortcut: fixed slots bound policy history; hash collisions conservatively
+// reject fills for another selector, without cancelling unrelated reader streams.
+func (od *OpenDir) policyEpoch(selector []byte) *atomic.Uint64 {
+	digest := sha256.Sum256(selector)
+	slot := int(digest[0])<<2 | int(digest[1]&3)
+	return &od.policyEpochs[slot]
 }

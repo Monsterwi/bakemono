@@ -29,10 +29,8 @@ func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "PURGE":
 		s.handlePurge(key, w, r)
-	case http.MethodGet:
+	case http.MethodGet, http.MethodHead:
 		s.handleGet(key, w, r)
-	case http.MethodHead:
-		s.proxyWithoutCache(w, r)
 	default:
 		http.Error(w, "Unsupported Method", http.StatusMethodNotAllowed)
 	}
@@ -43,20 +41,46 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		s.proxyWithoutCache(w, r)
 		return
 	}
-	// shortcut: serve committed objects only until privacy-safe request collapsing exists.
-	if vc, err := s.cache.OpenReadCommitted(key); err == nil {
-		info, loadErr := vc.LoadHTTPInfo()
-		_, fresh := responseAge(info, time.Now())
-		if loadErr == nil && fresh {
-			defer vc.Close()
-			s.cacheStatus(w, "HIT")
-			s.serveCacheHit(w, r, vc, info)
-			return
+	token, _ := s.cache.BeginFill(key, key)
+	var selected *cache.CacheVC
+	var selectedInfo *cache.CacheHTTPInfo
+	// shortcut: bound negotiation fanout; excess variants safely bypass caching.
+	keys, keysErr := s.cache.KeysForSelectorLimit(key, maxHTTPVariants)
+	if keysErr != nil {
+		s.proxyWithoutCache(w, r)
+		return
+	}
+	for _, candidate := range keys {
+		vc, err := s.cache.OpenReadCommitted([]byte(candidate))
+		if err != nil {
+			continue
+		}
+		info, err := vc.LoadHTTPInfo()
+		if err != nil {
+			vc.Close()
+			continue
+		}
+		fields, valid := varyFields(info.ResponseHeaders)
+		if _, safe := responsePolicy(info, s.now()); valid && safe && string(representationKey(key, r.Header, fields)) == candidate {
+			selected, selectedInfo = vc, info
+			break
 		}
 		vc.Close()
 	}
+	if selected != nil {
+		defer selected.Close()
+		if requestFresh(r, selectedInfo, s.now()) {
+			s.cacheStatus(w, "HIT")
+			s.serveCacheHit(w, r, selected, selectedInfo)
+			return
+		}
+	}
+	if r.Method == http.MethodHead && selected == nil {
+		s.proxyWithoutCache(w, r)
+		return
+	}
 	s.cacheStatus(w, "MISS")
-	s.serveCacheMiss(w, r, key)
+	s.serveCacheMiss(w, r, key, token, selected, selectedInfo)
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
@@ -89,68 +113,143 @@ func copyHeaders(dst, src http.Header) {
 
 func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC, info *cache.CacheHTTPInfo) {
 	copyHeaders(w.Header(), info.ResponseHeaders)
-	if age, ok := responseAge(info, time.Now()); ok {
+	if policy, ok := responsePolicy(info, s.now()); ok {
+		age := policy.age
 		w.Header().Set("Age", strconv.FormatInt(int64(age/time.Second), 10))
 	}
+	if clientNotModified(r, info.ResponseHeaders) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.WriteHeader(info.Status)
+	if r.Method == http.MethodHead {
+		return
+	}
 	if err := s.streamResponse(w, vc, nil, r); err != nil {
 		logger.Errorf("Cache response transfer failed: %v", err)
 		panic(http.ErrAbortHandler)
 	}
 }
 
-func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []byte) {
-	requested := time.Now()
-	token, tokenErr := s.cache.BeginFill(key, key)
-	resp, originHeaders, err := s.proxy.ProxyWithOriginHeaders(r)
-	if err != nil {
-		s.upstreamError(w, r, err)
-		return
+func (s *Server) serveCacheMiss(w http.ResponseWriter, r *http.Request, key []byte, token *cache.FillToken, stored *cache.CacheVC, previous *cache.CacheHTTPInfo) {
+	originRequest := r
+	if stored != nil {
+		originRequest = r.Clone(r.Context())
+		originRequest.Header.Del("If-None-Match")
+		originRequest.Header.Del("If-Modified-Since")
+		if tag := previous.ResponseHeaders.Get("ETag"); validETag(tag) {
+			originRequest.Header.Set("If-None-Match", tag)
+		} else if modified := previous.ResponseHeaders.Get("Last-Modified"); modified != "" {
+			originRequest.Header.Set("If-Modified-Since", modified)
+		}
 	}
-	defer resp.RawBody().Close()
-	info := cache.NewCacheHTTPInfo()
-	info.RequestTime = requested
-	info.ResponseTime = time.Now()
-	info.RequestMethod = r.Method
-	info.RequestURL = r.URL.String()
-	info.Status = resp.StatusCode()
-	info.ResponseHeaders = originHeaders
-	_, cacheable := responseAge(info, time.Now())
-	info.ResponseHeaders = resp.Header().Clone()
-	var fill *cacheFill
-	if tokenErr == nil && cacheable && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(key, info, resp.RawResponse.ContentLength) {
-		release, acquireErr := s.writers.Acquire(r.Context(), time.Duration(s.config.QueueTimeout)*time.Second)
-		if acquireErr == nil {
-			cacheCtx, cacheCancel := context.WithCancel(r.Context())
-			defer cacheCancel()
-			vc, err := s.cache.OpenWriteFill(cacheCtx, token, 0)
-			if err == nil {
-				vc.SetHTTPInfo(info)
-				// Only the successful EOF path below may commit.
-				fill = &cacheFill{release: release, vc: vc, cancel: cacheCancel, timeout: time.Duration(s.config.CacheWriteTimeout) * time.Second, limit: int64(s.config.MaxCacheObjectBytes), stats: &s.counters}
-				defer fill.abort(errors.New("cache fill incomplete"))
+	for attempt := 0; attempt < 2; attempt++ {
+		requested := s.now()
+		resp, originHeaders, err := s.proxy.ProxyWithOriginHeaders(originRequest)
+		if err != nil {
+			s.upstreamError(w, r, err)
+			return
+		}
+		defer resp.RawBody().Close()
+		if attempt > 0 && resp.StatusCode() == http.StatusNotModified {
+			http.Error(w, "Unusable origin validation", http.StatusBadGateway)
+			return
+		}
+		info := cache.NewCacheHTTPInfo()
+		info.RequestTime, info.ResponseTime = requested, s.now()
+		info.RequestMethod, info.RequestURL, info.Status = r.Method, r.URL.String(), resp.StatusCode()
+		info.ResponseHeaders = originHeaders
+		if stored != nil && resp.StatusCode() == http.StatusNotModified {
+			merged, valid := mergeValidation(previous, info, originRequest)
+			resp.RawBody().Close()
+			if valid && sameVary(previous.ResponseHeaders, merged.ResponseHeaders) {
+				merged.ResponseHeaders = mergeResponseHeaders(previous.ResponseHeaders, resp.Header())
+				ctx, cancel := context.WithTimeout(r.Context(), time.Duration(s.config.CacheWriteTimeout)*time.Second)
+				release, acquireErr := s.writers.Acquire(ctx, time.Duration(s.config.QueueTimeout)*time.Second)
+				updateErr := acquireErr
+				if acquireErr == nil {
+					updateErr = s.cache.UpdateHTTPInfo(ctx, token, stored, merged)
+					release()
+				}
+				cancel()
+				if updateErr == nil {
+					s.serveCacheHit(w, r, stored, merged)
+					return
+				}
+			} else if token != nil {
+				_ = s.cache.InvalidateFill(token)
+			}
+			// An unusable 304 cannot stand in for a representation. Retry once without
+			// validators, preserving the original token so PURGE cannot be bypassed.
+			stored = nil
+			originRequest = r.Clone(r.Context())
+			originRequest.Header.Del("If-None-Match")
+			originRequest.Header.Del("If-Modified-Since")
+			continue
+		}
+		_, cacheable := responsePolicy(info, s.now())
+		fields, _ := varyFields(originHeaders)
+		representation := representationKey(key, r.Header, fields)
+		info.ResponseHeaders = resp.Header().Clone()
+		keys, keysErr := s.cache.KeysForSelectorLimit(key, maxHTTPVariants)
+		if keysErr != nil {
+			cacheable = false
+			token = nil
+		}
+		var remove []string
+		for _, old := range keys {
+			if !sameRepresentationSchema(key, []byte(old), representation) {
+				remove = append(remove, old)
+			}
+		}
+		if !cacheable || r.Method == http.MethodHead {
+			if token != nil {
+				_ = s.cache.InvalidateFill(token)
+			}
+		}
+		var fill *cacheFill
+		canAdd := len(keys) < maxHTTPVariants || containsField(keys, string(representation)) || len(remove) > 0
+		if token != nil && cacheable && canAdd && r.Method == http.MethodGet && len(resp.RawResponse.Trailer) == 0 && s.cacheSizeAllowed(representation, info, resp.RawResponse.ContentLength) {
+			release, acquireErr := s.writers.Acquire(r.Context(), time.Duration(s.config.QueueTimeout)*time.Second)
+			if acquireErr == nil {
+				cacheCtx, cacheCancel := context.WithCancel(r.Context())
+				defer cacheCancel()
+				vc, writeErr := s.cache.OpenWriteFillKeyReplacing(cacheCtx, token, representation, remove)
+				if writeErr == nil {
+					vc.SetHTTPInfo(info)
+					fill = &cacheFill{release: release, vc: vc, cancel: cacheCancel, timeout: time.Duration(s.config.CacheWriteTimeout) * time.Second, limit: int64(s.config.MaxCacheObjectBytes), stats: &s.counters}
+					defer fill.abort(errors.New("cache fill incomplete"))
+				} else {
+					release()
+					s.counters.cacheSkipped.Add(1)
+				}
 			} else {
-				release()
 				s.counters.cacheSkipped.Add(1)
 			}
 		} else {
 			s.counters.cacheSkipped.Add(1)
 		}
-	} else {
-		s.counters.cacheSkipped.Add(1)
-	}
-	copyHeaders(w.Header(), resp.Header())
-	w.WriteHeader(resp.StatusCode())
-	if err = s.streamResponse(w, resp.RawBody(), fill, r); err != nil {
-		panic(http.ErrAbortHandler)
-	}
-	if err = resp.RawBody().Close(); err != nil {
-		panic(http.ErrAbortHandler)
-	}
-	if r.Context().Err() != nil || len(resp.RawResponse.Trailer) != 0 {
+		copyHeaders(w.Header(), resp.Header())
+		if resp.StatusCode() == http.StatusOK && clientNotModified(r, resp.Header()) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.WriteHeader(resp.StatusCode())
+		if r.Method != http.MethodHead {
+			if err = s.streamResponse(w, resp.RawBody(), fill, r); err != nil {
+				panic(http.ErrAbortHandler)
+			}
+		}
+		if err = resp.RawBody().Close(); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		if r.Context().Err() != nil || len(resp.RawResponse.Trailer) != 0 {
+			return
+		}
+		fill.commit()
 		return
 	}
-	fill.commit()
+	http.Error(w, "Unusable origin validation", http.StatusBadGateway)
 }
 
 func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, fill *cacheFill, r *http.Request) error {

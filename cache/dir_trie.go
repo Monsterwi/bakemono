@@ -88,14 +88,23 @@ func (dt *DirTrie) Get(prefix []byte) []string {
 }
 
 func (dt *DirTrie) KeysForSelector(selector []byte) []string {
+	keys, _ := dt.KeysForSelectorLimit(selector, MaxIndexEntries)
+	return keys
+}
+
+func (dt *DirTrie) KeysForSelectorLimit(selector []byte, limit int) ([]string, error) {
 	dt.mu.RLock()
 	defer dt.mu.RUnlock()
-	var keys []string
-	for key := range dt.selectors[string(selector)] {
+	entries := dt.selectors[string(selector)]
+	if len(entries) > limit {
+		return nil, ErrIndexFull
+	}
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	return keys
+	return keys, nil
 }
 
 func (dt *DirTrie) Delete(key []byte) {

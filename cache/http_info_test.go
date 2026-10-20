@@ -35,3 +35,18 @@ func TestCacheHTTPInfo(t *testing.T) {
 		convey.So(info2.RequestTime.UnixNano(), convey.ShouldEqual, info.RequestTime.UnixNano())
 	})
 }
+
+func TestHTTPMetadataRejectsTruncatedAndTrailingBytes(t *testing.T) {
+	info := NewCacheHTTPInfo()
+	info.ResponseHeaders.Set("X-Value", "complete")
+	encoded, err := info.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range [][]byte{encoded[:len(encoded)-1], append(append([]byte(nil), encoded...), 0)} {
+		var decoded CacheHTTPInfo
+		if err := decoded.UnmarshalBinary(data); err == nil {
+			t.Fatal("accepted incomplete or trailing metadata")
+		}
+	}
+}

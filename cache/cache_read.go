@@ -114,10 +114,11 @@ func (r *CacheReader) LoadHTTPInfo() (*CacheHTTPInfo, error) {
 		infoStart := DocHeaderSize
 		infoEnd := DocHeaderSize + int(doc.HLen)
 		if len(r.buf) >= infoEnd {
-			r.Info = NewCacheHTTPInfo()
-			if err := r.Info.UnmarshalBinary(r.buf[infoStart:infoEnd]); err != nil {
+			info := NewCacheHTTPInfo()
+			if err := info.UnmarshalBinary(r.buf[infoStart:infoEnd]); err != nil {
 				return nil, err
 			}
+			r.Info = info
 		} else {
 			return nil, fmt.Errorf("buffer too small for http info")
 		}

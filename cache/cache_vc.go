@@ -56,10 +56,17 @@ func NewCacheVCWrite(stripe *Stripe, key []byte) (*CacheVC, error) {
 }
 
 func newCacheVCWrite(ctx context.Context, token *FillToken) (*CacheVC, error) {
-	stripe, key := token.stripe, token.key
+	stripe := token.stripe
 	if err := stripe.writeError(); err != nil {
 		return nil, err
 	}
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+	return newCacheVCWriteLocked(ctx, token)
+}
+
+func newCacheVCWriteLocked(ctx context.Context, token *FillToken) (*CacheVC, error) {
+	stripe, key := token.stripe, token.key
 	w := NewCacheWriter(stripe, key)
 	if w.err != nil {
 		w.cancel()
@@ -67,14 +74,12 @@ func newCacheVCWrite(ctx context.Context, token *FillToken) (*CacheVC, error) {
 	}
 	w.cancel()
 	w.ctx, w.cancel = context.WithCancel(ctx)
-	w.generation, w.selector = token.generation, token.selector
-	stripe.mu.Lock()
-	defer stripe.mu.Unlock()
-	if stripe.closing {
+	w.generation, w.selector, w.policy = token.generation, token.selector, token.policy
+	if stripe.closing || stripe.storageErr != nil {
 		w.cancel()
 		return nil, ErrCacheClosed
 	}
-	if token.generation != stripe.OpenDir.Generation() {
+	if token.generation != stripe.OpenDir.Generation() || token.policy != stripe.OpenDir.policyEpoch(token.selector).Load() {
 		w.cancel()
 		return nil, ErrInvalidated
 	}

@@ -16,6 +16,10 @@ type FillToken struct {
 	generation    uint64
 	stripes       []*Stripe
 	generations   []uint64
+	snapshot      []fillHead
+	wraps         []uint64
+	policies      []uint64
+	policy        uint64
 }
 
 func (c *Cache) BeginFill(key, selector []byte) (*FillToken, error) {
@@ -39,6 +43,13 @@ func (c *Cache) BeginFill(key, selector []byte) (*FillToken, error) {
 			return nil, ErrCacheClosed
 		}
 		token.generations[i] = stripe.OpenDir.Generation()
+		token.wraps = append(token.wraps, stripe.generation)
+		token.policies = append(token.policies, stripe.OpenDir.policyEpoch(selector).Load())
+	}
+	var err error
+	token.snapshot, err = c.fillSnapshotLocked(selector)
+	if err != nil {
+		return nil, err
 	}
 	return token, nil
 }
@@ -53,7 +64,7 @@ func (c *Cache) OpenWriteFill(ctx context.Context, token *FillToken, opts int) (
 // OpenWriteFillKey binds a representation chosen after origin headers, preserving
 // the generation captured before the origin request on its destination stripe.
 func (c *Cache) OpenWriteFillKey(ctx context.Context, token *FillToken, key []byte, opts int) (*CacheVC, error) {
-	if token == nil || len(token.stripes) != len(c.Stripes) {
+	if token == nil || len(token.stripes) != len(c.Stripes) || len(token.policies) != len(c.Stripes) {
 		return nil, errors.New("invalid cache fill token")
 	}
 	if err := validateIdentity(key, token.selector); err != nil {
@@ -71,6 +82,7 @@ func (c *Cache) OpenWriteFillKey(ctx context.Context, token *FillToken, key []by
 		}
 		if stripe == bound.stripe {
 			bound.generation = token.generations[i]
+			bound.policy = token.policies[i]
 		}
 	}
 	return newCacheVCWrite(ctx, &bound)
@@ -84,6 +96,20 @@ func (c *Cache) KeysForSelector(selector []byte) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// KeysForSelectorLimit bounds variant enumeration before any metadata reads.
+func (c *Cache) KeysForSelectorLimit(selector []byte, limit int) ([]string, error) {
+	var keys []string
+	for _, s := range c.Stripes {
+		next, err := s.DirMgr.DirTrie.KeysForSelectorLimit(selector, limit-len(keys))
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, next...)
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
 // PurgeSelector invalidates exact URL selectors or explicit selector prefixes.
