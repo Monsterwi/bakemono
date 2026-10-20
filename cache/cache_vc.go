@@ -20,6 +20,7 @@ type CacheVC struct {
 	writing  bool
 	removing bool
 	closed   bool
+	closeErr error
 
 	// Underlying components
 	reader *CacheReader
@@ -38,7 +39,7 @@ func NewCacheVCRead(stripe *Stripe, key []byte) (*CacheVC, error) {
 	}
 
 	// 1. Check OpenDir for Active Writers (RWW)
-	entry := stripe.OpenDir.Get(key)
+	entry := stripe.OpenDir.Acquire(key)
 	if entry != nil {
 		// RWW
 		vc.reader = NewCacheReaderFromWriter(stripe, key, entry.Writer)
@@ -66,11 +67,18 @@ func NewCacheVCWrite(stripe *Stripe, key []byte) (*CacheVC, error) {
 	vc.writer = NewCacheWriter(stripe, key)
 
 	// Register with OpenDir
-	entry, isLeader := stripe.OpenDir.Add(key, vc.writer)
+	_, isLeader := stripe.OpenDir.Add(key, vc.writer)
 	if !isLeader {
 		return nil, fmt.Errorf("write conflict: another writer is active")
 	}
-	vc.writer.od = entry
+	// A replacement can overwrite non-head fragments before commit; the previous
+	// head must no longer expose a mixture of old and new fragments.
+	if stripe.DirMgr != nil {
+		_, _ = stripe.DirMgr.Delete(key)
+	}
+	if stripe.RamCache != nil {
+		stripe.RamCache.Delete(key)
+	}
 
 	return vc, nil
 }
@@ -97,6 +105,11 @@ func (vc *CacheVC) WaitForHeaders(timeout time.Duration) error {
 	case <-w.od.ReadySignal:
 		// Headers are ready (or writer closed/aborted)
 		// We should check if Info is actually set
+		w.mutex.RLock()
+		defer w.mutex.RUnlock()
+		if w.err != nil {
+			return w.err
+		}
 		if w.Info == nil {
 			return fmt.Errorf("writer finished without headers")
 		}
@@ -128,45 +141,42 @@ func (vc *CacheVC) Write(p []byte) (n int, err error) {
 // Close closes the CacheVC and underlying reader/writer.
 func (vc *CacheVC) Close() error {
 	if vc.closed {
-		return nil
+		return vc.closeErr
 	}
 
 	var err error
 	if vc.writing && vc.writer != nil {
 		err = vc.writer.Close()
 		// Writer finished, decrement RefCount in OpenDir
-		vc.Stripe.OpenDir.Remove(vc.Key)
+		vc.Stripe.OpenDir.Release(vc.Key, vc.writer.od)
 	}
 
 	// If this was an RWW reader (holding a reference to a writer via OpenDir),
 	// we must decrement the RefCount when we are done reading.
 	if vc.reading && vc.reader != nil && vc.reader.writer != nil {
-		vc.Stripe.OpenDir.Remove(vc.Key)
+		vc.Stripe.OpenDir.Release(vc.Key, vc.reader.writer.od)
 	}
 
 	// Reader doesn't strictly need closing in our current impl (no fd held permanently),
 	// but good for cleanup if we add resource tracking.
 
 	vc.closed = true
+	vc.closeErr = err
 	return err
 }
 
 // SetHTTPInfo sets the HTTP metadata for writing.
 func (vc *CacheVC) SetHTTPInfo(info *CacheHTTPInfo) {
-	if vc.writing && vc.writer != nil {
-		vc.writer.Info = info
-		vc.Info = info
-
-		// Notify listeners that headers are ready!
-		if vc.writer.od != nil {
-			// Only close if not already closed
-			select {
-			case <-vc.writer.od.ReadySignal:
-				// Already closed
-			default:
-				close(vc.writer.od.ReadySignal)
+	if vc.writing && vc.writer != nil && !vc.closed {
+		vc.writer.mutex.Lock()
+		if !vc.writer.closed {
+			vc.writer.Info = info
+			vc.Info = info
+			if vc.writer.od != nil {
+				vc.writer.od.signalReady()
 			}
 		}
+		vc.writer.mutex.Unlock()
 	}
 }
 
@@ -278,4 +288,17 @@ func (vc *CacheVC) removeFragment(key []byte) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// Abort abandons a write without committing a partial object.
+func (vc *CacheVC) Abort(err error) {
+	if vc.closed {
+		return
+	}
+	if vc.writing && vc.writer != nil {
+		vc.writer.Abort(err)
+		vc.closeErr = vc.writer.Close()
+		vc.Stripe.OpenDir.Release(vc.Key, vc.writer.od)
+	}
+	vc.closed = true
 }

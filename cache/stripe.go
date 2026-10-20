@@ -432,7 +432,7 @@ func (s *Stripe) collectEvacuationData(start, end int64) ([][]byte, []struct {
 		}
 
 		// Verify Key matches to ensure we are evacuating the right object
-		if doc.Key != entry.Key {
+		if doc.VMajor != docIdentityVersion || doc.Key != entry.Key {
 			continue
 		}
 
@@ -452,8 +452,7 @@ func (s *Stripe) collectEvacuationData(start, end int64) ([][]byte, []struct {
 
 		data = append(data, docData)
 
-		keyCopy := make([]byte, 16)
-		copy(keyCopy, doc.Key[:])
+		keyCopy := append([]byte(nil), entry.LogicalKey...)
 
 		info = append(info, struct {
 			Key  []byte

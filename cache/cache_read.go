@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"sync"
@@ -63,6 +62,8 @@ func NewCacheReader(s *Stripe, key []byte) *CacheReader {
 
 // NewCacheReaderFromWriter creates a reader that reads from an active writer (RWW).
 func NewCacheReaderFromWriter(s *Stripe, key []byte, w *CacheWriter) *CacheReader {
+	w.mutex.RLock()
+	defer w.mutex.RUnlock()
 	return &CacheReader{
 		Stripe:   s,
 		Key:      key,
@@ -82,7 +83,9 @@ func (r *CacheReader) LoadHTTPInfo() (*CacheHTTPInfo, error) {
 	}
 
 	if r.writer != nil {
-		return r.writer.Info, nil
+		r.writer.mutex.RLock()
+		defer r.writer.mutex.RUnlock()
+		return r.writer.Info, r.writer.err
 	}
 
 	if err := r.loadFragment(0); err != nil {
@@ -146,7 +149,7 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 		// Ensure current fragment data is available in buffer
 		if len(r.buf) == 0 {
 			// Check if we have read everything
-			if r.totalLen > 0 && uint64(r.totalRead) >= r.totalLen {
+			if uint64(r.totalRead) >= r.totalLen {
 				if totalBytesRead == 0 {
 					return 0, io.EOF
 				}
@@ -190,7 +193,7 @@ func (r *CacheReader) Read(p []byte) (n int, err error) {
 
 		if available <= 0 {
 			// Current fragment exhausted, check if we've read all data before clearing buffer
-			if r.totalLen > 0 && uint64(r.totalRead) >= r.totalLen {
+			if uint64(r.totalRead) >= r.totalLen {
 				// All data read, don't clear buffer, just return what we have
 				if totalBytesRead == 0 {
 					return 0, io.EOF
@@ -334,16 +337,15 @@ func (r *CacheReader) parseDoc() error {
 	}
 
 	// Verify Key
-	var keyPadded [16]byte
-	copy(keyPadded[:], r.Key)
-	if !bytes.Equal(doc.Key[:], keyPadded[:]) {
+	if doc.VMajor != docIdentityVersion {
+		return fmt.Errorf("unsupported cache identity version")
+	}
+	if doc.Key != docKey(r.Key) {
 		return fmt.Errorf("doc key mismatch")
 	}
 
 	// Verify FirstKey
-	var firstKeyPadded [16]byte
-	copy(firstKeyPadded[:], r.FirstKey)
-	if !bytes.Equal(doc.FirstKey[:], firstKeyPadded[:]) {
+	if doc.FirstKey != docKey(r.FirstKey) {
 		return fmt.Errorf("doc first_key mismatch")
 	}
 

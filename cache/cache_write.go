@@ -27,10 +27,14 @@ type CacheWriter struct {
 	cond *sync.Cond
 
 	// State
-	mutex  sync.RWMutex
-	closed bool
-	err    error         // Error state if writer failed
-	od     *OpenDirEntry // Reference to OpenDir entry
+	mutex     sync.RWMutex
+	closed    bool
+	err       error // Error state if writer failed
+	published []struct {
+		key    []byte
+		offset int64
+	}
+	od *OpenDirEntry // Reference to OpenDir entry
 }
 
 func NewCacheWriter(s *Stripe, key []byte) *CacheWriter {
@@ -57,6 +61,11 @@ func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
 		// Use read lock for reading data
 		w.mutex.RLock()
 
+		if w.err != nil {
+			err := w.err
+			w.mutex.RUnlock()
+			return 0, err
+		}
 		// Calculate available data based on what's been written
 		// w.totalWritten includes buffered data + flushed fragments
 		available := w.totalWritten - offset
@@ -128,6 +137,10 @@ func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
 			}
 			return 0, io.EOF
 		}
+		if w.totalWritten > offset {
+			w.mutex.Unlock()
+			continue
+		}
 		// Wait for more data (releases lock, re-acquires on return)
 		w.cond.Wait()
 		w.mutex.Unlock()
@@ -139,13 +152,32 @@ func (w *CacheWriter) ReadAt(offset int64, p []byte) (n int, err error) {
 func (w *CacheWriter) Abort(err error) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
-
 	if w.closed {
 		return
 	}
+	w.abortLocked(err)
+}
 
+func (w *CacheWriter) abortLocked(err error) {
+	if err == nil {
+		err = fmt.Errorf("cache write aborted")
+	}
 	w.err = err
 	w.closed = true
+	w.buffer = nil
+	w.frag0Data = nil
+	for _, fragment := range w.published {
+		if w.Stripe.DirMgr != nil && !w.Stripe.DirMgr.deleteAt(fragment.key, fragment.offset) {
+			continue
+		}
+		if w.Stripe.RamCache != nil {
+			w.Stripe.RamCache.Delete(fragment.key)
+		}
+	}
+	w.published = nil
+	if w.od != nil {
+		w.od.signalReady()
+	}
 	w.cond.Broadcast()
 }
 
@@ -171,9 +203,7 @@ func (w *CacheWriter) Write(p []byte) (n int, err error) {
 		// If flush fails, we should Abort self?
 		// Or just return error.
 		// Let's set error state so readers know.
-		w.err = err
-		w.closed = true
-		w.cond.Broadcast()
+		w.abortLocked(err)
 		return 0, err
 	}
 
@@ -216,13 +246,18 @@ func (w *CacheWriter) processBuffer() error {
 
 // Close finishes the write operation.
 // It writes remaining data and finally Fragment 0.
-func (w *CacheWriter) Close() error {
+func (w *CacheWriter) Close() (closeErr error) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
 	if w.closed {
-		return nil
+		return w.err
 	}
+	defer func() {
+		if closeErr != nil {
+			w.abortLocked(closeErr)
+		}
+	}()
 
 	// Serialize Metadata (CacheHTTPInfo) for Fragment 0
 	var infoBytes []byte
@@ -269,6 +304,12 @@ func (w *CacheWriter) Close() error {
 	}
 
 	w.closed = true
+	w.buffer = nil
+	w.frag0Data = nil
+	w.published = nil
+	if w.od != nil {
+		w.od.signalReady()
+	}
 	// Notify any remaining readers that we are done (EOF)
 	w.cond.Broadcast()
 
@@ -290,10 +331,8 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 	thisKey := FragmentKey(w.Key, idx)
 
 	// Padded keys for Doc struct
-	var firstKey [16]byte
-	copy(firstKey[:], w.Key)
-	var currentKey [16]byte
-	copy(currentKey[:], thisKey)
+	firstKey := docKey(w.Key)
+	currentKey := docKey(thisKey)
 
 	// Info is only for Fragment 0
 	currentHLen := uint32(len(infoBytes))
@@ -305,6 +344,7 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 
 	doc := &Doc{
 		Magic:    DocMagic,
+		VMajor:   docIdentityVersion,
 		Len:      uint32(totalDocSize),
 		TotalLen: uint64(w.totalWritten), // Final total len (valid for Frag 0 at Close)
 		FirstKey: firstKey,
@@ -340,6 +380,10 @@ func (w *CacheWriter) writeFragment(idx int, data []byte, infoBytes []byte) erro
 		return err
 	}
 
+	w.published = append(w.published, struct {
+		key    []byte
+		offset int64
+	}{append([]byte(nil), thisKey...), diskOffset})
 	// Populate RamCache (Fragment)
 	if w.Stripe.RamCache != nil {
 		w.Stripe.RamCache.Put(thisKey, fullData)

@@ -16,6 +16,7 @@ type OpenDirEntry struct {
 	// Broadcast channel: closed when Header is ready or Error occurs.
 	// Readers wait on this channel.
 	ReadySignal chan struct{}
+	readyOnce   sync.Once
 
 	// Error state if Writer failed
 	Error error
@@ -62,13 +63,13 @@ func (od *OpenDir) Add(key []byte, w *CacheWriter) (*OpenDirEntry, bool) {
 
 	k := string(key)
 	if entry, exists := od.entries[k]; exists {
-		entry.mutex.Lock()
-		entry.RefCount++
-		entry.mutex.Unlock()
 		return entry, false // Conflict (Follower)
 	}
 
 	entry := NewOpenDirEntry(w)
+	w.mutex.Lock()
+	w.od = entry
+	w.mutex.Unlock()
 	od.entries[k] = entry
 	return entry, true // Success (Leader)
 }
@@ -100,3 +101,35 @@ func (od *OpenDir) ForceRemove(key []byte) {
 	defer od.mutex.Unlock()
 	delete(od.entries, string(key))
 }
+
+// Acquire returns an entry with a reader reference. Get is only a lookup.
+func (od *OpenDir) Acquire(key []byte) *OpenDirEntry {
+	od.mutex.Lock()
+	defer od.mutex.Unlock()
+	entry := od.entries[string(key)]
+	if entry != nil {
+		entry.mutex.Lock()
+		entry.RefCount++
+		entry.mutex.Unlock()
+	}
+	return entry
+}
+
+// Release cannot drop a replacement entry after an invalidation.
+func (od *OpenDir) Release(key []byte, expected *OpenDirEntry) {
+	od.mutex.Lock()
+	defer od.mutex.Unlock()
+	entry := od.entries[string(key)]
+	if entry == nil || entry != expected {
+		return
+	}
+	entry.mutex.Lock()
+	entry.RefCount--
+	remove := entry.RefCount <= 0
+	entry.mutex.Unlock()
+	if remove {
+		delete(od.entries, string(key))
+	}
+}
+
+func (entry *OpenDirEntry) signalReady() { entry.readyOnce.Do(func() { close(entry.ReadySignal) }) }

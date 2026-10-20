@@ -206,3 +206,16 @@ func FragmentKey(firstKey []byte, idx int) []byte {
 
 	return h.Sum(nil)
 }
+
+// OpenReadCommitted never attaches to an in-progress writer. Metadata validation
+// still happens at LoadHTTPInfo, so callers must treat a load failure as a miss.
+func (c *Cache) OpenReadCommitted(key []byte) (*CacheVC, error) {
+	stripe := c.KeyToStripe(key)
+	if stripe == nil {
+		return nil, fmt.Errorf("no stripe found")
+	}
+	if stripe.OpenDir.Get(key) != nil {
+		return nil, fmt.Errorf("cache write in progress")
+	}
+	return &CacheVC{Stripe: stripe, Key: key, reading: true, reader: NewCacheReader(stripe, key)}, nil
+}
