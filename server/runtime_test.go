@@ -549,3 +549,41 @@ func TestReloadAndPurgeFenceCancelledCreatorsSharedFill(t *testing.T) {
 		t.Fatalf("stale fill replaced new cache: origins=%d", calls.Load())
 	}
 }
+
+func TestReloadRejectsRestartOnlySettings(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") }))
+	defer origin.Close()
+	cfg := config.GetDefaultConfig()
+	cfg.PurgeToken = "original-reload-token"
+	s := lifecycleServer(t, origin.URL, cfg)
+	changes := map[string]func(*config.Config){
+		"purge authorization":     func(c *config.Config) { c.PurgeToken = "changed" },
+		"listener port":           func(c *config.Config) { c.ServerPort++ },
+		"client connections":      func(c *config.Config) { c.MaxClientConnections++ },
+		"listener header timeout": func(c *config.Config) { c.RequestHeaderTimeout++ },
+		"listener idle timeout":   func(c *config.Config) { c.KeepAliveTimeout++ },
+		"storage location":        func(c *config.Config) { c.ConfigDir = "changed" },
+		"log directory":           func(c *config.Config) { c.LogfileDir = "changed" },
+		"access log":              func(c *config.Config) { c.AccessLogFilename = "changed" },
+		"error log":               func(c *config.Config) { c.ErrorLogFilename = "changed" },
+		"listener TLS":            func(c *config.Config) { c.TLSCertFile = "cert.pem"; c.TLSKeyFile = "key.pem" },
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			candidate := *cfg
+			change(&candidate)
+			if err := s.Reload(&candidate); err == nil || !strings.Contains(err.Error(), "restart") {
+				t.Fatalf("unsupported change: %v", err)
+			}
+		})
+	}
+	if got := purge(s, "http://front.test/object", "changed"); got.Code != http.StatusForbidden {
+		t.Fatal("rejected reload changed management authorization")
+	}
+	if got := purge(s, "http://front.test/object", cfg.PurgeToken); got.Code != http.StatusOK {
+		t.Fatal("original management authorization stopped working")
+	}
+	if s.Stats().RuntimeVersion != 1 {
+		t.Fatal("restart-only edit changed current version")
+	}
+}

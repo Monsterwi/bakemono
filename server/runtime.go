@@ -106,7 +106,7 @@ func (s *Server) Reload(cfg *appconfig.Config) error {
 		return fmt.Errorf("custom upstream transport requires restart")
 	}
 	if restartSettings(cfg) != restartSettings(s.config) {
-		return fmt.Errorf("listener, storage or logging changes require restart")
+		return fmt.Errorf("listener, storage, logging or management authorization changes require restart")
 	}
 	files, err := runtimeFiles(cfg)
 	if err != nil {
@@ -140,12 +140,12 @@ func (s *Server) Reload(cfg *appconfig.Config) error {
 }
 
 type restartConfig struct {
-	configDir, logDir, accessLog, errorLog, cert, key string
-	port, connections, headerTimeout, idleTimeout     int
+	configDir, logDir, accessLog, errorLog, cert, key, purgeToken string
+	port, connections, headerTimeout, idleTimeout                 int
 }
 
 func restartSettings(c *appconfig.Config) restartConfig {
-	return restartConfig{c.ConfigDir, c.LogfileDir, c.AccessLogFilename, c.ErrorLogFilename, c.TLSCertFile, c.TLSKeyFile, c.ServerPort, c.MaxClientConnections, c.RequestHeaderTimeout, c.KeepAliveTimeout}
+	return restartConfig{c.ConfigDir, c.LogfileDir, c.AccessLogFilename, c.ErrorLogFilename, c.TLSCertFile, c.TLSKeyFile, c.PurgeToken, c.ServerPort, c.MaxClientConnections, c.RequestHeaderTimeout, c.KeepAliveTimeout}
 }
 
 // File content is part of restart compatibility; paths alone miss in-place edits.
