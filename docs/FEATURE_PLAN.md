@@ -1,6 +1,6 @@
 # Razor 下一轮实施清单
 
-状态：#16/#17/#20/#21 功能实现已完成并通过集成服务级回归；#19 工具、两 RAM 策略真实二进制及短 soak 回归已完成，HDD/SSD 三轮硬件与每策略两小时 soak 尚待运行。需求与验收统一由 [总计划 #1](https://github.com/Monsterwi/bakemono/issues/1) 及子 Issue 管理；本文固定范围、共享契约和调度。
+状态：#16/#17/#20/#21功能实现和集成回归已完成，测量源码5ccf32c的24项HDD/SSD矩阵及两策略各一次全新SSD ≥7200秒长测全部26项实测通过。Otter实际7200.279144秒/122,666 GET，S3-FIFO实际7200.089907秒/123,096 GET，均排空且无非预期错误。normal/race/vet/build、双轴代码审查、16项真实工具和测量源码首轮CI通过；最终文档准确性审查、后续交付提交及其CI按Git/Issue外部证据完成。历史f969c1c/12571fc真实长测失败及四次旧运行记录保留，旧Otter通过时间不抵扣本次。需求与验收统一由[总计划 #1](https://github.com/Monsterwi/bakemono/issues/1)及子Issue管理；#1/#18保持打开，不合主分支或发布。
 
 基线：已验收 `d212f7147b7b74abe995a0bb7711e9ba068cc620`。集成分支 `integration/razor-cache-next`，工作树 `/tmp/razor-cache-next`。保留原 `/workspace/bakemono`、`/tmp/razor-delivery` 的改动、历史工作树和所有已有缓存文件。
 
@@ -52,8 +52,8 @@
 
 - Otter v2.2.1 默认；S3-FIFO 第二 adapter。统一 Get/Put/Delete/Items/Size、统计和维护语义，覆盖当前嵌入 Otter 方法的调用；不能出现另一 adapter 的 nil 方法访问。
 - 超大项跳过 RAM，空项仍须有界，更新/删除不能被旧排队事件复活。允许淘汰造成 MISS，安全回退磁盘；策略不接管 HTTP 版本/PURGE/磁盘回收。
-- 参考固定发布的 Apache-2.0 S3-FIFO 源码，记录算法变体与必要归属。resident 按字节，ghost 不保存正文且元数据有界。节点/key/ghost 开销另计，不宣传进程 RSS 硬上限。
-- 默认每 stripe 10 MiB payload 预算不变；两策略使用相同容量比较。暂不改变读盘 promotion，不预设 S3-FIFO 一定更快。
+- 参考固定发布的 Apache-2.0 S3-FIFO 源码，记录算法变体与必要归属。resident 按序列化 cache value 字节（含 Doc/HTTP 元数据、manifest 和正文），ghost 不保存原 value 且元数据有界。外部节点/key/ghost 开销另计，不宣传进程 RSS 硬上限。
+- 默认每 stripe 10 MiB 序列化 value 权重预算不变；两策略使用相同容量比较。暂不改变读盘 promotion，不预设 S3-FIFO 一定更快。
 
 ## 新配置（已实现，重启生效）
 
@@ -64,7 +64,7 @@
 | shared_fill_public_static | INT | 0 | 仅 0/1；公共资源契约显式启用 |
 | range_block_bytes | INT | 1048576 | 64 KiB–8 MiB，2 的幂 |
 | ram_cache_algorithm | STRING | otter | 仅 otter / s3-fifo |
-| ram_cache_bytes | INT | 10485760 | 每 stripe payload 字节；0 禁用，非零至多 1 TiB |
+| ram_cache_bytes | INT | 10485760 | 每 stripe 序列化 value 权重字节；0 禁用，非零至多 1 TiB |
 
 ## 文件范围与调度
 
