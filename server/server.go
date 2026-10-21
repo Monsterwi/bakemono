@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -120,7 +121,10 @@ func (s *Server) Serve(listener net.Listener) error {
 			case <-s.backgroundStop:
 				return
 			case <-ticker.C:
-				logger.Infof("HTTP resource stats: %+v", s.Stats())
+				snapshot := s.Stats()
+				logger.Infof("HTTP resource stats: %+v", snapshot)
+				encoded, _ := json.Marshal(snapshot) // Stats contains only JSON-safe bounded counters.
+				logger.Infof("HTTP resource stats JSON: %s", encoded)
 			}
 		}
 	}()
@@ -149,7 +153,10 @@ func (s *Server) Run() error {
 		select {
 		case received := <-quit:
 			if received == syscall.SIGUSR1 {
-				logger.Infof("HTTP resource stats: %+v", s.Stats())
+				snapshot := s.Stats()
+				logger.Infof("HTTP resource stats: %+v", snapshot)
+				encoded, _ := json.Marshal(snapshot) // Stats contains only JSON-safe bounded counters.
+				logger.Infof("HTTP resource stats JSON: %s", encoded)
 				continue
 			}
 			if received == syscall.SIGHUP {

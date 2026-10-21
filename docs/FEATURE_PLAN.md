@@ -1,6 +1,6 @@
 # Razor 下一轮实施清单
 
-状态：实施准备完成，尚未实施本轮功能。需求与验收统一由 [总计划 #1](https://github.com/Monsterwi/bakemono/issues/1) 及子 Issue 管理；本文固定范围、共享契约和调度。
+状态：#16/#17/#20/#21 功能实现已完成并通过集成服务级回归；#19 工具、两 RAM 策略真实二进制及短 soak 回归已完成，HDD/SSD 三轮硬件与每策略两小时 soak 尚待运行。需求与验收统一由 [总计划 #1](https://github.com/Monsterwi/bakemono/issues/1) 及子 Issue 管理；本文固定范围、共享契约和调度。
 
 基线：已验收 `d212f7147b7b74abe995a0bb7711e9ba068cc620`。集成分支 `integration/razor-cache-next`，工作树 `/tmp/razor-cache-next`。保留原 `/workspace/bakemono`、`/tmp/razor-delivery` 的改动、历史工作树和所有已有缓存文件。
 
@@ -55,7 +55,7 @@
 - 参考固定发布的 Apache-2.0 S3-FIFO 源码，记录算法变体与必要归属。resident 按字节，ghost 不保存正文且元数据有界。节点/key/ghost 开销另计，不宣传进程 RSS 硬上限。
 - 默认每 stripe 10 MiB payload 预算不变；两策略使用相同容量比较。暂不改变读盘 promotion，不预设 S3-FIFO 一定更快。
 
-## 新配置（待实现）
+## 新配置（已实现，重启生效）
 
 统一前缀 `proxy.config.cache.`；首版均重启生效，SIGHUP 改变这些项须拒绝并保留当前服务。原已支持热配置保持不变。
 

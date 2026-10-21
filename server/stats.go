@@ -19,7 +19,10 @@ type counters struct {
 // Stats contains only aggregate, bounded-cardinality counters. BufferReserved is
 // the conservative payload reservation for writers and block readers, not a total RSS cap.
 type Stats struct {
+	SnapshotUnixNano                                                                                                            int64
 	Goroutines                                                                                                                  int
+	HeapAlloc, HeapInuse, HeapSys, TotalAlloc, GCPauseTotalNanoseconds                                                          uint64
+	GCCount                                                                                                                     uint32
 	RuntimeVersion                                                                                                              uint64
 	RetiredRuntimes                                                                                                             int
 	InFlight, Queued, CacheWriters, CacheQueued, RangeReaders, RangeReaderQueued, DiskQueued                                    int
@@ -33,7 +36,11 @@ type Stats struct {
 }
 
 func (s *Server) Stats() Stats {
-	st := Stats{Goroutines: runtime.NumGoroutine(), Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load()}
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	st := Stats{SnapshotUnixNano: time.Now().UnixNano(), Goroutines: runtime.NumGoroutine(), Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load()}
+	st.HeapAlloc, st.HeapInuse, st.HeapSys, st.TotalAlloc = memory.HeapAlloc, memory.HeapInuse, memory.HeapSys, memory.TotalAlloc
+	st.GCCount, st.GCPauseTotalNanoseconds = memory.NumGC, memory.PauseTotalNs
 	st.RangeBlockHits, st.RangeBlockMisses = s.counters.rangeHits.Load(), s.counters.rangeMisses.Load()
 	st.RangeHitBytes, st.RangeMissBytes = s.counters.rangeHitBytes.Load(), s.counters.rangeMissBytes.Load()
 	s.mu.Lock()

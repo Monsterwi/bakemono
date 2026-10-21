@@ -38,6 +38,14 @@ flowchart LR
 
 公共静态源站可显式配置 `CONFIG proxy.config.cache.shared_fill_public_static INT 1`（默认 0，重启生效）。此模式要求源站不按客户端身份生成不同内容：生产者使用固定 `User-Agent: Razor`，移除真实客户端 IP、Forwarded/X-Forwarded-For/X-Real-IP 和追踪头，保留可信代理解析后的 scheme/Host。不同 IP、UA、追踪信息的等价冷请求可以合并；未知头仍参与任务身份并发给源站，Accept-Encoding/Accept-Language 的不同值保持隔离。持久缓存继续遵守源站声明的这两个 Vary 维度；不支持的 Vary 不共享。块布局按原始 Accept-Encoding/Accept-Language 分别隔离，包括缺省编码和显式 identity。不同保守任务竞争同一个 manifest 或块时，只有取得写预留的任务可以回源，冲突任务受控失败，避免重复源站生产者及未知头错误共享。
 
+100/200 MiB 公共分块对象需要显式提高对象准入上限（默认仅 64 MiB）：
+
+```text
+CONFIG proxy.config.cache.shared_fill_public_static INT 1
+CONFIG proxy.config.cache.max_object_bytes INT 268435456
+CONFIG proxy.config.cache.range_block_bytes INT 1048576
+```
+
 Authorization/Cookie 等旁路请求保留原代理行为。公共模式使用独立、版本化内容命名空间；切换模式安全 MISS，不删除旧文件。该能力已通过服务级回归，专用测试机的本轮真实二进制验收由 #19 完成。
 
 生产者不依赖首个客户端继续存活。PURGE 后的新请求不能加入旧任务，旧任务也不能重新发布缓存。如果源站响应不可共享，正文仅交付给原始创建者，其他订阅者受控失败，不并发重试源站。普通整对象路径仍等待完整提交。公共静态模式下，identity 编码、强 ETag、可共享且大于 `max(1 MiB, range_block_bytes)` 的完整 GET 与单 Range 共用块：首个所需块完整校验并提交后开始发送，发送当前块时最多预取本区间下一块。小文件保留整对象路径；冷 GET 可增加一次共享 HEAD 分类，不为每块重复 HEAD。
@@ -133,7 +141,7 @@ python3 tools/acceptance.py \
   --mode functional
 ```
 
-`--output` 必须尚不存在。工具自行启动源站和服务进程，生成 256 KiB 小文件及指定大小的常规文件，使用 64 KiB 流式客户端校验长度与 SHA256，保留配置、源站计数、请求及故障证据；运行前预留数 GiB 空间。`--large-mib` 支持 100/200，默认 200 以保留历史基线的复现方式。
+`--output` 必须尚不存在。工具自行启动源站和服务进程，生成 256 KiB 小文件及指定大小的常规文件，使用 64 KiB 流式客户端校验长度与 SHA256，保留配置、源站计数、请求及故障证据；运行前预留数 GiB 空间。`--large-mib` 支持 100/200，默认 100，200 MiB 用于兼容回归。
 
 同时执行功能矩阵与 Razor 独立压测，可将缓存放在另一块盘上：
 
@@ -147,6 +155,23 @@ python3 tools/acceptance.py \
 ```
 
 `--cache-root` 也必须尚不存在，工具不会清理已有缓存。压测包括热缓存、冷热门对象、唯一长尾 URL、混合大小对象、Range、慢源站与慢客户端；混合负载按每个客户端洗牌后的加权 URL 列表循环，实际比例记录在结果中。ATS 对照入口也在该工具中，但现有适配器面向 **ATS 9.2 的 records.config/runroot**；ATS 10.2 的环境适配尚未验收，不能直接宣称可用。
+
+公共静态模式与两 RAM 策略使用以下独立入口；替换 `RUN` 为唯一 run-id，按策略、介质顺序运行，勿与 hey 竞争机器：
+
+```bash
+python3 tools/acceptance.py --binary "$PWD/razor" \
+  --output /path/to/results/RUN --cache-root /path/to/cache/RUN \
+  --products razor --public-static --ram-algorithm otter --ram-bytes 10485760 \
+  --block-bytes 1048576 --large-mib 100 --mode public-functional
+# 同一参数改 --mode benchmark --seconds 10 --repeats 3；每个入口用新的目录。
+# 两次独立 SSD 长稳态：otter / s3-fifo 各 --mode soak --soak-seconds 7200。
+```
+
+公共功能入口验证真实首块屏障、后块错误正文、100 个 loopback TCP 源 IP/UA/trace、重叠区间、GET/Range 复用、取消排空、重启/PURGE、离线和布局切换。`--block-bytes 65536` / `4194304` 分别验证布局；`--large-mib 200` 验证兼容。保守路径用 `--mode functional`，始终关闭公共模式。不同源站同 ETag、版本/If-Range/416、磁盘位翻转、限额和精确预取边界另由真实 HTTP/磁盘 Go 回归覆盖；不能把这些服务级测试写成已经执行的硬件场景。
+
+soak 在整个时段持续执行有界工作集的热点、长尾、Range 拖动/重叠、完整 GET、慢源/客户端与受控冷 MISS，每个成功响应检查长度/SHA256。`progress.json` 包含 PID、UTC 起点、阶段和请求数，`soak-stages.jsonl`/`requests.jsonl`/`origin-soak.jsonl` 保存原始记录；`soak-outcome.json` 只有实际运行至少两小时才标记 `qualifies_two_hour_soak=true`。`--allow-short-soak` 仅用于冒烟。最终任务、等待者、写者、读者、缓存队列、origin 和预留缓冲必须归零。工具不接管后台守护，长任务由调用方以持久进程启动并检查 outcome。
+
+SIGUSR1 保留旧统计行并增加带采样时刻的 JSON：请求/块/逻辑区间字节命中与 RAM lookup 分开计数，源站 HEAD/GET/实际正文从 origin 原始记录取得，`/proc` 记录 PID、CPU、读写、RSS、FD，并按缓存文件 st_dev 采样设备 sectors×512 与 I/O 毫秒（overlay 无法映射则为 null；设备计数包含其他进程背景活动），JSON 另含 heap/GC、goroutine、RAM resident/ghost/估算元数据和任务/缓冲。`batches.json` 含吞吐、TTFB/完成 P99、每 GiB CPU、实际磁盘写入/源站正文比；采样峰值不是硬上限，缓存写放大也包含日志写入。跨重启按 PID 分段，不能直接相减累积计数。已观察到当前 manifest 版本改变时，旧流停止后续块；普通 manifest 淘汰只表示未知，仍由固定强 ETag 校验保护。所有压测为同机 HTTP/1.1 loopback，不代表分布式 WAN、TLS/H2 负载或 ATS 10.2 性能优势。
 
 另提供 [hey 交叉测量工具](tools/hey_benchmark.py)，复用同一源站、进程和采样机制，减少 Python 客户端对吞吐的影响。原版 hey v0.1.4 忽略正文读取错误，故使用 [独立构建脚本](tools/build_hey.py) 补上一行实际读取字节和错误记账，并以真实截断源站回归验证。每批前后验证 SHA256；压测客户端逐响应读取正文并报告读取错误，批次汇总实际字节，不逐响应计算 hash。工具校验构建清单和二进制 hash，拒绝误用未修正版。
 

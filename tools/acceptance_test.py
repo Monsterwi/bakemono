@@ -72,6 +72,14 @@ class StartupCleanupTest(unittest.TestCase):
                 self.assertTrue(all(instance.raw.closed for instance in clients))
 
 
+class DeviceSamplingTest(unittest.TestCase):
+    def test_diskstats_uses_sectors_not_completed_operations(self):
+        text = "8 32 sdc 100 2 1234 7 200 3 5678 9 0 456 789\n8 33 sdc1 1 0 1 0 2 0 2 0 0 3 4\n"
+        self.assertEqual(acceptance.parse_device_io(os.makedev(8,32), text),
+            {"major":8,"minor":32,"name":"sdc","read_bytes":631808,"write_bytes":2907136,"io_ms":456})
+        self.assertIsNone(acceptance.parse_device_io(os.makedev(0,1), text))
+
+
 class WorkloadTest(unittest.TestCase):
     def test_fixtures_keep_exact_size_tail_and_independent_versions(self):
         with tempfile.TemporaryDirectory() as directory:
