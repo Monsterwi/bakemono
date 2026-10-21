@@ -22,9 +22,6 @@ func TestNewRamCache(t *testing.T) {
 			if cache == nil {
 				t.Fatal("NewRamCacheLRU returned nil")
 			}
-			if cache.Cache == nil {
-				t.Fatal("cache.Cache is nil")
-			}
 		})
 	}
 }

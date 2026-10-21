@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Monsterwi/razor/cache"
 	"github.com/Monsterwi/razor/logger"
 	"github.com/Monsterwi/razor/proxy"
 )
@@ -23,6 +24,7 @@ type Stats struct {
 	Requests, Rejected, Cancelled, Hits, Misses, Bypass, Bytes, TTFBCount, TTFBNanoseconds, CacheWriteErrors, CacheWriteSkipped uint64
 	SharedFillTasks, SharedFillWaiters                                                                                          int
 	SharedFillJoined, SharedFillCompleted, SharedFillUnshareable, SharedFillFailed, SharedFillCancelled                         uint64
+	RAM                                                                                                                         []cache.RAMStats
 	Origin                                                                                                                      proxy.Stats
 }
 
@@ -60,6 +62,9 @@ func (s *Server) Stats() Stats {
 	}
 	if s.cache != nil {
 		for _, stripe := range s.cache.Stripes {
+			if stripe.RamCache != nil {
+				st.RAM = append(st.RAM, stripe.RamCache.Stats())
+			}
 			q, b := stripe.AggBuffer.Stats()
 			st.DiskQueued += q
 			st.DiskBufferedBytes += b

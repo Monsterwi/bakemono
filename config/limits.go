@@ -54,6 +54,12 @@ func (c *Config) WithDefaults() *Config {
 	}
 	out.resourceDefaults = true
 	out.networkDefaults()
+	if out.RAMCacheAlgorithm == "" {
+		out.RAMCacheAlgorithm = "otter"
+		if out.RAMCacheBytes == 0 {
+			out.RAMCacheBytes = 10 << 20
+		}
+	}
 	for _, f := range out.resourceFields() {
 		if *f.value == 0 {
 			*f.value = f.fallback
@@ -86,6 +92,9 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.validateNetwork(); err != nil {
+		return err
+	}
+	if err := c.validateRAM(); err != nil {
 		return err
 	}
 	if c.ServerPort < 0 || c.ServerPort > 65535 {

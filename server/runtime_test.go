@@ -557,6 +557,8 @@ func TestReloadRejectsRestartOnlySettings(t *testing.T) {
 	cfg.PurgeToken = "original-reload-token"
 	s := lifecycleServer(t, origin.URL, cfg)
 	changes := map[string]func(*config.Config){
+		"RAM algorithm":           func(c *config.Config) { c.RAMCacheAlgorithm = "s3-fifo" },
+		"RAM capacity":            func(c *config.Config) { c.RAMCacheBytes++ },
 		"purge authorization":     func(c *config.Config) { c.PurgeToken = "changed" },
 		"listener port":           func(c *config.Config) { c.ServerPort++ },
 		"client connections":      func(c *config.Config) { c.MaxClientConnections++ },

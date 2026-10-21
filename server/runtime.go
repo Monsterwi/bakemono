@@ -142,10 +142,12 @@ func (s *Server) Reload(cfg *appconfig.Config) error {
 type restartConfig struct {
 	configDir, logDir, accessLog, errorLog, cert, key, purgeToken string
 	port, connections, headerTimeout, idleTimeout                 int
+	ramAlgorithm                                                  string
+	ramBytes                                                      int
 }
 
 func restartSettings(c *appconfig.Config) restartConfig {
-	return restartConfig{c.ConfigDir, c.LogfileDir, c.AccessLogFilename, c.ErrorLogFilename, c.TLSCertFile, c.TLSKeyFile, c.PurgeToken, c.ServerPort, c.MaxClientConnections, c.RequestHeaderTimeout, c.KeepAliveTimeout}
+	return restartConfig{c.ConfigDir, c.LogfileDir, c.AccessLogFilename, c.ErrorLogFilename, c.TLSCertFile, c.TLSKeyFile, c.PurgeToken, c.ServerPort, c.MaxClientConnections, c.RequestHeaderTimeout, c.KeepAliveTimeout, c.RAMCacheAlgorithm, c.RAMCacheBytes}
 }
 
 // File content is part of restart compatibility; paths alone miss in-place edits.
