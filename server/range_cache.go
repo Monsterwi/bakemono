@@ -60,7 +60,7 @@ func rangeEligible(r *http.Request) bool {
 }
 
 func rangeIdentity(root []byte, origin *proxy.Origin, r *http.Request) ([]byte, string) {
-	variant, _ := json.Marshal(r.Header.Values("Accept-Language"))
+	variant, _ := json.Marshal(struct{ Encoding, Language []string }{r.Header.Values("Accept-Encoding"), r.Header.Values("Accept-Language")})
 	return rangeManifestKey(root, origin.Identity(), string(variant), int64(requestRuntime(r).config.RangeBlockBytes)), string(variant)
 }
 func rangeManifestKey(root []byte, origin, variant string, size int64) []byte {

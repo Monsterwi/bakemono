@@ -536,3 +536,41 @@ func TestSingleBlockRequestIgnoresUnrelatedSmallStripe(t *testing.T) {
 		}
 	}
 }
+
+func TestRangeRawEncodingVariantsKeepIndependentBlocks(t *testing.T) {
+	data := bytes.Repeat([]byte("e"), 1<<20)
+	var heads, gets atomic.Int32
+	s, _ := publicCacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "HEAD" {
+			heads.Add(1)
+		} else {
+			gets.Add(1)
+		}
+		w.Header().Set("ETag", `"encoding"`)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(data))
+	})
+	// A prior absent-AE fill must not become identity's block or manifest.
+	if got := fetch(s, "http://cache.test/encoding", http.Header{"Range": {"bytes=0-100"}}); got.Code != 206 {
+		t.Fatal(got.Code)
+	}
+	done := make(chan *httptest.ResponseRecorder, 2)
+	for _, encoding := range []string{"", "identity"} {
+		go func(encoding string) {
+			h := http.Header{"Range": {"bytes=0-100"}}
+			if encoding != "" {
+				h.Set("Accept-Encoding", encoding)
+			}
+			done <- fetch(s, "http://cache.test/encoding", h)
+		}(encoding)
+	}
+	for range 2 {
+		got := <-done
+		if got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data[:101]) {
+			t.Fatalf("encoding variant status=%d bytes=%d", got.Code, got.Body.Len())
+		}
+	}
+	if heads.Load() != 2 || gets.Load() != 2 {
+		t.Fatalf("raw AE variants aliased: HEAD=%d GET=%d, want2 each", heads.Load(), gets.Load())
+	}
+}
