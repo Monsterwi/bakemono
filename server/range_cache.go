@@ -66,7 +66,7 @@ func rangeIdentity(root []byte, origin *proxy.Origin, r *http.Request) ([]byte, 
 }
 func rangeManifestKey(root []byte, origin, variant string, size int64) []byte {
 	hash := sha256.Sum256([]byte(origin + "\x00" + variant))
-	return []byte(fmt.Sprintf("%s\nrange:v%d:%d:manifest:%x", root, rangeLayoutVersion, size, hash))
+	return []byte(fmt.Sprintf("%s\nrange:manifest:v%d:%d:%x", root, rangeLayoutVersion, size, hash))
 }
 func rangeBlockKey(root []byte, m *rangeManifest, index int64) []byte {
 	hash := sha256.Sum256([]byte(m.Origin + "\x00" + m.Variant + "\x00" + m.ETag + "\x00" + m.Incarnation + fmt.Sprintf(":%d:%d", m.Version, m.BlockSize)))
@@ -80,7 +80,11 @@ func (s *Server) readRangeManifest(r *http.Request, key []byte, origin, variant 
 		return nil, nil, err
 	}
 	defer release()
+	return s.readRangeManifestData(key, origin, variant, size)
+}
 
+// Caller holds a reader or writer reservation, including bounded fragment scratch.
+func (s *Server) readRangeManifestData(key []byte, origin, variant string, size int64) (*rangeManifest, *cache.CacheHTTPInfo, error) {
 	vc, err := s.cache.OpenReadCommitted(key)
 	if err != nil {
 		return nil, nil, err
@@ -100,6 +104,21 @@ func (s *Server) readRangeManifest(r *http.Request, key []byte, origin, variant 
 	}
 	return &m, info, nil
 }
+
+// A missing/evicted manifest is unknown, not a new version; fixed ETag block
+// validation still protects streaming through a cache smaller than the object.
+func (s *Server) checkRangeVersion(root []byte, parent *cache.FillToken, m *rangeManifest) error {
+	if err := s.cache.CheckFill(parent); err != nil {
+		return err
+	}
+	key := rangeManifestKey(root, m.Origin, m.Variant, m.BlockSize)
+	current, _, err := s.readRangeManifestData(key, m.Origin, m.Variant, m.BlockSize)
+	if err == nil && (current.ETag != m.ETag || current.Total != m.Total) {
+		return errRangeChanged
+	}
+	return nil
+}
+
 func strongRangeTag(tag string) bool { return validETag(tag) && !strings.HasPrefix(tag, "W/") }
 func identityEncoding(h http.Header) bool {
 	return len(h.Values("Content-Encoding")) == 0 || (len(h.Values("Content-Encoding")) == 1 && h.Get("Content-Encoding") == "identity")
@@ -214,7 +233,8 @@ func (s *Server) ensureRangeManifest(r *http.Request, root, key []byte, parent *
 		return nil, nil, false, err
 	}
 	err = s.rangeFill(r, key, token, false, func(task *fillTask, request *http.Request, resources fillResources) fillResult {
-		if _, info, err := s.readRangeManifest(request, key, origin.Identity(), variant, int64(requestRuntime(r).config.RangeBlockBytes)); err == nil && requestFresh(request, info, s.now()) {
+		previous, metadata, readErr := s.readRangeManifest(request, key, origin.Identity(), variant, int64(requestRuntime(r).config.RangeBlockBytes))
+		if readErr == nil && requestFresh(request, metadata, s.now()) {
 			return fillResult{key: key}
 		}
 		if !origin.Available() {
@@ -251,6 +271,10 @@ func (s *Server) ensureRangeManifest(r *http.Request, root, key []byte, parent *
 			return fillResult{err: err}
 		}
 		m := rangeManifest{Version: rangeLayoutVersion, BlockSize: int64(resources.config.RangeBlockBytes), Total: resp.RawResponse.ContentLength, ETag: headers.Get("ETag"), Origin: origin.Identity(), Variant: variant, Incarnation: hex.EncodeToString(incarnation[:])}
+		// A strong validator identifies unchanged content across freshness refreshes.
+		if readErr == nil && previous.ETag == m.ETag && previous.Total == m.Total {
+			m.Incarnation = previous.Incarnation
+		}
 		encoded, err := json.Marshal(m)
 		if err != nil || len(encoded) > 64<<10 {
 			return fillResult{err: errRangeBypass}
@@ -436,6 +460,9 @@ func (s *Server) ensureRangeBlock(r *http.Request, root []byte, parent *cache.Fi
 		if int64(len(data)) != end-start+1 || len(resp.RawResponse.Trailer) != 0 {
 			return fillResult{err: io.ErrUnexpectedEOF}
 		}
+		if err = s.checkRangeVersion(root, parent, m); err != nil {
+			return fillResult{err: err}
+		}
 		err = s.writeRangeObject(task, fill, info, bytes.NewReader(data), int64(len(data)))
 		return fillResult{key: key, err: err}
 	})
@@ -588,7 +615,7 @@ func (s *Server) serveBlocks(w http.ResponseWriter, r *http.Request, root []byte
 		return true
 	}
 
-	if err = s.cache.CheckFill(parent); err != nil {
+	if err = s.checkRangeVersion(root, parent, m); err != nil {
 		http.Error(w, "Range invalidated", http.StatusServiceUnavailable)
 		return true
 	}
@@ -654,7 +681,7 @@ func (s *Server) serveBlocks(w http.ResponseWriter, r *http.Request, root []byte
 				panic(http.ErrAbortHandler)
 			}
 		}
-		if s.cache.CheckFill(parent) != nil {
+		if s.checkRangeVersion(root, parent, m) != nil {
 			panic(http.ErrAbortHandler)
 		}
 		if !cachedReady && index < end/m.BlockSize {

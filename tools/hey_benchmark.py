@@ -14,6 +14,7 @@ import subprocess
 import threading
 
 from acceptance import Client, MIB, Origin, Product, file_hash, save
+from public_acceptance import counter_metrics, drain, snapshot
 
 
 TEMPLATE = ('{"seconds":{{.Total.Seconds}},"requests":{{.NumRes}},"bytes":{{.SizeTotal}},'
@@ -40,6 +41,10 @@ def main():
     parser.add_argument("--fixtures", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cache-root", type=Path, required=True)
+    parser.add_argument("--public-static", action="store_true")
+    parser.add_argument("--ram-algorithm", choices=("otter", "s3-fifo"), default="otter")
+    parser.add_argument("--ram-bytes", type=int, default=10 * MIB)
+    parser.add_argument("--block-bytes", type=int, default=MIB)
     parser.add_argument("--seconds", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=3)
     args = parser.parse_args()
@@ -77,6 +82,7 @@ def main():
                     name = f"{size}-c{concurrency}-r{repeat + 1}"
                     before = origin.snapshot()
                     initial = product.resource()
+                    server_before = snapshot(product)
                     samples, done = [initial], threading.Event()
                     def sample():
                         while not done.wait(.1):
@@ -96,7 +102,11 @@ def main():
                     samples.append(product.resource())
                     raw = json.loads((args.output / (name + ".json")).read_text())
                     result = checked_summary(raw, expected_bytes)
-                    result.update(name=name, concurrency=concurrency, object_bytes=expected_bytes,
+                    server_after = snapshot(product)
+                    result.update(server_before=server_before, server_after=server_after,
+                        cache_metrics=counter_metrics(server_before["stats"], server_after["stats"]),
+                        process_io_bytes={key: samples[-1][key] - initial[key] for key in ("read_bytes", "write_bytes")},
+                        name=name, concurrency=concurrency, object_bytes=expected_bytes,
                         rss_peak_bytes=max(row["rss_bytes"] for row in samples), fd_peak=max(row["fds"] for row in samples),
                         cpu_seconds_per_gib=(samples[-1]["cpu_seconds"] - initial["cpu_seconds"]) / (raw["bytes"] / (1 << 30)),
                         resource_samples=samples, command=command)
@@ -134,7 +144,7 @@ def main():
             results.append(row)
             save(args.output / "physical-reads.json", [r for r in results if r["name"].startswith("physical-")])
             print(name, round(row["mib_per_second"], 2), "MiB/s", row["process_io_bytes"], flush=True)
-        product.proc.send_signal(signal.SIGUSR1)
+        save(args.output / "drain.json", drain(product))
     save(args.output / "outcome.json", {"success": True})
 
 

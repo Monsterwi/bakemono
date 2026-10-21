@@ -29,7 +29,9 @@ CHUNK = 64 << 10
 
 
 def save(path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    temporary.replace(path)
 
 
 def wait_for(check, description, timeout=15):
@@ -58,6 +60,22 @@ def file_hash(path, start=0, length=None):
             h.update(b)
             remaining -= len(b)
     return h.hexdigest()
+
+
+def parse_device_io(device, diskstats):
+    for line in diskstats.splitlines():
+        row = line.split()
+        if len(row) >= 14 and (int(row[0]), int(row[1])) == (os.major(device), os.minor(device)):
+            return {"major": int(row[0]), "minor": int(row[1]), "name": row[2],
+                    "read_bytes": int(row[5]) * 512, "write_bytes": int(row[9]) * 512, "io_ms": int(row[12])}
+    return None
+
+
+def device_io(cache_file):
+    try:
+        return parse_device_io(cache_file.stat().st_dev, Path("/proc/diskstats").read_text())
+    except OSError:
+        return None
 
 
 class Origin:
@@ -90,7 +108,8 @@ class Origin:
                 with owner.lock:
                     rule = dict(owner.rules.get(path, {}))
                     row = {"path": path, "method": self.command, "bytes": 0,
-                           "range": self.headers.get("Range"), "time": time.time(), "status": 0}
+                           "range": self.headers.get("Range"), "time": time.time(), "status": 0,
+                           "remote_ip": self.client_address[0], "headers": dict(self.headers)}
                     owner.records.append(row)
                     if rule.get("switch_after_get") and sum(r["method"] == "GET" and r["path"] == path for r in owner.records) > rule["switch_after_get"]:
                         rule["version"] = owner.rules[path]["version"] = 2
@@ -116,6 +135,11 @@ class Origin:
                         else:
                             start, end = int(left), min(total - 1, int(right) if right else total - 1)
                         status = 206 if 0 <= start <= end < total else 416
+                # Faults/barriers affect only the selected GET block, never HEAD.
+                if "block_start" in rule and (self.command != "GET" or start != rule["block_start"]):
+                    rule = {}
+                if rule.get("force_status"):
+                    status = rule["force_status"]
                 if rule.get("entered"):
                     rule["entered"].set()
                 if rule.get("gate"):
@@ -162,7 +186,7 @@ class Origin:
 
     def snapshot(self, path=None):
         with self.lock:
-            rows = [r for r in self.records if path is None or r["path"] == path]
+            rows = [r for r in self.records if r["path"] != "/health" and (path is None or r["path"] == path)]
             return {"requests": len(rows), "get": sum(r["method"] == "GET" for r in rows),
                     "head": sum(r["method"] == "HEAD" for r in rows), "bytes": sum(r["bytes"] for r in rows)}
 
@@ -196,6 +220,12 @@ class Product:
                 "http.shutdown_timeout": ("INT", 5),
                 "http.health.path": ("STRING", "/health"),
             }
+            self.config.update({
+                "cache.shared_fill_public_static": ("INT", int(getattr(args, "public_static", False))),
+                "cache.range_block_bytes": ("INT", getattr(args, "block_bytes", MIB)),
+                "cache.ram_cache_algorithm": ("STRING", getattr(args, "ram_algorithm", "otter")),
+                "cache.ram_cache_bytes": ("INT", getattr(args, "ram_bytes", 10 * MIB)),
+            })
             self.config.update(overrides or {})
             self.write_config()
             cache_dir = self.dir
@@ -248,6 +278,7 @@ class Product:
     def start(self):
         self.log = (self.dir / "process.log").open("a")
         self.proc = None
+        self.stats_offset = (self.dir / "process.log").stat().st_size
         try:
             self.proc = subprocess.Popen(self.command, stdout=self.log, stderr=self.log, env=self.env)
             def ready():
@@ -297,10 +328,11 @@ class Product:
         stat = Path(f"/proc/{self.proc.pid}/stat").read_text().split(") ", 1)[1].split()
         status = Path(f"/proc/{self.proc.pid}/status").read_text()
         io = dict(line.split(": ", 1) for line in Path(f"/proc/{self.proc.pid}/io").read_text().splitlines())
-        return {"time": time.time(), "cpu_seconds": (int(stat[11]) + int(stat[12])) / os.sysconf("SC_CLK_TCK"),
+        return {"time": time.time(), "pid": self.proc.pid, "cpu_seconds": (int(stat[11]) + int(stat[12])) / os.sysconf("SC_CLK_TCK"),
                 "read_bytes": int(io["read_bytes"]), "write_bytes": int(io["write_bytes"]),
                 "rss_bytes": int(re.search(r"VmRSS:\s+(\d+)", status)[1]) * 1024,
-                "fds": len(list(Path(f"/proc/{self.proc.pid}/fd").iterdir()))}
+                "fds": len(list(Path(f"/proc/{self.proc.pid}/fd").iterdir())),
+                "cache_device": device_io(self.cache_file) if self.kind == "razor" else None}
 
 
 class Client:
@@ -320,8 +352,9 @@ class Client:
             self.hashes[key] = file_hash(f, start, length)
         return length, self.hashes[key]
 
-    def request(self, product, path, headers=None, method="GET", expected=None, status=200, slow=0, connection=None, case=None):
-        c = connection or http.client.HTTPConnection("127.0.0.1", product.port, timeout=120)
+    def request(self, product, path, headers=None, method="GET", expected=None, status=200, slow=0, connection=None, case=None, source_ip=None):
+        c = connection or http.client.HTTPConnection("127.0.0.1", product.port, timeout=120,
+            source_address=(source_ip, 0) if source_ip else None)
         start = time.monotonic()
         row = {"product": product.kind, "path": path, "case": case, "time": time.time(), "method": method, "status": 0,
                "bytes": 0, "ttfb_ms": None, "error": None, "request_range": (headers or {}).get("Range")}
@@ -373,6 +406,10 @@ class Client:
             for limits in ranges]
         path_expected = {p: self.expected(p) for p in paths or ()}
         before = origin.snapshot()
+        structured_before = None
+        if product.kind == "razor":
+            from public_acceptance import snapshot
+            structured_before = snapshot(product)
         initial = product.resource()
         logs_before = (product.dir / "process.log").stat().st_size
         if product.kind == "razor":
@@ -407,6 +444,8 @@ class Client:
                     request_path = request_paths[len(rows) % len(request_paths)]
                     if unique_paths:
                         request_path += f"-{index}-{len(rows)}"
+                    if ranges is not None:
+                        request_headers, request_expected = variants[(index + len(rows) * concurrency) % len(variants)]
                     rows.append(self.request(product, request_path, headers=request_headers,
                                              expected=path_expected.get(request_path, request_expected),
                                              status=206 if bounds or ranges else 200, slow=slow, connection=c, case=name))
@@ -447,9 +486,23 @@ class Client:
                                                   for field in ("InFlight", "CacheWriters", "BufferReserved", "SharedFillTasks", "SharedFillWaiters")}
                                                   if product.kind == "razor" else None,
                    "resource_samples": samples}
+        if product.kind == "razor":
+            from public_acceptance import counter_metrics, snapshot
+            structured_after = snapshot(product)
+            summary["server_before"] = structured_before
+            summary["server_after"] = structured_after
+            summary["cache_metrics"] = counter_metrics(structured_before["stats"], structured_after["stats"])
+            actual_origin = summary["origin"]["bytes"]
+            summary["write_amplification_per_origin_body_byte"] = summary["process_io_bytes"]["write_bytes"] / actual_origin if actual_origin else None
+            first_device, last_device = initial.get("cache_device"), samples[-1].get("cache_device")
+            summary["cache_device_io_delta"] = ({key: last_device[key] - first_device[key]
+                for key in ("read_bytes", "write_bytes", "io_ms")} if first_device and last_device and
+                (first_device["major"], first_device["minor"]) == (last_device["major"], last_device["minor"]) else None)
+            summary["server_stats_samples"] = [json.loads(line.split("HTTP resource stats JSON: ", 1)[1])
+                for line in logs.splitlines() if "HTTP resource stats JSON: " in line]
         self.summaries.append(summary)
         save(self.output / "batches.json", self.summaries)
-        print(json.dumps({k: v for k, v in summary.items() if k != "resource_samples"}), flush=True)
+        print(json.dumps({k: v for k, v in summary.items() if k not in ("resource_samples", "server_stats_samples", "server_before", "server_after")}), flush=True)
         assert not errors, errors[:2]
         return summary
 
@@ -521,7 +574,7 @@ def functional(args, fixtures, output):
         origin.rules[changed] = {"switch_after_get": 1}
         bounds = (0, 2 * MIB - 1)
         result = client.request(product, changed, headers={"Range": "bytes=0-2097151"}, expected=client.expected(changed, bounds=bounds), status=206)
-        assert result["status"] != 206, result
+        assert result["error"], result
         client.checked(product, changed, headers={"Range": "bytes=0-2097151"}, expected=client.expected(changed, version=2, bounds=bounds), status=206)
         record("Range version changes mid-fill: controlled failure then exact new version")
         before = origin.snapshot()
@@ -651,9 +704,9 @@ def functional(args, fixtures, output):
         client.checked(product, "/small-wrap-0")
         assert origin.snapshot("/small-wrap-0")["get"] == 2
         before = origin.snapshot("/large-over-capacity")
-        client.checked(product, "/large-over-capacity", headers={"Range": "bytes=0-"}, expected=None, status=503)
-        assert origin.snapshot("/large-over-capacity")["get"] == before["get"]
-        record("bounded32MiB disk wraps safely; oversized Range rejects before block GET")
+        client.checked(product, "/large-over-capacity", headers={"Range": "bytes=0-"}, status=206)
+        assert origin.snapshot("/large-over-capacity")["bytes"] - before["bytes"] == large_bytes
+        record("bounded32MiB disk wraps safely; larger Range streams through bounded window")
         product.stop()
         # Verify advertised main-binary cache states actually appeared in access logs.
         access = (output / "functional/access.log").read_text()
@@ -745,15 +798,23 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--ats-environment", type=Path)
     p.add_argument("--products", nargs="+", choices=("razor", "ats"), default=["razor", "ats"])
-    p.add_argument("--large-mib", type=int, choices=(100, 200), default=200)
+    p.add_argument("--large-mib", type=int, choices=(100, 200), default=100)
+    p.add_argument("--public-static", action="store_true", help="explicit public identity contract; required for public-functional and soak")
+    p.add_argument("--ram-algorithm", choices=("otter", "s3-fifo"), default="otter")
+    p.add_argument("--ram-bytes", type=int, default=10 * MIB, help="same per-stripe payload budget for policy comparison")
+    p.add_argument("--block-bytes", type=int, default=MIB)
+    p.add_argument("--soak-seconds", type=float, default=7200)
+    p.add_argument("--allow-short-soak", action="store_true", help="smoke test only; never qualifies as two-hour acceptance")
     p.add_argument("--cache-root", type=Path, help="new Razor cache directory on the disk under test; results stay under --output")
-    p.add_argument("--mode", choices=("functional", "benchmark", "all"), default="all")
+    p.add_argument("--mode", choices=("functional", "public-functional", "benchmark", "soak", "all"), default="all")
     p.add_argument("--seconds", type=float, default=4)
     p.add_argument("--repeats", type=int, default=3)
     args = p.parse_args()
     assert args.seconds > 0 and args.repeats > 0
     args.binary, args.output = args.binary.resolve(), args.output.resolve()
-    if args.mode != "functional" and "ats" in args.products:
+    if args.mode in ("public-functional", "soak"):
+        assert args.public_static and args.products == ["razor"], "public modes require --public-static --products razor"
+    if args.mode in ("benchmark", "all") and "ats" in args.products:
         assert args.ats_environment, "ATS environment JSON is required for the comparison"
     args.output.mkdir(parents=True, exist_ok=False)
     if args.cache_root:
@@ -767,7 +828,8 @@ def main():
                 "binary_version": subprocess.check_output([str(args.binary), "-v"], text=True).strip(),
                 "uname": list(os.uname()), "cpu_count": os.cpu_count(), "cpuinfo": Path("/proc/cpuinfo").read_text(),
                 "meminfo": Path("/proc/meminfo").read_text(), "disk": list(shutil.disk_usage(args.output)),
-                "go": subprocess.check_output(["go", "version"], text=True).strip(),
+                "go_build": subprocess.check_output(["go", "version", "-m", str(args.binary)], text=True,
+                    env=dict(os.environ, GOTOOLCHAIN="local")).strip(),
                 "python": subprocess.check_output(["python3", "--version"], text=True).strip(),
                 "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                 "fixture_sha256": {str(path.name): file_hash(path) for path in fixtures.values()},
@@ -775,9 +837,22 @@ def main():
     save(args.output / "environment.json", metadata)
     try:
         if args.mode in ("functional", "all"):
-            functional(args, fixtures, args.output)
+            from copy import copy
+            conservative = copy(args)
+            conservative.public_static = False
+            functional(conservative, fixtures, args.output)
+        if args.mode == "public-functional" or (args.mode == "all" and args.public_static):
+            from public_acceptance import public_functional
+            public_functional(args, fixtures, args.output)
+        if args.mode == "soak":
+            from public_acceptance import mixed_soak
+            mixed_soak(args, fixtures, args.output)
         if args.mode in ("benchmark", "all"):
-            benchmark(args, fixtures, args.output)
+            if args.public_static:
+                from public_acceptance import public_benchmark
+                public_benchmark(args, fixtures, args.output)
+            else:
+                benchmark(args, fixtures, args.output)
     except BaseException as e:
         save(args.output / "outcome.json", {"success": False, "error": repr(e)})
         raise

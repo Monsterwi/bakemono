@@ -23,6 +23,7 @@ jobs:
       - name: Test acceptance tools and truncated-body detection
         env:
           RAZOR_CHECKED_HEY: ${{ runner.temp }}/hey-checked
+          RAZOR_ACCEPTANCE_BINARY: ${{ github.workspace }}/razor
         run: python3 -m unittest discover -s tools -p '*_test.py'
       - name: Test including real binary MISS to HIT
         run: make test
