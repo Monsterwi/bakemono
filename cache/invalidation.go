@@ -57,14 +57,18 @@ func (c *Cache) BeginFill(key, selector []byte) (*FillToken, error) {
 // DeriveFill gives each reserved range object an independent selector while
 // retaining the original pre-origin URL invalidation fence through publication.
 func (c *Cache) DeriveFill(parent *FillToken, key []byte) (*FillToken, error) {
+	unlock := c.lockStripes()
+	defer unlock()
+	return c.deriveFillLocked(parent, key)
+}
+
+func (c *Cache) deriveFillLocked(parent *FillToken, key []byte) (*FillToken, error) {
 	if parent == nil || parent.parent != nil || !strings.HasPrefix(string(key), string(parent.selector)+"\nrange:") {
 		return nil, ErrInvalidated
 	}
 	if err := validateIdentity(key, key); err != nil {
 		return nil, err
 	}
-	unlock := c.lockStripes()
-	defer unlock()
 	if err := c.checkFillEpochsLocked(parent); err != nil {
 		return nil, err
 	}

@@ -116,6 +116,25 @@ func (c *Cache) OpenWriteFillKeyReplacing(ctx context.Context, token *FillToken,
 	}
 	unlock := c.lockStripes()
 	defer unlock()
+	return c.openWriteFillKeyReplacingLocked(ctx, token, key, remove)
+}
+
+// OpenWriteDerivedFill keeps disk wrap from splitting the block snapshot and its
+// writer claim, while retaining the original pre-origin URL invalidation fence.
+func (c *Cache) OpenWriteDerivedFill(ctx context.Context, parent *FillToken, key []byte) (*CacheVC, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock := c.lockStripes()
+	defer unlock()
+	token, err := c.deriveFillLocked(parent, key)
+	if err != nil {
+		return nil, err
+	}
+	return c.openWriteFillKeyReplacingLocked(ctx, token, key, nil)
+}
+
+func (c *Cache) openWriteFillKeyReplacingLocked(ctx context.Context, token *FillToken, key []byte, remove []string) (*CacheVC, error) {
 	if err := c.checkFillLocked(token); err != nil {
 		return nil, err
 	}
