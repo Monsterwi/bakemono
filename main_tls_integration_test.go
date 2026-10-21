@@ -188,12 +188,7 @@ func TestBinaryTLSAndHTTP2(t *testing.T) {
 func startNetworkBinary(t *testing.T, binary, origin string, settings map[string]string, wantFailure ...bool) (string, func()) {
 	t.Helper()
 	dir := t.TempDir()
-	reservation, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := reservation.Addr().(*net.TCPAddr).Port
-	reservation.Close()
+	port := binaryPort(t)
 	records := fmt.Sprintf("CONFIG proxy.config.http.server_ports INT %d\nCONFIG proxy.config.log.logfile_dir STRING %s\nCONFIG proxy.config.http.parent_proxy.upstream_algo STRING round-robin\nCONFIG proxy.config.http.parent_proxy.upstream_targets STRING %s\nCONFIG proxy.config.http.shutdown_timeout INT 2\n", port, dir, origin)
 	for key, value := range settings {
 		records += "CONFIG proxy.config." + key + " STRING " + value + "\n"

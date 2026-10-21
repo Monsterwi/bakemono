@@ -72,6 +72,25 @@ class StartupCleanupTest(unittest.TestCase):
                 self.assertTrue(all(instance.raw.closed for instance in clients))
 
 
+class PortReservationTest(unittest.TestCase):
+    def test_listener_port_avoids_ephemeral_and_actual_other_address_occupancy(self):
+        import socket
+        low, high = map(int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
+        port = acceptance.free_port()
+        self.assertGreaterEqual(port, 1024)
+        self.assertFalse(low <= port <= high, (port, low, high))
+        with socket.socket() as occupied:
+            occupied.bind(("127.0.0.2", port))
+            occupied.listen()
+            def occupied_first(candidates):
+                candidates.remove(port)
+                candidates.insert(0, port)
+            with patch.object(acceptance.random, "shuffle", side_effect=occupied_first):
+                selected = acceptance.free_port()
+            self.assertNotEqual(selected, port)
+            self.assertFalse(low <= selected <= high)
+
+
 class PublicCLITest(unittest.TestCase):
     def test_public_ats_combinations_rejected_before_side_effects(self):
         for mode in ("benchmark", "all"):
