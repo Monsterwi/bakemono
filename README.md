@@ -2,7 +2,7 @@
 
 **Razor 是一个用 Go 实现、借鉴 Apache Traffic Server 缓存架构的 HTTP 对象缓存代理。** 面向下载与分发场景，重点解决热点对象重复回源、大文件区间复用，以及取消、失效和重启时的缓存正确性。
 
-当前版本使用 `net/http`，支持整对象合并回源、1 MiB 固定块 Range 缓存、磁盘缓存恢复、鉴权 PURGE、TLS/HTTP/2 和配置快照热更新。定位为具有真实二进制验收证据的单进程缓存代理；生产容量仍需在目标硬件上测量。
+当前版本使用 `net/http`，支持整对象合并回源、可配置块的 Range/公共静态大 GET 缓存与提交后 RWW、磁盘缓存恢复、鉴权 PURGE、TLS/HTTP/2 和配置快照热更新。定位为具有真实二进制验收证据的单进程缓存代理；生产容量仍需在目标硬件上测量。
 
 功能状态以本 README 和对应版本的验收报告为准，早期设计与状态文档保留供追溯。
 
@@ -182,11 +182,11 @@ python3 tools/hey_benchmark.py \
 
 - 只对明确可共享、受支持的响应进行缓存；不宣称完整实现所有 HTTP 缓存指令。Authorization/Cookie 请求旁路；HEAD MISS 直接访问源站。
 - Range 面向具有稳定强 ETag 的 identity 表示和单区间请求；不做任意 206 响应的通用缓存，也不提供多 Range 块缓存。
-- 所有源站被健康检查摘除时，fresh 完整对象仍可 HIT，但已缓存的 Range 当前会返回 502。这是下一步优先修复的可用性问题。
-- 完整提交后交付会增加冷大对象的首字节等待。没有流式 RWW、stale-if-error、跨节点缓存一致性或 io_uring 后端。
+- 所有源站被健康检查摘除时，fresh 完整对象及完整 fresh Range 区间仍可 HIT；缺块、过期、损坏区间受控失败，不启用已移除的源站。
+- 普通整对象路径等待完整提交；块级 RWW 等待首块提交，不读取未校验/未提交字节。没有 stale-if-error、跨节点缓存一致性或 io_uring 后端。
 - 文件写入完成不等同于逐对象 fsync；异常退出可能安全冷启动相关 stripe。缓存文件需保持单进程独占，格式及恢复约束见 [存储格式](docs/CACHE_STORAGE_FORMAT.md)。
 
-后续优先收敛已有能力：[修复离线源站下的 Range HIT](https://github.com/Monsterwi/bakemono/issues/16)、[明确合并回源的请求等价边界](https://github.com/Monsterwi/bakemono/issues/17)、[依据剖析完成一项效率优化](https://github.com/Monsterwi/bakemono/issues/18)。流式 RWW、内核升级和 io_uring 暂不进入这一版。
+本轮离线 Range、公共静态合并、提交后 RWW 和可选 RAM 策略仍需完成 [HDD/SSD 与 soak 验收 #19](https://github.com/Monsterwi/bakemono/issues/19)。[性能剖析 #18](https://github.com/Monsterwi/bakemono/issues/18)、内核升级和 io_uring 不纳入本轮。
 
 ## 项目结构
 
