@@ -348,6 +348,31 @@ func (s *Server) readRangeBlock(r *http.Request, key []byte, m *rangeManifest, i
 	}
 	return data, info, release, nil
 }
+
+// Preparation does not pin directory entries while another reader rolls the disk.
+func (s *Server) readPreparedRangeBlock(r *http.Request, root []byte, parent *cache.FillToken, m *rangeManifest, index int64, origin *proxy.Origin, reused bool) ([]byte, func(), bool, error) {
+	data, _, release, err := s.readRangeBlock(r, rangeBlockKey(root, m, index), m, index, false)
+	if errors.Is(err, cache.ErrNotResident) || errors.Is(err, cache.ErrWriteInProgress) {
+		// The failed read has released its reservation. Check the original URL
+		// fence and any observed version change before recovering the fixed block.
+		rt := requestRuntime(r)
+		releaseGuard, guardErr := rt.rangeReaders.Acquire(r.Context(), time.Duration(rt.config.QueueTimeout)*time.Second)
+		if guardErr != nil {
+			return nil, release, false, guardErr
+		}
+		guardErr = s.checkRangeVersion(root, parent, m)
+		releaseGuard()
+		if guardErr != nil {
+			return nil, release, false, guardErr
+		}
+		reused = false
+		_, err = s.ensureRangeBlock(r, root, parent, m, index, origin, false)
+		if err == nil {
+			data, _, release, err = s.readRangeBlock(r, rangeBlockKey(root, m, index), m, index, false)
+		}
+	}
+	return data, release, reused, err
+}
 func (s *Server) rangeBlockCached(r *http.Request, key []byte, m *rangeManifest, index int64) bool {
 	_, info, release, err := s.readRangeBlock(r, key, m, index, false)
 	release()
@@ -608,13 +633,14 @@ func (s *Server) serveBlocks(w http.ResponseWriter, r *http.Request, root []byte
 			return true
 		}
 	}
-	data, _, releaseBlock, err := s.readRangeBlock(r, rangeBlockKey(root, m, first), m, first, false)
+	data, releaseBlock, blockReused, err := s.readPreparedRangeBlock(r, root, parent, m, first, origin, blockReused)
 	defer func() { releaseBlock() }()
 	if err != nil {
 		s.upstreamError(w, r, err)
 		return true
 	}
 
+	hit = hit && blockReused
 	if err = s.checkRangeVersion(root, parent, m); err != nil {
 		http.Error(w, "Range invalidated", http.StatusServiceUnavailable)
 		return true
@@ -676,11 +702,12 @@ func (s *Server) serveBlocks(w http.ResponseWriter, r *http.Request, root []byte
 				}
 				hit = hit && blockReused
 			}
-			data, _, releaseBlock, err = s.readRangeBlock(r, rangeBlockKey(root, m, index), m, index, false)
+			data, releaseBlock, blockReused, err = s.readPreparedRangeBlock(r, root, parent, m, index, origin, blockReused)
 			if err != nil {
 				panic(http.ErrAbortHandler)
 			}
 		}
+		hit = hit && blockReused
 		if s.checkRangeVersion(root, parent, m) != nil {
 			panic(http.ErrAbortHandler)
 		}

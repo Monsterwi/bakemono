@@ -205,7 +205,7 @@ func (c *Cache) OpenReadCommitted(key []byte) (*CacheVC, error) {
 		return nil, ErrCacheClosed
 	}
 	if stripe.OpenDir.Get(key) != nil {
-		return nil, fmt.Errorf("cache write in progress")
+		return nil, ErrWriteInProgress
 	}
 	return &CacheVC{Stripe: stripe, Key: append([]byte(nil), key...), generation: stripe.OpenDir.Generation(), reading: true, reader: NewCacheReader(stripe, key)}, nil
 }
