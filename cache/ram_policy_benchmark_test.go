@@ -25,7 +25,7 @@ func BenchmarkRAMTrace(b *testing.B) {
 						for i := range keys {
 							keys[i] = []byte(fmt.Sprintf("object-%d", i))
 						}
-						for _, key := range keys[:min(len(keys), capacity/size)] {
+						for _, key := range keys[len(keys)-min(len(keys), capacity/size):] {
 							c.Put(key, value)
 						}
 						c.CleanUp()
@@ -33,7 +33,7 @@ func BenchmarkRAMTrace(b *testing.B) {
 						runtime.ReadMemStats(&before)
 						hits := 0
 						peak := c.Size()
-						hot := max(1, len(keys)/16)
+						hot := max(1, min(128, len(keys)/16))
 						b.ReportAllocs()
 						b.SetBytes(int64(size))
 						b.ResetTimer()
@@ -76,6 +76,7 @@ func BenchmarkRAMTrace(b *testing.B) {
 						b.ReportMetric(float64(peak), "peak-resident-B")
 						b.ReportMetric(float64(settled.ResidentBytes), "resident-B")
 						b.ReportMetric(float64(settled.GhostEntries), "ghost-entries")
+						b.ReportMetric(float64(settled.Evictions), "evictions")
 						b.ReportMetric(float64(settled.EstimatedMetadataBytes), "metadata-est-B")
 						b.ReportMetric(float64(after.NumGC-before.NumGC), "GCs")
 					})

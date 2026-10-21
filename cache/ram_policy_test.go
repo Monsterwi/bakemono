@@ -128,7 +128,11 @@ func TestS3FIFOPromotionGhostAndDeletion(t *testing.T) {
 		t.Fatalf("unbounded queues: %+v", st)
 	}
 	// A deleted ghost must not influence a subsequent admission or revive a value.
+	ghosts := c.Stats().GhostEntries
 	c.Delete([]byte("k93"))
+	if c.Stats().GhostEntries != ghosts-1 {
+		t.Fatal("Delete did not remove known ghost entry")
+	}
 	before := c.Stats().GhostHits
 	c.Put([]byte("k93"), value)
 	if c.Stats().GhostHits != before {
