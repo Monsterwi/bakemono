@@ -28,6 +28,10 @@ func TestPublicStaticHundredClientsShareCanonicalOriginRequest(t *testing.T) {
 	defer once.Do(func() { close(release) })
 	headers := make(chan http.Header, 100)
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		headers <- r.Header.Clone()
 		<-release
 		w.Header().Set("Cache-Control", "public,max-age=3600")
@@ -148,6 +152,10 @@ func TestPublicStaticPrivateResponsesRemainExclusive(t *testing.T) {
 			defer once.Do(func() { close(release) })
 			var calls atomic.Int32
 			s, _ := publicCacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodHead {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
 				calls.Add(1)
 				<-release
 				w.Header().Set("Cache-Control", "public,max-age=3600")
@@ -164,9 +172,9 @@ func TestPublicStaticPrivateResponsesRemainExclusive(t *testing.T) {
 				fmt.Fprint(w, "creator only")
 			})
 			first := publicRequest(s, context.Background(), "User-Agent", "first")
-			waitFillStats(t, s, func(st server.Stats) bool { return st.Origin.InFlight == 1 })
+			waitFillStats(t, s, func(st server.Stats) bool { return st.Origin.InFlight == 1 && calls.Load() == 1 })
 			follower := publicRequest(s, context.Background(), "User-Agent", "second")
-			waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 })
+			waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 && st.SharedFillJoined > 0 })
 			once.Do(func() { close(release) })
 			if got := <-first; got.Code != 200 || got.Body.String() != "creator only" {
 				t.Fatalf("creator %d %q", got.Code, got.Body.String())
@@ -213,6 +221,10 @@ func TestPublicStaticAuthenticatedRequestsRetainProxyIdentity(t *testing.T) {
 func TestPublicStaticSchemeRawQueryPurgeAndRestartBoundary(t *testing.T) {
 	var calls atomic.Int32
 	s, cfg := publicCacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		calls.Add(1)
 		w.Header().Set("Cache-Control", "public,max-age=3600")
 		fmt.Fprintf(w, "%s|%s", r.Header.Get("X-Forwarded-Proto"), r.URL.RawQuery)
@@ -262,6 +274,10 @@ func TestPublicStaticCreatorCancellationKeepsFollower(t *testing.T) {
 	var once sync.Once
 	defer once.Do(func() { close(release) })
 	s, _ := publicCacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		close(entered)
 		select {
 		case <-release:
@@ -276,7 +292,7 @@ func TestPublicStaticCreatorCancellationKeepsFollower(t *testing.T) {
 	first := publicRequest(s, ctx, "User-Agent", "creator")
 	<-entered
 	follower := publicRequest(s, context.Background(), "User-Agent", "follower")
-	waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 })
+	waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 && st.SharedFillJoined > 0 })
 	cancel()
 	<-first
 	once.Do(func() { close(release) })
@@ -350,7 +366,7 @@ func TestPublicStaticLastSubscriberCancellationDrainsProducer(t *testing.T) {
 	first := publicRequest(s, firstCtx, "User-Agent", "creator")
 	<-entered
 	follower := publicRequest(s, secondCtx, "User-Agent", "follower")
-	waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 })
+	waitFillStats(t, s, func(st server.Stats) bool { return st.SharedFillWaiters == 2 && st.SharedFillJoined > 0 })
 	firstCancel()
 	secondCancel()
 	<-first
@@ -417,6 +433,10 @@ func TestPublicStaticLogsOnlyHashedClientCorrelation(t *testing.T) {
 func TestPublicStaticModeUsesSeparatePersistentNamespace(t *testing.T) {
 	var calls atomic.Int32
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		calls.Add(1)
 		w.Header().Set("Cache-Control", "public,max-age=3600")
 		fmt.Fprint(w, r.Header.Get("User-Agent"))

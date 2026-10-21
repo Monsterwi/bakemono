@@ -55,3 +55,16 @@ func (l *Limiter) Acquire(ctx context.Context, wait time.Duration) (func(), erro
 	}
 }
 func (l *Limiter) Stats() Stats { return Stats{len(l.slots), len(l.queue), l.rejected.Load()} }
+
+// TryAcquire skips optional work rather than waiting behind a saturated budget.
+func (l *Limiter) TryAcquire(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case l.slots <- struct{}{}:
+		return func() { <-l.slots }, nil
+	default:
+		return nil, ErrOverloaded
+	}
+}

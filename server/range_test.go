@@ -74,11 +74,8 @@ func TestRangeVersionChangeRejectsMixedBodyAndRecovers(t *testing.T) {
 		w.Header().Set("Cache-Control", "public,max-age=3600")
 		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(data))
 	})
+	assertIncompleteRange(t, s, "bytes=0-2097151", 2<<20)
 	got := fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-2097151"}})
-	if got.Code != 502 {
-		t.Fatalf("version change status=%d length=%d", got.Code, got.Body.Len())
-	}
-	got = fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-2097151"}})
 	if got.Code != 206 || !bytes.Equal(got.Body.Bytes(), newer) {
 		t.Fatalf("new version recovery status=%d length=%d", got.Code, got.Body.Len())
 	}
@@ -254,14 +251,34 @@ func TestRangePurgeFencesAllBlocksAndKeepsAdjacentURL(t *testing.T) {
 	if got.Code != 206 {
 		t.Fatal(got.Code)
 	}
-	first := startFill(s, context.Background(), http.Header{"Range": {"bytes=0-2097151"}})
+	endpoint := httptest.NewServer(s)
+	defer func() { once.Do(func() { close(release) }); endpoint.Close() }()
+	first := make(chan error, 1)
+	go func() {
+		req, _ := http.NewRequest("GET", endpoint.URL+"/item", nil)
+		req.Host = "cache.test"
+		req.Header.Set("Range", "bytes=0-2097151")
+		resp, err := endpoint.Client().Do(req)
+		if err != nil {
+			first <- err
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err == nil || len(body) == len(data) {
+			err = fmt.Errorf("pre-PURGE completed: status=%d bytes=%d", resp.StatusCode, len(body))
+		} else {
+			err = nil
+		}
+		first <- err
+	}()
 	<-entered
 	if got = purge(s, "http://cache.test/item", "test-secret"); got.Code != 200 {
 		t.Fatal(got.Code)
 	}
 	once.Do(func() { close(release) })
-	if got = <-first; got.Code == 206 {
-		t.Fatal("pre-PURGE range completed")
+	if err := <-first; err != nil {
+		t.Fatal(err)
 	}
 	if got = fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-2097151"}}); got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data) {
 		t.Fatalf("post purge=%d bytes=%d", got.Code, got.Body.Len())
@@ -313,36 +330,40 @@ func TestRangeCleanRestartReusesCompleteBlocksAndRefetchesInterruptedBlock(t *te
 	defer upstream.Close()
 	path := filepath.Join(t.TempDir(), "cache")
 	s, _ := newRangeDiskServer(t, path, 32<<20, []string{upstream.URL}, 64<<20)
-	got := fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-2097151"}})
-	if got.Code != 502 {
-		t.Fatalf("truncated status=%d", got.Code)
-	}
+	assertIncompleteRange(t, s, "bytes=0-2097151", 2<<20)
 	if err := s.Shutdown(); err != nil {
 		t.Fatal(err)
 	}
 	broken.Store(false)
 	next, _ := newRangeDiskServer(t, path, 32<<20, []string{upstream.URL}, 64<<20)
-	got = fetch(next, "http://cache.test/item", http.Header{"Range": {"bytes=0-2097151"}})
+	got := fetch(next, "http://cache.test/item", http.Header{"Range": {"bytes=0-2097151"}})
 	if got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data) || originBytes.Load() != 2<<20 {
 		t.Fatalf("restart status=%d length=%d total origin=%d", got.Code, got.Body.Len(), originBytes.Load())
 	}
 }
 
-func TestRangeCapacityRejectsBeforeBlockFetch(t *testing.T) {
-	var gets atomic.Int32
+func TestRangeResponseLargerThanDiskStreamsThroughWindow(t *testing.T) {
+	data := bytes.Repeat([]byte("window"), (40<<20)/6+1)
+	data = data[:40<<20]
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("ETag", `"one"`)
+		w.Header().Set("ETag", `"window"`)
 		w.Header().Set("Cache-Control", "public,max-age=3600")
-		w.Header().Set("Content-Length", "41943040")
-		if r.Method == "GET" {
-			gets.Add(1)
-		}
+		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(data))
 	}))
 	defer upstream.Close()
 	s, _ := newRangeDiskServer(t, filepath.Join(t.TempDir(), "cache"), 32<<20, []string{upstream.URL}, 64<<20)
-	got := fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-41943039"}})
-	if got.Code != 503 || gets.Load() != 0 {
-		t.Fatalf("capacity status=%d block fetches=%d", got.Code, gets.Load())
+	endpoint := httptest.NewServer(s)
+	defer endpoint.Close()
+	req, _ := http.NewRequest("GET", endpoint.URL+"/item", nil)
+	req.Header.Set("Range", "bytes=0-41943039")
+	resp, err := endpoint.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 206 || !bytes.Equal(body, data) {
+		t.Fatalf("window response status=%d bytes=%d err=%v", resp.StatusCode, len(body), err)
 	}
 }
 

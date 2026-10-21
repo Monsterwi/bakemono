@@ -59,6 +59,9 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		s.proxyWithoutCache(w, r)
 		return
 	}
+	if requestRuntime(r).config.SharedFillPublicStatic == 1 && blockGETEligible(r) && s.serveBlocks(w, r, key, true) {
+		return
+	}
 	s.serveSharedMiss(w, r, key, token)
 }
 

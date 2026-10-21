@@ -22,12 +22,12 @@ var ErrReloadBusy = errors.New("reload busy: retired runtime still has active re
 // A request and each independent producer retain one immutable runtime until all
 // body I/O ends. At most current + one retired runtime can consume resources.
 type runtimeSnapshot struct {
-	config             *appconfig.Config
-	proxy              *proxy.HTTPProxy
-	admission, writers *budget.Limiter
-	namespace          string
-	version            uint64
-	refs               int // guarded by Server.mu
+	config                           *appconfig.Config
+	proxy                            *proxy.HTTPProxy
+	admission, writers, rangeReaders *budget.Limiter
+	namespace                        string
+	version                          uint64
+	refs                             int // guarded by Server.mu
 }
 
 type runtimeContextKey struct{}
@@ -52,7 +52,9 @@ func newRuntime(cfg *appconfig.Config, p *proxy.HTTPProxy, version uint64) (*run
 	if cfg.SharedFillPublicStatic == 1 {
 		rt.namespace += ":" + proxy.PublicRequestVersion
 	}
-	rt.writers = budget.New(min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation()), cfg.MaxQueuedCacheWriters)
+	slots := min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation())
+	rt.writers = budget.New(slots, cfg.MaxQueuedCacheWriters)
+	rt.rangeReaders = budget.New(slots, cfg.MaxRequests)
 	return rt, nil
 }
 
@@ -146,10 +148,11 @@ type restartConfig struct {
 	configDir, logDir, accessLog, errorLog, cert, key, purgeToken string
 	port, connections, headerTimeout, idleTimeout                 int
 	publicStatic                                                  int
+	rangeBlockBytes                                               int
 }
 
 func restartSettings(c *appconfig.Config) restartConfig {
-	return restartConfig{c.ConfigDir, c.LogfileDir, c.AccessLogFilename, c.ErrorLogFilename, c.TLSCertFile, c.TLSKeyFile, c.PurgeToken, c.ServerPort, c.MaxClientConnections, c.RequestHeaderTimeout, c.KeepAliveTimeout, c.SharedFillPublicStatic}
+	return restartConfig{c.ConfigDir, c.LogfileDir, c.AccessLogFilename, c.ErrorLogFilename, c.TLSCertFile, c.TLSKeyFile, c.PurgeToken, c.ServerPort, c.MaxClientConnections, c.RequestHeaderTimeout, c.KeepAliveTimeout, c.SharedFillPublicStatic, c.RangeBlockBytes}
 }
 
 // File content is part of restart compatibility; paths alone miss in-place edits.
