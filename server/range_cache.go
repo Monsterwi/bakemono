@@ -23,6 +23,7 @@ const rangeBlockSize int64 = 1 << 20
 
 var errRangeBypass = errors.New("range representation unsupported")
 var errRangeChanged = errors.New("range representation changed")
+var errRangeUnavailable = errors.New("range origin unavailable")
 
 type rangeManifest struct {
 	Version                            int
@@ -183,6 +184,9 @@ func (s *Server) ensureRangeManifest(r *http.Request, root, key []byte, parent *
 		if _, info, err := s.readRangeManifest(key, origin.Identity(), variant); err == nil && requestFresh(request, info, s.now()) {
 			return fillResult{key: key}
 		}
+		if !origin.Available() {
+			return fillResult{err: errRangeUnavailable}
+		}
 		request.Method = http.MethodHead
 		request.Header.Del("Range")
 		request.Header.Del("If-Range")
@@ -321,6 +325,9 @@ func (s *Server) ensureRangeBlock(r *http.Request, root []byte, parent *cache.Fi
 		if _, info, err := s.readRangeBlock(key, m, index); err == nil && s.rangeBlockFresh(request, info) {
 			return fillResult{key: key}
 		}
+		if !origin.Available() {
+			return fillResult{err: errRangeUnavailable}
+		}
 		start := index * rangeBlockSize
 		end := min(start+rangeBlockSize, m.Total) - 1
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
@@ -380,6 +387,10 @@ func (s *Server) rangeFits(root []byte, m *rangeManifest, start, end int64) bool
 	return true
 }
 func (s *Server) proxyRangeBypass(w http.ResponseWriter, r *http.Request, origin *proxy.Origin) {
+	if !origin.Available() {
+		s.upstreamError(w, r, errRangeUnavailable)
+		return
+	}
 	s.cacheStatus(w, "BYPASS")
 	resp, _, err := origin.ProxyWithOriginHeaders(r)
 	if err != nil {
@@ -401,13 +412,53 @@ func (s *Server) serveRange(w http.ResponseWriter, r *http.Request, root []byte)
 		s.proxyWithoutCache(w, r)
 		return
 	}
-	origin, err := resources.proxy.SelectOrigin(r)
-	if err != nil {
-		s.upstreamError(w, r, err)
-		return
+	var origin *proxy.Origin
+	var m *rangeManifest
+	var info *cache.CacheHTTPInfo
+	cachedReady := false
+	// Prefer a healthy source; an unhealthy source is usable only for a complete
+	// fresh interval. Pin one source before sending, never stitch replicas.
+	for _, candidate := range resources.proxy.ConfiguredOrigins() {
+		key, variant := rangeIdentity(root, candidate, r)
+		cached, metadata, readErr := s.readRangeManifest(key, candidate.Identity(), variant)
+		if readErr != nil || !requestFresh(r, metadata, s.now()) {
+			continue
+		}
+		if candidate.Available() {
+			origin, m, info, cachedReady = candidate, cached, metadata, false
+			break
+		}
+		if origin != nil {
+			continue
+		}
+		if value := r.Header.Get("If-Range"); value != "" && (!strongRangeTag(value) || value != cached.ETag) {
+			continue
+		}
+		start, end, boundsErr := rangeBounds(r.Header.Get("Range"), cached.Total)
+		complete := true
+		if boundsErr == nil {
+			for index := start / rangeBlockSize; index <= end/rangeBlockSize; index++ {
+				_, blockInfo, err := s.readRangeBlock(rangeBlockKey(root, cached, index), cached, index)
+				if err != nil || !s.rangeBlockFresh(r, blockInfo) {
+					complete = false
+					break
+				}
+			}
+		}
+		if complete {
+			origin, m, info, cachedReady = candidate, cached, metadata, true
+		}
 	}
-	key, variant := rangeIdentity(root, origin, r)
-	m, info, hit, err := s.ensureRangeManifest(r, root, key, parent, origin, variant)
+	hit := m != nil
+	if origin == nil {
+		origin, err = resources.proxy.SelectOrigin(r)
+		if err != nil {
+			s.upstreamError(w, r, err)
+			return
+		}
+		key, variant := rangeIdentity(root, origin, r)
+		m, info, hit, err = s.ensureRangeManifest(r, root, key, parent, origin, variant)
+	}
 	if errors.Is(err, errRangeBypass) {
 		s.proxyRangeBypass(w, r, origin)
 		return
@@ -433,7 +484,7 @@ func (s *Server) serveRange(w http.ResponseWriter, r *http.Request, root []byte)
 		http.Error(w, "Range exceeds cache capacity", http.StatusServiceUnavailable)
 		return
 	}
-	for index := start / rangeBlockSize; index <= end/rangeBlockSize; index++ {
+	for index := start / rangeBlockSize; !cachedReady && index <= end/rangeBlockSize; index++ {
 		reused, err := s.ensureRangeBlock(r, root, parent, m, index, origin)
 		hit = hit && reused
 		if errors.Is(err, errRangeBypass) {

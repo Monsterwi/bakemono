@@ -627,15 +627,11 @@ def functional(args, fixtures, output):
         wait_for(lambda: client.request(product, "/small-health-probe", headers=probe_headers, status=None)["status"] == 502,
                  "all origins removed by health checks")
         client.checked(product, "/small-health-full")
-        result = client.request(product, "/small-health-range", headers={"Range": "bytes=0-16"}, expected=client.expected("/small-health-range", bounds=(0, 16)), status=206)
-        if result["status"] == 206:
-            assert not result["error"], result
-        else:
-            assert result["status"] == 502 and result["error"] == "status 502, expected 206", result
-        # An explicit observed availability limitation, never counted as a passed HIT.
-        evidence.append({"name": "fresh Range with all origins unhealthy", "result": "LIMITATION" if result["status"] != 206 else "PASS",
-                         "status": result["status"], "explanation": "Range selects a healthy pinned origin before cache lookup; full-object HIT remains available."})
-        save(output / "functional.json", evidence)
+        before = origin.snapshot("/small-health-range")
+        client.checked(product, "/small-health-range", headers={"Range": "bytes=0-16"}, expected=client.expected("/small-health-range", bounds=(0, 16)), status=206)
+        after = origin.snapshot("/small-health-range")
+        assert after == before, (before, after)
+        record("fresh Range with all origins unhealthy", status=206, origin_delta={key: after[key] - before[key] for key in before})
         origin.healthy = True
         wait_for(lambda: client.request(product, "/small-health-probe", headers=probe_headers, status=None)["status"] == 200,
                  "healthy origin rejoined")
