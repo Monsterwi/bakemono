@@ -165,12 +165,12 @@ class Origin:
                         f.seek(start)
                         remaining = length
                         while remaining:
-                            block = f.read(min(CHUNK, remaining))
+                            block = f.read(min(CHUNK, remaining // 2 if rule.get("truncate") else remaining))
                             self.wfile.write(block)
                             with owner.lock:
                                 row["bytes"] += len(block)
                             remaining -= len(block)
-                            if rule.get("truncate") and row["bytes"] >= CHUNK:
+                            if rule.get("truncate"):
                                 self.close_connection = True
                                 return
                             time.sleep(rule.get("chunk_delay", 0))
