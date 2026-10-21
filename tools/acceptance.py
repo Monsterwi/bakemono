@@ -202,7 +202,8 @@ class Product:
             if getattr(args, "cache_root", None):
                 cache_dir = args.cache_root / self.dir.name
                 cache_dir.mkdir(parents=True, exist_ok=False)
-            (self.dir / "storage.config").write_text(str(cache_dir / "cache.db") + f" {capacity}M\n")
+            self.cache_file = cache_dir / "cache.db"
+            (self.dir / "storage.config").write_text(str(self.cache_file) + f" {capacity}M\n")
             self.command = [str(args.binary), "-c", str(self.dir)]
         else:
             meta = json.loads(args.ats_environment.read_text())
@@ -708,6 +709,17 @@ def benchmark(args, fixtures, output):
                         bounds = (0, 16 * MIB - 1)
                         client.batch(product, origin, f"range16MiB-c{c}", path, c, count=1, duration=args.seconds,
                                      headers={"Range": "bytes=0-%d" % bounds[1]}, bounds=bounds)
+                    path = "/large-disk-read-probe"
+                    client.checked(product, path)
+                    for repeat in range(args.repeats):
+                        product.stop()
+                        # Only our closed cache file: no global drop_caches or other workloads.
+                        with product.cache_file.open("rb") as cache_file:
+                            os.fsync(cache_file.fileno())
+                            os.posix_fadvise(cache_file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+                        product.start()
+                        summary = client.batch(product, origin, f"large-file-cache-cold-r{repeat + 1}", path, 1, count=1)
+                        assert summary["origin"]["get"] == 0, summary
                 # A quiet post-load sample makes drained tasks/leases observable.
                 time.sleep(1)
                 if kind == "razor":
