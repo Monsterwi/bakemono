@@ -812,8 +812,10 @@ def main():
     args = p.parse_args()
     assert args.seconds > 0 and args.repeats > 0
     args.binary, args.output = args.binary.resolve(), args.output.resolve()
+    if args.public_static:
+        assert args.products == ["razor"], "--public-static requires --products razor"
     if args.mode in ("public-functional", "soak"):
-        assert args.public_static and args.products == ["razor"], "public modes require --public-static --products razor"
+        assert args.public_static, "public modes require --public-static"
     if args.mode in ("benchmark", "all") and "ats" in args.products:
         assert args.ats_environment, "ATS environment JSON is required for the comparison"
     args.output.mkdir(parents=True, exist_ok=False)

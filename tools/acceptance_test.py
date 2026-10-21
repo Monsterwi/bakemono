@@ -72,6 +72,47 @@ class StartupCleanupTest(unittest.TestCase):
                 self.assertTrue(all(instance.raw.closed for instance in clients))
 
 
+class PublicCLITest(unittest.TestCase):
+    def test_public_ats_combinations_rejected_before_side_effects(self):
+        for mode in ("benchmark", "all"):
+            for products in (("ats",), ("razor", "ats")):
+                with self.subTest(mode=mode, products=products), tempfile.TemporaryDirectory() as directory:
+                    output, cache = Path(directory) / "output", Path(directory) / "cache"
+                    argv = ["acceptance.py", "--binary", "/missing/razor", "--output", str(output),
+                            "--cache-root", str(cache), "--mode", mode, "--public-static", "--products", *products,
+                            "--ats-environment", "/missing/ats.json"]
+                    with patch.object(sys, "argv", argv), patch.object(acceptance, "create_fixtures", side_effect=AssertionError("fixture creation reached")) as fixtures, patch.object(acceptance.Product, "start") as process:
+                        with self.assertRaisesRegex(AssertionError, "public-static requires --products razor"):
+                            acceptance.main()
+                        fixtures.assert_not_called()
+                        process.assert_not_called()
+                    self.assertFalse(output.exists())
+                    self.assertFalse(cache.exists())
+
+    def test_public_razor_modes_and_conservative_ats_route_correctly(self):
+        import public_acceptance
+        for mode, public, products in (("benchmark", True, ["razor"]), ("all", True, ["razor"]), ("benchmark", False, ["ats"])):
+            with self.subTest(mode=mode, public=public), tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
+                argv = ["acceptance.py", "--binary", "/missing/razor", "--output", str(Path(directory) / "output"),
+                        "--mode", mode, "--products", *products, "--ats-environment", "/missing/ats.json"]
+                if public:
+                    argv.append("--public-static")
+                cleanup.enter_context(patch.object(sys, "argv", argv))
+                cleanup.enter_context(patch.object(acceptance, "create_fixtures", return_value={}))
+                cleanup.enter_context(patch.object(acceptance, "file_hash", return_value="probe-hash"))
+                cleanup.enter_context(patch.object(acceptance.subprocess, "check_output", return_value="probe"))
+                conservative = cleanup.enter_context(patch.object(acceptance, "benchmark"))
+                cleanup.enter_context(patch.object(acceptance, "functional"))
+                public_functional = cleanup.enter_context(patch.object(public_acceptance, "public_functional"))
+                public_benchmark = cleanup.enter_context(patch.object(public_acceptance, "public_benchmark"))
+                acceptance.main()
+                selected = public_benchmark if public else conservative
+                selected.assert_called_once()
+                self.assertEqual(selected.call_args.args[0].products, products)
+                (conservative if public else public_benchmark).assert_not_called()
+                self.assertEqual(public_functional.call_count, int(public and mode == "all"))
+
+
 class DeviceSamplingTest(unittest.TestCase):
     def test_diskstats_uses_sectors_not_completed_operations(self):
         text = "8 32 sdc 100 2 1234 7 200 3 5678 9 0 456 789\n8 33 sdc1 1 0 1 0 2 0 2 0 0 3 4\n"
