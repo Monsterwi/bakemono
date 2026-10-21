@@ -181,17 +181,10 @@ func (s *Server) rangeFill(r *http.Request, key []byte, token *cache.FillToken, 
 
 func (s *Server) reserveRangeObject(task *fillTask, key []byte, parent *cache.FillToken, resources fillResources) (*cacheFill, error) {
 	ctx, cancel := context.WithCancel(task.ctx)
-	// Re-derive from the original URL fence after task admission; a prior task may
-	// have aborted its reservation between the initial snapshot and this producer.
-	token, err := s.cache.DeriveFill(parent, key)
+	vc, err := s.cache.OpenWriteDerivedFill(ctx, parent, key)
 	if err != nil {
 		cancel()
-		return nil, err
-	}
-	vc, err := s.cache.OpenWriteFillKeyReplacing(ctx, token, key, nil)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("%w: %v", errRangeOwnership, err)
+		return nil, fmt.Errorf("%w: %w", errRangeOwnership, err)
 	}
 	return &cacheFill{vc: vc, cancel: cancel, timeout: time.Duration(resources.config.CacheWriteTimeout) * time.Second, stats: &s.counters}, nil
 }

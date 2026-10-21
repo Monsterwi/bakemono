@@ -1,12 +1,154 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"testing"
 )
+
+func TestDerivedAdmissionAfterStorageWrapKeepsOriginalFence(t *testing.T) {
+	c := safetyCache(t)
+	rootKey := []byte("/range")
+	key := []byte("/range\nrange:block:one")
+	parent, err := c.BeginFill(rootKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := c.DeriveFill(parent, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripe := c.KeyToStripe(key)
+	padding := bytes.Repeat([]byte("x"), 1<<20)
+	wrapped := false
+	for round := 0; round < 40; round++ {
+		writeStorageObject(t, c, "unrelated-wrap", padding)
+		stripe.mu.RLock()
+		wrapped = stripe.generation != stale.wraps[0]
+		stripe.mu.RUnlock()
+		if wrapped {
+			break
+		}
+	}
+	if !wrapped {
+		t.Fatal("test did not wrap the disk")
+	}
+	if err = c.CheckFill(parent); err != nil {
+		t.Fatalf("unrelated disk wrap changed URL fence: %v", err)
+	}
+	if writer, err := c.OpenWriteFillKeyReplacing(context.Background(), stale, key, nil); !errors.Is(err, ErrInvalidated) {
+		if writer != nil {
+			writer.Abort(io.EOF)
+		}
+		t.Fatalf("old split snapshot should be stale after disk wrap: %v", err)
+	}
+	writer, err := c.OpenWriteDerivedFill(context.Background(), parent, key)
+	if err != nil {
+		t.Fatalf("valid original URL fence could not reserve a block: %v", err)
+	}
+	if _, err = writer.Write([]byte("verified")); err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertInvalidationBody(t, c, string(key), "verified")
+}
+
+func TestDerivedAdmissionRejectsInvalidParentsAndCancelledContext(t *testing.T) {
+	for _, name := range []string{"purge", "policy", "foreign-key", "derived-parent", "nil-parent", "cancelled", "closed"} {
+		t.Run(name, func(t *testing.T) {
+			c := safetyCache(t)
+			rootKey := []byte("/range")
+			key := []byte("/range\nrange:block:one")
+			parent, err := c.BeginFill(rootKey, rootKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			want := ErrInvalidated
+			switch name {
+			case "purge":
+				_, err = c.PurgeSelector(rootKey, false)
+			case "policy":
+				err = c.InvalidateFill(parent)
+			case "foreign-key":
+				key = []byte("/other\nrange:block:one")
+			case "derived-parent":
+				parent, err = c.DeriveFill(parent, key)
+			case "nil-parent":
+				parent = nil
+			case "cancelled":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+				want = context.Canceled
+			case "closed":
+				err = c.Close()
+				want = ErrCacheClosed
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			writer, err := c.OpenWriteDerivedFill(ctx, parent, key)
+			if writer != nil {
+				writer.Abort(io.EOF)
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("admission error=%v, want %v", err, want)
+			}
+		})
+	}
+}
+
+func TestDerivedAdmissionPreservesOwnerAndPublicationFence(t *testing.T) {
+	for _, name := range []string{"owner-only", "purge", "policy"} {
+		t.Run(name, func(t *testing.T) {
+			c := safetyCache(t)
+			rootKey := []byte("/range")
+			key := []byte("/range\nrange:block:one")
+			parent, err := c.BeginFill(rootKey, rootKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writer, err := c.OpenWriteDerivedFill(context.Background(), parent, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = writer.Write([]byte("old")); err != nil {
+				t.Fatal(err)
+			}
+			other, err := c.OpenWriteDerivedFill(context.Background(), parent, key)
+			if other != nil {
+				other.Abort(io.EOF)
+			}
+			if err == nil {
+				t.Fatal("another caller took the active block writer")
+			}
+			if name == "owner-only" {
+				if err = writer.Close(); err != nil {
+					t.Fatalf("rejected caller damaged the owner: %v", err)
+				}
+				assertInvalidationBody(t, c, string(key), "old")
+				return
+			}
+			if name == "policy" {
+				err = c.InvalidateFill(parent)
+			} else {
+				_, err = c.PurgeSelector(rootKey, false)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = writer.Close(); !errors.Is(err, ErrInvalidated) {
+				t.Fatalf("writer escaped its original URL fence: %v", err)
+			}
+		})
+	}
+}
 
 func TestDerivedWriterRetainsOriginalPolicyFence(t *testing.T) {
 	c := safetyCache(t)
