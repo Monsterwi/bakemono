@@ -131,12 +131,16 @@ python3 tools/acceptance.py \
 
 `--cache-root` 也必须尚不存在，工具不会清理已有缓存。压测包括热缓存、冷热门对象、唯一长尾 URL、混合大小对象、Range、慢源站与慢客户端；混合负载按每个客户端洗牌后的加权 URL 列表循环，实际比例记录在结果中。ATS 对照入口也在该工具中，但现有适配器面向 **ATS 9.2 的 records.config/runroot**；ATS 10.2 的环境适配尚未验收，不能直接宣称可用。
 
-另提供 [hey 交叉测量工具](tools/hey_benchmark.py)，复用同一源站、进程和采样机制，使用固定 `hey v0.1.4` 测量热缓存，减少 Python 客户端对吞吐的影响。每批前后验证 SHA256；hey 本身检查状态、传输错误和声明的正文长度，不逐响应计算 hash。工具还在恢复完成后，对本项目静止的缓存文件执行 `fsync`/`POSIX_FADV_DONTNEED`，并要求实际读盘字节达到对象大小的 99%，单独验证近全量物理冷读。逐出是建议，不能假定每一页均被清除。
+另提供 [hey 交叉测量工具](tools/hey_benchmark.py)，复用同一源站、进程和采样机制，减少 Python 客户端对吞吐的影响。原版 hey v0.1.4 忽略正文读取错误，故使用 [独立构建脚本](tools/build_hey.py) 补上一行实际读取字节和错误记账，并以真实截断源站回归验证。每批前后验证 SHA256；压测客户端逐响应读取正文并报告读取错误，批次汇总实际字节，不逐响应计算 hash。工具校验构建清单和二进制 hash，拒绝误用未修正版。
+
+工具还在恢复完成后，对本项目静止的缓存文件执行 `fsync`/`POSIX_FADV_DONTNEED`，并要求实际读盘字节达到对象大小的 99%，单独验证近全量物理冷读。逐出是建议，不能假定每一页均被清除。
 
 ```bash
-GOBIN=/path/to/tools go install github.com/rakyll/hey@v0.1.4
+python3 tools/build_hey.py --output /path/to/tools/hey-checked
+RAZOR_CHECKED_HEY=/path/to/tools/hey-checked \
+  python3 -m unittest discover -s tools -p '*_test.py'
 python3 tools/hey_benchmark.py \
-  --binary "$PWD/razor" --hey /path/to/tools/hey \
+  --binary "$PWD/razor" --hey /path/to/tools/hey-checked \
   --fixtures /path/to/results/razor-cdn-unique-run/fixtures \
   --output /path/to/results/razor-hey-unique-run \
   --cache-root /path/to/cache-disk/razor-hey-unique-run \
@@ -148,12 +152,12 @@ python3 tools/hey_benchmark.py \
 | 场景 | 实测结果 |
 | --- | --- |
 | HDD/SSD 主矩阵 | 94 批、342,271 请求，批次非预期错误 0；其中 60 个主动限额 503 单列 |
-| 独立 Go 客户端交叉测量 | 24 批、1,667,589 个热缓存请求，状态及传输校验通过；每批前后 hash 一致 |
+| 独立 Go 客户端交叉测量 | 正文读取检查版 hey：24 批、1,680,294 个热缓存请求，实际读取字节及错误校验通过；每批前后 hash 一致 |
 | 100 个等价小文件冷请求 | 仅回源 1 次 / 256 KiB |
 | 32 个等价 100 MiB 冷请求 | 仅回源 1 次 / 100 MiB |
 | 8 个并发重叠 Range | 返回合计 128 MiB，只获取 40 MiB 区间并集，另有 1 次 HEAD；后续热请求新增回源 0 |
-| 256 KiB / 32 并发热缓存 | hey 中位 QPS：HDD 14,285.59 / SSD 14,685.40 |
-| 100 MiB / 8 并发热缓存 | hey 中位吞吐：HDD 3833.79 / SSD 4066.27 MiB/s |
+| 256 KiB / 32 并发热缓存 | hey 中位 QPS：HDD 14,495.49 / SSD 14,430.41 |
+| 100 MiB / 8 并发热缓存 | hey 中位吞吐：HDD 3982.59 / SSD 4377.74 MiB/s |
 
 上述热缓存数字为 32 逻辑核测试机、服务 GOMAXPROCS=8 下的同机 loopback 结果，主要命中 RAM/OS page cache，不能写成公网 CDN 带宽或生产容量。报告另列实际发生块 I/O 的缓存冷读，不混为一种指标。测试机路径见 [测试环境](docs/TEST_ENVIRONMENT.md)；历史 200 MiB / ATS 9.2.3 对照见 [旧报告](docs/ACCEPTANCE_2026-10-20.md)，两台机器的数字不直接计算提升比例。
 
