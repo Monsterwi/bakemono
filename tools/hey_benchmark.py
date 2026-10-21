@@ -100,6 +100,19 @@ def main():
                     results.append(result)
                     save(args.output / "batches.json", results)
                     print(name, result["requests"], round(result["mib_per_second"], 2), "MiB/s", flush=True)
+        path = "/large-physical-read"
+        client.checked(product, path)
+        for repeat in range(args.repeats):
+            product.stop()
+            product.start()
+            # Recovery reads full objects. Discard this private file only after it finishes.
+            with product.cache_file.open("rb") as cache_file:
+                os.fsync(cache_file.fileno())
+                os.posix_fadvise(cache_file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+            row = client.batch(product, origin, f"physical-file-cold-r{repeat + 1}", path, 1, count=1)
+            assert row["origin"]["get"] == 0, row
+            assert row["process_io_bytes"]["read_bytes"] >= fixtures[("large", 1)].stat().st_size, row
+            save(args.output / "physical-reads.json", client.summaries)
         product.proc.send_signal(signal.SIGUSR1)
     save(args.output / "outcome.json", {"success": True})
 

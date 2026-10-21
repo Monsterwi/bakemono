@@ -713,11 +713,12 @@ def benchmark(args, fixtures, output):
                     client.checked(product, path)
                     for repeat in range(args.repeats):
                         product.stop()
-                        # Only our closed cache file: no global drop_caches or other workloads.
+                        product.start()
+                        # Recovery validates full bodies, so evict afterwards, while idle.
+                        # Only our cache file: no global drop_caches or other workloads.
                         with product.cache_file.open("rb") as cache_file:
                             os.fsync(cache_file.fileno())
                             os.posix_fadvise(cache_file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-                        product.start()
                         summary = client.batch(product, origin, f"large-file-cache-cold-r{repeat + 1}", path, 1, count=1)
                         assert summary["origin"]["get"] == 0, summary
                 # A quiet post-load sample makes drained tasks/leases observable.
