@@ -1,6 +1,13 @@
 import unittest
+from contextlib import ExitStack
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 
-from hey_benchmark import checked_summary
+from acceptance import CHUNK, Origin, create_fixtures
+from hey_benchmark import TEMPLATE, checked_summary
 
 
 class HeySummaryTest(unittest.TestCase):
@@ -17,6 +24,22 @@ class HeySummaryTest(unittest.TestCase):
                        {"bytes": 262144}, {"requests": 0}, {"seconds": 0}):
             with self.subTest(change=change), self.assertRaises(AssertionError):
                 checked_summary({**raw, **change}, 262144)
+
+    @unittest.skipUnless(os.environ.get("RAZOR_CHECKED_HEY"), "set RAZOR_CHECKED_HEY to exercise the real load client")
+    def test_real_load_client_reports_truncated_body_and_counts_complete_bytes(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
+            root = Path(directory)
+            fixtures = create_fixtures(root / "fixtures", CHUNK + 17)
+            origin = Origin(fixtures, root / "origin.json")
+            cleanup.callback(origin.close)
+            origin.rules["/small-truncated"] = {"truncate": True}
+            def request(path):
+                return json.loads(subprocess.check_output([os.environ["RAZOR_CHECKED_HEY"], "-n", "1", "-c", "1",
+                    "-t", "5", "-o", TEMPLATE, origin.url + path], text=True, timeout=10))
+            truncated = request("/small-truncated")
+            self.assertTrue(truncated["errors"], "load client silently accepted a truncated body")
+            complete = checked_summary(request("/small-complete"), 256 << 10)
+            self.assertEqual(complete["requests"], 1)
 
 
 if __name__ == "__main__":

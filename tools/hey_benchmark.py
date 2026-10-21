@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-check warm-cache capacity with hey v0.1.4; SHA256 before/after each batch.
+"""Cross-check warm-cache capacity with body-checked hey; SHA256 before/after each batch.
 
 Reuses the acceptance origin, process lifecycle and resource sampling. Unlike the
 correctness client, hey does not hash every response. Run separately from other loads.
@@ -25,7 +25,7 @@ def checked_summary(raw, expected_bytes):
     assert raw["requests"] > 0 and raw["seconds"] > 0, raw
     assert not raw["errors"], raw
     assert raw["status"] == {"200": raw["requests"]}, raw
-    # hey counts declared Content-Length; the correctness client checks actual hashes.
+    # tools/build_hey.py makes SizeTotal count actual bytes and propagates body errors.
     assert raw["bytes"] == raw["requests"] * expected_bytes, raw
     return {"requests": raw["requests"], "seconds": raw["seconds"], "requests_per_second": raw["rps"],
             "mib_per_second": raw["bytes"] / MIB / raw["seconds"], "unexpected_errors": 0,
@@ -46,11 +46,15 @@ def main():
     assert args.seconds > 0 and args.repeats > 0
     for key in ("binary", "hey", "fixtures", "output", "cache_root"):
         setattr(args, key, getattr(args, key).resolve())
+    hey_build = json.loads(args.hey.with_suffix(".build.json").read_text())
+    assert hey_build["variant"] == "razor-bodycheck" and hey_build["sha256"] == file_hash(args.hey), "use tools/build_hey.py output"
     args.output.mkdir(parents=True, exist_ok=False)
     args.cache_root.mkdir(parents=True, exist_ok=False)
     fixtures = {(size, version): args.fixtures / f"{size}-v{version}.bin"
                 for size in ("small", "large") for version in (1, 2)}
     save(args.output / "environment.json", {"binary_sha256": file_hash(args.binary), "hey_sha256": file_hash(args.hey),
+         "hey_variant": "v0.1.4+razor-bodycheck",
+         "hey_build": hey_build,
          "binary_version": subprocess.check_output([str(args.binary), "-v"], text=True), "uname": list(os.uname()),
          "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
          "arguments": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
