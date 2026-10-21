@@ -69,6 +69,22 @@ func WithRamCache(size uint64) StripeOption {
 		}
 	}
 }
+
+// WithRAMPolicy selects a validated policy; zero capacity disables RAM.
+func WithRAMPolicy(algorithm string, capacity uint64) (StripeOption, error) {
+	if algorithm != "otter" && algorithm != "s3-fifo" {
+		return nil, fmt.Errorf("unknown RAM policy %q", algorithm)
+	}
+	if capacity > 1<<40 {
+		return nil, fmt.Errorf("RAM capacity exceeds 1 TiB")
+	}
+	return func(s *Stripe) {
+		s.RamCache = nil
+		if capacity > 0 {
+			s.RamCache, _ = NewRamCacheWithAlgorithm(capacity, algorithm)
+		}
+	}, nil
+}
 func NewStripe(path string, length, skip int64, opts ...StripeOption) *Stripe {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Stripe{DirMgr: &DirManager{}, AggBuffer: NewAggregateWriteBuffer(), OpenDir: NewOpenDir(), RamCache: NewRamCache(10 << 20), Path: path, Len: length, Skip: skip, SectorSize: SectorSize, stopChan: make(chan struct{}), EvacMgr: NewEvacuationTable(), evacCtx: ctx, evacCancel: cancel, evacQueue: make(chan []evacuationRecord, 1)}

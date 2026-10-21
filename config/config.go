@@ -20,6 +20,8 @@ const (
 
 // Config holds the application configuration
 type Config struct {
+	RAMCacheAlgorithm                                           string
+	RAMCacheBytes                                               int
 	MaxClientConnections                                        int
 	SharedFillPublicStatic                                      int
 	resourceDefaults                                            bool
@@ -125,6 +127,9 @@ func Load(configDir string) (*Config, error) {
 		*target = values
 	}
 	if err := cfg.loadNetwork(rc); err != nil {
+		return nil, err
+	}
+	if err := cfg.loadRAM(rc); err != nil {
 		return nil, err
 	}
 	if err := cfg.loadLimits(rc); err != nil {

@@ -23,7 +23,7 @@ func NewCache(nStripes int, paths []string, sizes []int64) (*Cache, error) {
 }
 
 // NewCacheWithOffsets creates a new Cache with nStripes, supporting offsets for split spans.
-func NewCacheWithOffsets(nStripes int, paths []string, sizes []int64, offsets []int64) (*Cache, error) {
+func NewCacheWithOffsets(nStripes int, paths []string, sizes []int64, offsets []int64, opts ...StripeOption) (*Cache, error) {
 	if len(paths) != len(sizes) || len(paths) < nStripes {
 		return nil, fmt.Errorf("mismatch in paths/sizes/stripes")
 	}
@@ -39,20 +39,20 @@ func NewCacheWithOffsets(nStripes int, paths []string, sizes []int64, offsets []
 		if offsets != nil && i < len(offsets) {
 			offset = offsets[i]
 		}
-		c.Stripes[i] = NewStripe(paths[i], sizes[i], offset)
+		c.Stripes[i] = NewStripe(paths[i], sizes[i], offset, opts...)
 	}
 
 	return c, nil
 }
 
 // NewCacheFromStore creates a Cache from a Store using BuildStripeLayout.
-func NewCacheFromStore(store *Store, nStripes int) (*Cache, error) {
+func NewCacheFromStore(store *Store, nStripes int, opts ...StripeOption) (*Cache, error) {
 	paths, sizes, offsets, err := store.BuildStripeLayout(nStripes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build stripe layout: %w", err)
 	}
 
-	return NewCacheWithOffsets(nStripes, paths, sizes, offsets)
+	return NewCacheWithOffsets(nStripes, paths, sizes, offsets, opts...)
 }
 
 func (c *Cache) Init() error {
