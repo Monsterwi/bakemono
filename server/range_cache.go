@@ -25,6 +25,7 @@ const rangeLayoutVersion = 2
 var errRangeBypass = errors.New("range representation unsupported")
 var errRangeChanged = errors.New("range representation changed")
 var errRangeUnavailable = errors.New("range origin unavailable")
+var errRangeOwnership = errors.New("range object writer unavailable")
 
 type rangePreparation struct {
 	reused bool
@@ -159,16 +160,26 @@ func (s *Server) rangeFill(r *http.Request, key []byte, token *cache.FillToken, 
 	return s.cache.CheckFill(task.token)
 }
 
-func (s *Server) writeRangeObject(task *fillTask, key []byte, info *cache.CacheHTTPInfo, body io.Reader, limit int64, resources fillResources) error {
+func (s *Server) reserveRangeObject(task *fillTask, key []byte, parent *cache.FillToken, resources fillResources) (*cacheFill, error) {
 	ctx, cancel := context.WithCancel(task.ctx)
-	vc, err := s.cache.OpenWriteFillKeyReplacing(ctx, task.token, key, nil)
+	// Re-derive from the original URL fence after task admission; a prior task may
+	// have aborted its reservation between the initial snapshot and this producer.
+	token, err := s.cache.DeriveFill(parent, key)
 	if err != nil {
 		cancel()
-		return err
+		return nil, err
 	}
-	vc.SetHTTPInfo(info)
-	fill := &cacheFill{vc: vc, cancel: cancel, timeout: time.Duration(resources.config.CacheWriteTimeout) * time.Second, limit: limit, stats: &s.counters}
-	defer fill.abort(errors.New("incomplete range object"))
+	vc, err := s.cache.OpenWriteFillKeyReplacing(ctx, token, key, nil)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("%w: %v", errRangeOwnership, err)
+	}
+	return &cacheFill{vc: vc, cancel: cancel, timeout: time.Duration(resources.config.CacheWriteTimeout) * time.Second, stats: &s.counters}, nil
+}
+func (s *Server) writeRangeObject(task *fillTask, fill *cacheFill, info *cache.CacheHTTPInfo, body io.Reader, limit int64) error {
+	fill.vc.SetHTTPInfo(info)
+	fill.limit = limit
+
 	buf := make([]byte, 32<<10)
 	for {
 		n, readErr := body.Read(buf)
@@ -209,6 +220,11 @@ func (s *Server) ensureRangeManifest(r *http.Request, root, key []byte, parent *
 		if !origin.Available() {
 			return fillResult{err: errRangeUnavailable}
 		}
+		fill, err := s.reserveRangeObject(task, key, parent, resources)
+		if err != nil {
+			return fillResult{err: err}
+		}
+		defer fill.abort(errors.New("incomplete range object"))
 		request.Method = http.MethodHead
 		request.Header.Del("Range")
 		request.Header.Del("If-Range")
@@ -240,7 +256,7 @@ func (s *Server) ensureRangeManifest(r *http.Request, root, key []byte, parent *
 			return fillResult{err: errRangeBypass}
 		}
 		info.ResponseHeaders = resp.Header().Clone()
-		err = s.writeRangeObject(task, key, info, bytes.NewReader(encoded), int64(len(encoded)), resources)
+		err = s.writeRangeObject(task, fill, info, bytes.NewReader(encoded), int64(len(encoded)))
 		return fillResult{key: key, err: err}
 	})
 	if err != nil {
@@ -377,6 +393,11 @@ func (s *Server) ensureRangeBlock(r *http.Request, root []byte, parent *cache.Fi
 		if !origin.Available() {
 			return fillResult{err: errRangeUnavailable}
 		}
+		fill, err := s.reserveRangeObject(task, key, parent, resources)
+		if err != nil {
+			return fillResult{err: err}
+		}
+		defer fill.abort(errors.New("incomplete range object"))
 		start := index * m.BlockSize
 		end := min(start+m.BlockSize, m.Total) - 1
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
@@ -415,7 +436,7 @@ func (s *Server) ensureRangeBlock(r *http.Request, root []byte, parent *cache.Fi
 		if int64(len(data)) != end-start+1 || len(resp.RawResponse.Trailer) != 0 {
 			return fillResult{err: io.ErrUnexpectedEOF}
 		}
-		err = s.writeRangeObject(task, key, info, bytes.NewReader(data), int64(len(data)), resources)
+		err = s.writeRangeObject(task, fill, info, bytes.NewReader(data), int64(len(data)))
 		return fillResult{key: key, err: err}
 	})
 	return false, err
@@ -519,7 +540,7 @@ func (s *Server) serveBlocks(w http.ResponseWriter, r *http.Request, root []byte
 		return true
 	}
 	if err != nil {
-		if full && r.Context().Err() == nil && s.cache.CheckFill(parent) == nil {
+		if full && !errors.Is(err, errRangeOwnership) && r.Context().Err() == nil && s.cache.CheckFill(parent) == nil {
 			return false
 		}
 		s.upstreamError(w, r, err)

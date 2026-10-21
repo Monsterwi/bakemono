@@ -574,3 +574,123 @@ func TestRangeRawEncodingVariantsKeepIndependentBlocks(t *testing.T) {
 		t.Fatalf("raw AE variants aliased: HEAD=%d GET=%d, want2 each", heads.Load(), gets.Load())
 	}
 }
+
+func TestUnknownHeadersDoNotCreateConcurrentBlockProducers(t *testing.T) {
+	data := bytes.Repeat([]byte("u"), 2<<20)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	var blockGets atomic.Int32
+	s, _ := publicCacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"unknown"`)
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		if r.Header.Get("Range") == "bytes=1048576-2097151" {
+			if blockGets.Add(1) == 1 {
+				close(entered)
+			}
+			<-release
+		}
+		http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(data))
+	})
+	headers := func(value, interval string) http.Header {
+		return http.Header{"Range": {interval}, "Accept-Encoding": {"identity"}, "X-Unknown": {value}}
+	}
+	if got := fetch(s, "http://cache.test/item", headers("", "bytes=0-100")); got.Code != 206 {
+		t.Fatal(got.Code)
+	}
+	first := make(chan *httptest.ResponseRecorder, 1)
+	second := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- fetch(s, "http://cache.test/item", headers("a", "bytes=1048576-1048676")) }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first block producer not entered")
+	}
+	go func() { second <- fetch(s, "http://cache.test/item", headers("b", "bytes=1048576-1048676")) }()
+	select {
+	case got := <-second:
+		if got.Code < 500 || got.Code > 599 {
+			t.Fatalf("conflicting task status=%d", got.Code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("conflicting task retained/started another origin: GET=%d", blockGets.Load())
+	}
+	if blockGets.Load() != 1 {
+		t.Fatalf("concurrent unknown-header block producers=%d", blockGets.Load())
+	}
+	once.Do(func() { close(release) })
+	if got := <-first; got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data[:101]) {
+		t.Fatalf("owner status=%d bytes=%d", got.Code, got.Body.Len())
+	}
+	if got := fetch(s, "http://cache.test/item", headers("b", "bytes=1048576-1048676")); got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data[:101]) || blockGets.Load() != 1 {
+		t.Fatalf("committed owner block unusable: status=%d GET=%d", got.Code, blockGets.Load())
+	}
+	waitFillStats(t, s, func(st server.Stats) bool {
+		return st.SharedFillTasks == 0 && st.SharedFillWaiters == 0 && st.RangeReaders == 0 && st.BufferReserved == 0
+	})
+}
+
+func TestUnknownHeadersCannotBypassManifestOwnership(t *testing.T) {
+	for _, full := range []bool{false, true} {
+		t.Run(fmt.Sprint(full), func(t *testing.T) {
+			data := bytes.Repeat([]byte("m"), 2<<20)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			defer once.Do(func() { close(release) })
+			var heads, gets atomic.Int32
+			s, _ := publicCacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("ETag", `"manifest"`)
+				w.Header().Set("Cache-Control", "public,max-age=3600")
+				if r.Method == "HEAD" {
+					if heads.Add(1) == 1 {
+						close(entered)
+					}
+					<-release
+				} else {
+					gets.Add(1)
+				}
+				http.ServeContent(w, r, "body", time.Time{}, bytes.NewReader(data))
+			})
+			headers := func(value string) http.Header {
+				h := http.Header{"Accept-Encoding": {"identity"}, "X-Unknown": {value}}
+				if !full {
+					h.Set("Range", "bytes=0-100")
+				}
+				return h
+			}
+			first, second := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
+			go func() { first <- fetch(s, "http://cache.test/item", headers("a")) }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("first HEAD producer not entered")
+			}
+			go func() { second <- fetch(s, "http://cache.test/item", headers("b")) }()
+			select {
+			case got := <-second:
+				if got.Code < 500 || got.Code > 599 {
+					t.Fatalf("manifest ownership bypassed status=%d", got.Code)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatalf("concurrent HEAD retained: HEAD=%d GET=%d", heads.Load(), gets.Load())
+			}
+			if heads.Load() != 1 || gets.Load() != 0 {
+				t.Fatalf("ownership conflict reached origin HEAD=%d GET=%d", heads.Load(), gets.Load())
+			}
+			once.Do(func() { close(release) })
+			got := <-first
+			want := data[:101]
+			status := 206
+			if full {
+				want = data
+				status = 200
+			}
+			if got.Code != status || !bytes.Equal(got.Body.Bytes(), want) {
+				t.Fatalf("manifest owner status=%d bytes=%d", got.Code, got.Body.Len())
+			}
+			waitFillStats(t, s, func(st server.Stats) bool {
+				return st.SharedFillTasks == 0 && st.SharedFillWaiters == 0 && st.RangeReaders == 0 && st.BufferReserved == 0
+			})
+		})
+	}
+}

@@ -36,7 +36,7 @@ flowchart LR
 
 默认模式的任务身份包含缓存命名空间、方法、Host、客户端 IP、完整请求头、TLS 状态和配置版本，只合并这些条件等价的请求。
 
-公共静态源站可显式配置 `CONFIG proxy.config.cache.shared_fill_public_static INT 1`（默认 0，重启生效）。此模式要求源站不按客户端身份生成不同内容：生产者使用固定 `User-Agent: Razor`，移除真实客户端 IP、Forwarded/X-Forwarded-For/X-Real-IP 和追踪头，保留可信代理解析后的 scheme/Host。不同 IP、UA、追踪信息的等价冷请求可以合并；未知头仍参与任务身份并发给源站，Accept-Encoding/Accept-Language 的不同值保持隔离。持久缓存继续遵守源站声明的这两个 Vary 维度；不支持的 Vary 不共享。
+公共静态源站可显式配置 `CONFIG proxy.config.cache.shared_fill_public_static INT 1`（默认 0，重启生效）。此模式要求源站不按客户端身份生成不同内容：生产者使用固定 `User-Agent: Razor`，移除真实客户端 IP、Forwarded/X-Forwarded-For/X-Real-IP 和追踪头，保留可信代理解析后的 scheme/Host。不同 IP、UA、追踪信息的等价冷请求可以合并；未知头仍参与任务身份并发给源站，Accept-Encoding/Accept-Language 的不同值保持隔离。持久缓存继续遵守源站声明的这两个 Vary 维度；不支持的 Vary 不共享。块布局按原始 Accept-Encoding/Accept-Language 分别隔离，包括缺省编码和显式 identity。不同保守任务竞争同一个 manifest 或块时，只有取得写预留的任务可以回源，冲突任务受控失败，避免重复源站生产者及未知头错误共享。
 
 Authorization/Cookie 等旁路请求保留原代理行为。公共模式使用独立、版本化内容命名空间；切换模式安全 MISS，不删除旧文件。该能力已通过服务级回归，专用测试机的本轮真实二进制验收由 #19 完成。
 
@@ -44,7 +44,7 @@ Authorization/Cookie 等旁路请求保留原代理行为。公共模式使用�
 
 `CONFIG proxy.config.cache.range_block_bytes INT 1048576` 支持 64 KiB–8 MiB 的 2 的幂，重启生效，SIGHUP 改变会被拒绝。块大小与格式进入 manifest/块身份；此轮使用 v2 布局，对旧 v1 块安全 MISS，保留旧文件。完整 fresh Range 可在全部源站不健康时离线读取；缺块或过期时仍需可用源站，整次响应固定一个源站和版本。
 
-发送缓冲与生产者 staging 都计入 `write_buffer_bytes` 的保守预留；额度不足跳过预取，发送完当前块先释放读缓冲，再等待后块，磁盘容量按至多两块窗口检查。`Stats` 的 `RangeBlockHits/Misses` 是各读者已准备块的逻辑命中，`RangeHitBytes/MissBytes` 是对应请求区间字节（不代表唯一回源字节）；源站实际正文另见 `Origin.Bytes`。请求只有全部块复用且完整成功才计 HIT。发送前失败返回受控错误；发送后失败、PURGE 或版本变化会中断流，客户端必须检查正文读取错误与 Content-Length。合成响应保守使用 `Cache-Control: no-cache`；提交不等于每块 fsync，不读取未提交字节。服务级回归已验证，本轮 HDD/SSD 与 soak 尚待 #19 验收。
+发送缓冲与生产者 staging 都计入 `write_buffer_bytes` 的保守预留；额度不足跳过预取，发送完当前块先释放读缓冲，再等待后块，磁盘容量按至多两块窗口检查。`Stats` 的 `RangeBlockHits/Misses` 是各读者已准备块的逻辑命中，`RangeHitBytes/MissBytes` 是已准备请求区间的尝试字节（不代表实际网络或唯一回源字节）；源站实际正文另见 `Origin.Bytes`。请求只有全部块复用且完整成功才计 HIT。发送前失败返回受控错误；发送后失败、PURGE 或版本变化会中断流，客户端必须检查正文读取错误与 Content-Length。合成响应保守使用 `Cache-Control: no-cache`；提交不等于每块 fsync，不读取未提交字节。服务级回归已验证，本轮 HDD/SSD 与 soak 尚待 #19 验收。
 
 ## 快速开始
 

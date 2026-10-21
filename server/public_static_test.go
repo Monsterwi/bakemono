@@ -99,6 +99,8 @@ func publicRequest(s *server.Server, ctx context.Context, field, value string) <
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		r := httptest.NewRequest("GET", "http://cache.test/item", nil).WithContext(ctx)
+		// Keep these whole-object sharing cases outside identity block classification.
+		r.Header.Set("Accept-Encoding", "gzip")
 		r.RemoteAddr = "192.0.2.1:12345"
 		if field != "" {
 			r.Header.Set(field, value)
