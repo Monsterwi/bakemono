@@ -109,6 +109,9 @@ func (h *HTTPProxy) trusted(ip netip.Addr) bool {
 }
 
 func (h *HTTPProxy) forwarding(r *http.Request) (chain, clientIP, scheme string) {
+	if publicScheme, ok := r.Context().Value(publicRequestKey{}).(string); ok {
+		return "", "", publicScheme
+	}
 	clientIP = GetIP(r)
 	chain = clientIP
 	scheme = "http"

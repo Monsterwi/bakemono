@@ -21,6 +21,7 @@ const (
 // Config holds the application configuration
 type Config struct {
 	MaxClientConnections                                        int
+	SharedFillPublicStatic                                      int
 	resourceDefaults                                            bool
 	CacheWriteTimeout                                           int
 	SharedFillMaxTasks, SharedFillMaxWaiters, SharedFillTimeout int

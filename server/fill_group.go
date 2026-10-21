@@ -149,6 +149,9 @@ func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []b
 	status := "MISS"
 	defer func() { s.cacheStatus(w, status) }()
 	resources := s.captureFillResources(r)
+	if resources.config.SharedFillPublicStatic == 1 {
+		r = resources.proxy.NormalizePublicRequest(r)
+	}
 	task, creator, err := s.fills.join(fillIdentity(r, key, resources.version), token, resources.config)
 	if err != nil {
 		resources.release()
@@ -158,7 +161,7 @@ func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []b
 	}
 	defer s.fills.leave(task, creator)
 	if creator {
-		originRequest := withRequestRuntime(r.Clone(task.ctx), task.ctx, resources.runtime)
+		originRequest := withRequestRuntime(r, task.ctx, resources.runtime)
 		go func() {
 			defer s.fills.finish(task)
 			defer resources.release()
