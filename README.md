@@ -103,6 +103,15 @@ curl -fsS http://127.0.0.1:8080/object.txt
 
 两次均返回 `hello from razor`。源站只出现一次 GET，示例目录的 `logs/access.log` 依次记录 `cache_status=MISS/HIT`（JSON 字段）。按 Ctrl-C 停止 Razor 后，执行 `kill "$ORIGIN_PID"` 停止示例源站；退出该 shell 时也会触发清理。该简易源站用于演示整对象缓存，Range 请使用下面的验收工具验证。
 
+RAM 默认使用 Otter v2.2.1，每 stripe 10 MiB；可选 `s3-fifo`，两者均是磁盘之上的可丢弃加速层。
+
+```text
+CONFIG proxy.config.cache.ram_cache_algorithm STRING otter
+CONFIG proxy.config.cache.ram_cache_bytes INT 10485760
+```
+
+算法只接受 `otter` / `s3-fifo`；预算为每 stripe 的正文权重字节，`0` 禁用，最大 1 TiB。两项重启生效，SIGHUP 改变会拒绝并保留现服务。策略切换保留磁盘文件及其身份，不新增读盘 promotion。空值预留 1 字节，过大值/超过 64 KiB 的 key 跳过 RAM 并安全回退磁盘；字节预算不包括节点、key、ghost 与 Go runtime，不能当作 RSS 限额。算法变体、边界及公平基准入口见 [RAM 缓存策略](docs/RAM_CACHE.md)。本轮硬件/soak 验收完成前不宣称 S3-FIFO 性能优于默认策略。
+
 完整配置项及热更新边界见 [conf/records.config](conf/records.config)。默认整对象限额为 64 MiB；示例将其调整为 256 MiB，约 200 MiB 对象的测试也需配置足够缓存容量。`write_buffer_bytes` 是写入预算，不是进程 RSS 上限。
 
 ## 验证与复现

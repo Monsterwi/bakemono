@@ -30,6 +30,14 @@ func initLogger(cfg *appconfig.Config, isDaemon bool) error {
 
 // NewCache builds and initializes cache stripes from the provided config.
 func NewCache(cfg *appconfig.Config) (*cache.Cache, error) {
+	cfg = cfg.WithDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	ramOption, err := cache.WithRAMPolicy(cfg.RAMCacheAlgorithm, uint64(cfg.RAMCacheBytes))
+	if err != nil {
+		return nil, err
+	}
 	storageConfigPath := filepath.Join(cfg.ConfigDir, appconfig.StorageConfigFilename)
 	store, err := appconfig.LoadStore(storageConfigPath)
 	if err != nil {
@@ -44,7 +52,7 @@ func NewCache(cfg *appconfig.Config) (*cache.Cache, error) {
 	logger.Infof("Configuration loaded: %d spans, will create %d stripes", len(store.Spans), numStripes)
 	logger.Infof("Initializing cache with %d stripes from %d spans", numStripes, len(store.Spans))
 
-	c, err := cache.NewCacheFromStore(store, numStripes)
+	c, err := cache.NewCacheFromStore(store, numStripes, ramOption)
 	if err != nil {
 		return nil, fmt.Errorf("create cache: %w", err)
 	}
