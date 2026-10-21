@@ -17,6 +17,9 @@ import (
 
 func (s *Server) handler(w http.ResponseWriter, r *http.Request) {
 	runtime := requestRuntime(r)
+	if runtime.config.SharedFillPublicStatic == 1 {
+		recordPublicRequestIdentity(w, r)
+	}
 	key := []byte(fmt.Sprintf("%s:%s", runtime.namespace, runtime.proxy.CacheKey(r)))
 	switch r.Method {
 	case "PURGE":

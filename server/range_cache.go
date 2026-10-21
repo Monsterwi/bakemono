@@ -92,6 +92,9 @@ func identityEncoding(h http.Header) bool {
 // complete committed object, and detached producers retain their own resources.
 func (s *Server) rangeFill(r *http.Request, key []byte, token *cache.FillToken, produce func(*fillTask, *http.Request, fillResources) fillResult) error {
 	resources := s.captureFillResources(r)
+	if resources.config.SharedFillPublicStatic == 1 {
+		r = resources.proxy.NormalizePublicRequest(r)
+	}
 	identity := r.Clone(r.Context())
 	identity.Header.Del("Range")
 	identity.Header.Del("If-Range")
@@ -102,7 +105,7 @@ func (s *Server) rangeFill(r *http.Request, key []byte, token *cache.FillToken, 
 	}
 	defer s.fills.leave(task, creator)
 	if creator {
-		request := withRequestRuntime(r.Clone(task.ctx), task.ctx, resources.runtime)
+		request := withRequestRuntime(r, task.ctx, resources.runtime)
 		go func() {
 			defer s.fills.finish(task)
 			defer resources.release()
