@@ -253,17 +253,7 @@ func (r *CacheReader) loadFragment(idx int) (err error) {
 	r.Key = currentKey
 	r.fragmentIndex = idx
 
-	// 2. Lookup Dir (if not already set for idx 0)
-	// ATS typically does this before handleRead.
-	// For idx=0, we might have dir from OpenRead? But r.Dir might be empty initially.
-	// We need to lookup every time Key changes.
-	hit, _, d := r.Stripe.DirMgr.Get(r.Key)
-	if !hit {
-		return fmt.Errorf("fragment %d missing", idx)
-	}
-	r.Dir = d
-
-	// 3. Handle Read (RAM -> Disk)
+	// Lookup and copy the fragment under the same overwrite/publication lock.
 	if err := r.handleRead(); err != nil {
 		return err
 	}
@@ -283,13 +273,28 @@ func (r *CacheReader) handleRead() error {
 	// The same lock excludes overwrite and publication for RAM and disk reads.
 	r.Stripe.mu.RLock()
 	defer r.Stripe.mu.RUnlock()
-	if !r.Stripe.dirValid(r.Dir) {
-		return fmt.Errorf("cache fragment overwritten or storage unavailable")
+	if r.Stripe.storageErr != nil {
+		return r.Stripe.storageErr
 	}
-	hit, _, current := r.Stripe.DirMgr.Get(r.Key)
-	if !hit || current.offset() != r.Dir.offset() || current.phase() != r.Dir.phase() {
-		return fmt.Errorf("cache fragment replaced")
+	if r.Stripe.closing || r.Stripe.disk == nil {
+		return ErrCacheClosed
 	}
+	hit, _, d := r.Stripe.DirMgr.Get(r.Key)
+	if !hit {
+		return fmt.Errorf("%w: fragment %d missing", ErrNotResident, r.fragmentIndex)
+	}
+	r.Dir = d
+	off := int64(d.offset())
+	if off < r.Stripe.Start || off >= r.Stripe.Skip+r.Stripe.Len {
+		return fmt.Errorf("invalid fragment directory offset")
+	}
+	// A retained directory entry may outlive its ring allocation. At this point
+	// dirValid can only reject normal wrap or an in-flight overwrite, not a
+	// storage failure or malformed offset. Neither proves data corruption.
+	if !r.Stripe.dirValid(d) {
+		return fmt.Errorf("%w: fragment %d overwritten", ErrNotResident, r.fragmentIndex)
+	}
+
 	if r.loadFromRamCache() {
 		return nil
 	}
