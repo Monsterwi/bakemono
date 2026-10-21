@@ -3,7 +3,6 @@ package main_test
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,12 +44,7 @@ func TestBinarySIGHUPReload(t *testing.T) {
 	}))
 	defer newOrigin.Close()
 	dir := t.TempDir()
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := reserved.Addr().(*net.TCPAddr).Port
-	reserved.Close()
+	port := binaryPort(t)
 	records := func(origin string) string {
 		return fmt.Sprintf("CONFIG proxy.config.http.server_ports INT %d\nCONFIG proxy.config.log.logfile_dir STRING %s\nCONFIG proxy.config.http.parent_proxy.upstream_algo STRING round-robin\nCONFIG proxy.config.http.parent_proxy.upstream_targets STRING %s\nCONFIG proxy.config.http.shutdown_timeout INT 2\n", port, dir, origin)
 	}

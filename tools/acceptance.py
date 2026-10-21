@@ -44,9 +44,21 @@ def wait_for(check, description, timeout=15):
 
 
 def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    # Origin/health outbound allocation must not take this released listener port.
+    low, high = map(int, Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split())
+    candidates = [port for port in range(1024, 65536) if not low <= port <= high]
+    random.shuffle(candidates)
+    dual = socket.has_dualstack_ipv6()
+    for port in candidates[:128]:
+        with socket.socket(socket.AF_INET6 if dual else socket.AF_INET) as listener:
+            if dual:
+                listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            try:
+                listener.bind(("::" if dual else "0.0.0.0", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("no available nonprivileged listener port outside kernel ephemeral range")
 
 
 def file_hash(path, start=0, length=None):

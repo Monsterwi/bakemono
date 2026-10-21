@@ -59,14 +59,7 @@ func binaryLifecycle(t *testing.T, binary string, force bool) {
 	}))
 	defer origin.Close()
 
-	reservation, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := reservation.Addr().(*net.TCPAddr).Port
-	if err := reservation.Close(); err != nil {
-		t.Fatal(err)
-	}
+	port := binaryPort(t)
 	config := fmt.Sprintf(`CONFIG proxy.config.http.server_ports INT %d
 CONFIG proxy.config.log.logfile_dir STRING %s
 CONFIG proxy.config.log.access_log_filename STRING access.log
