@@ -63,7 +63,7 @@ func GetDefaultConfig() *Config {
 		ServerPort:            80,
 		UpstreamAlgo:          balancer.ConsistentHashBalancer,
 		UpstreamTargets:       []string{"http://10.62.216.7", "http://10.62.216.8"},
-		LogfileDir:            "/var/log/bakemono",
+		LogfileDir:            "/var/log/razor",
 		AccessLogFilename:     "access.log",
 		ErrorLogFilename:      "error.log",
 		KeepAliveTimeout:      120,

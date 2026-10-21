@@ -16,9 +16,9 @@ const LOOP = 50000
 func main() {
 	// read path from args
 
-	//_ = os.Remove("/tmp/bakemono-pressure-concurrent/cache.db")
+	//_ = os.Remove("/tmp/razor-pressure-concurrent/cache.db")
 
-	v, err := cache.NewCache(1, []string{"/tmp/bakemono-pressure-concurrent/cache.db"}, []int64{1024 * 512 * 100000})
+	v, err := cache.NewCache(1, []string{"/tmp/razor-pressure-concurrent/cache.db"}, []int64{1024 * 512 * 100000})
 	if err != nil {
 		panic(err)
 	}

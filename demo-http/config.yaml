@@ -4,9 +4,9 @@
 
 # storage
 storage:
-  - path: /tmp/bakemono-demo-http/cache1.db
+  - path: /tmp/razor-demo-http/cache1.db
     size_mb: 4096
-  - path: /tmp/bakemono-demo-http/cache2.db
+  - path: /tmp/razor-demo-http/cache2.db
     size_mb: 4096
 
 # Local stripes currently size their directory for 8192-byte objects;
@@ -50,7 +50,7 @@ zap_config:
     callerEncoder: "short"
   outputPaths:
     - "stdout"
-    - "logs/bakemono.log"
+    - "logs/razor.log"
   errorOutputPaths:
     - "stderr"
     - "logs/error.log"

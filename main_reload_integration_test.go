@@ -17,7 +17,7 @@ import (
 )
 
 func TestBinarySIGHUPReload(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "bakemono")
+	binary := filepath.Join(t.TempDir(), "razor")
 	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, output)
 	}

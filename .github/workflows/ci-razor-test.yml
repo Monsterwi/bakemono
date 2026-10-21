@@ -1,4 +1,4 @@
-name: bakemono build and test
+name: razor build and test
 
 on: [push, pull_request]
 

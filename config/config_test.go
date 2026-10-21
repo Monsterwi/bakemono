@@ -14,15 +14,15 @@ func TestLoad(t *testing.T) {
 	configContent := `# Test configuration
 CONFIG proxy.config.http.server_addr STRING :9090
 CONFIG proxy.config.http.server_ports STRING 9090
-CONFIG proxy.config.log.logfile_dir STRING /tmp/bakemono/logs
+CONFIG proxy.config.log.logfile_dir STRING /tmp/razor/logs
 CONFIG proxy.config.http.trusted_proxies STRING 192.0.2.0/24,2001:db8::/32
 CONFIG proxy.config.http.purge_token STRING test-only-purge-secret
 `
 
 	storageConfigPath := filepath.Join(tmpDir, "storage.config")
 	storageConfigContent := `# Test configuration
-/tmp/bakemono/cache1.db 100M
-/tmp/bakemono/cache2.db 100M
+/tmp/razor/cache1.db 100M
+/tmp/razor/cache2.db 100M
 `
 	if err := os.WriteFile(storageConfigPath, []byte(storageConfigContent), 0644); err != nil {
 		t.Fatalf("Failed to create test storage config file: %v", err)
@@ -51,8 +51,8 @@ CONFIG proxy.config.http.purge_token STRING test-only-purge-secret
 		t.Errorf("Expected ServerPort to be 9090, got %d", cfg.ServerPort)
 	}
 
-	if cfg.LogfileDir != "/tmp/bakemono/logs" {
-		t.Errorf("Expected LogfileDir to be '/tmp/bakemono/logs', got '%s'", cfg.LogfileDir)
+	if cfg.LogfileDir != "/tmp/razor/logs" {
+		t.Errorf("Expected LogfileDir to be '/tmp/razor/logs', got '%s'", cfg.LogfileDir)
 	}
 
 }
@@ -72,8 +72,8 @@ func TestGetDefaultConfig(t *testing.T) {
 		t.Errorf("Expected default ServerPort to be 80, got %d", cfg.ServerPort)
 	}
 
-	if cfg.LogfileDir != "/var/log/bakemono" {
-		t.Errorf("Expected default LogfileDir to be '/var/log/bakemono', got '%s'", cfg.LogfileDir)
+	if cfg.LogfileDir != "/var/log/razor" {
+		t.Errorf("Expected default LogfileDir to be '/var/log/razor', got '%s'", cfg.LogfileDir)
 	}
 
 	if len(cfg.UpstreamTargets) != 2 {

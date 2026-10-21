@@ -2,7 +2,7 @@
 """Linux, Python stdlib only. Real binary + streamed HTTP/1.1 correctness/load client.
 
 Each invocation owns a NEW --output directory. No existing cache is removed.
-ATS is optional for functional runs, required by --mode benchmark/all.
+ATS is optional: --products razor runs without an ATS installation.
 """
 import argparse
 import concurrent.futures
@@ -180,7 +180,7 @@ class Product:
         self.proc = None
         self.config = {}
         self.env = dict(os.environ, GOMAXPROCS="8")
-        if kind == "bakemono":
+        if kind == "razor":
             self.config = {
                 "http.server_ports": ("INT", self.port),
                 "log.logfile_dir": ("STRING", self.dir),
@@ -198,7 +198,11 @@ class Product:
             }
             self.config.update(overrides or {})
             self.write_config()
-            (self.dir / "storage.config").write_text(str(self.dir / "cache.db") + f" {capacity}M\n")
+            cache_dir = self.dir
+            if getattr(args, "cache_root", None):
+                cache_dir = args.cache_root / self.dir.name
+                cache_dir.mkdir(parents=True, exist_ok=False)
+            (self.dir / "storage.config").write_text(str(cache_dir / "cache.db") + f" {capacity}M\n")
             self.command = [str(args.binary), "-c", str(self.dir)]
         else:
             meta = json.loads(args.ats_environment.read_text())
@@ -281,7 +285,7 @@ class Product:
             self.log.close()
 
     def reload(self, overrides):
-        assert self.kind == "bakemono"
+        assert self.kind == "razor"
         before = (self.dir / "process.log").read_text().count("Configuration reloaded:")
         self.config.update(overrides)
         self.write_config()
@@ -291,7 +295,9 @@ class Product:
     def resource(self):
         stat = Path(f"/proc/{self.proc.pid}/stat").read_text().split(") ", 1)[1].split()
         status = Path(f"/proc/{self.proc.pid}/status").read_text()
+        io = dict(line.split(": ", 1) for line in Path(f"/proc/{self.proc.pid}/io").read_text().splitlines())
         return {"time": time.time(), "cpu_seconds": (int(stat[11]) + int(stat[12])) / os.sysconf("SC_CLK_TCK"),
+                "read_bytes": int(io["read_bytes"]), "write_bytes": int(io["write_bytes"]),
                 "rss_bytes": int(re.search(r"VmRSS:\s+(\d+)", status)[1]) * 1024,
                 "fds": len(list(Path(f"/proc/{self.proc.pid}/fd").iterdir()))}
 
@@ -359,15 +365,16 @@ class Client:
         assert not result["error"], result
         return result
 
-    def batch(self, product, origin, name, path, concurrency, count=None, duration=None, headers=None, bounds=None, slow=0, allowed=(), ranges=None):
+    def batch(self, product, origin, name, path, concurrency, count=None, duration=None, headers=None, bounds=None, slow=0, allowed=(), ranges=None, paths=None, unique_paths=False):
         expected = self.expected(path, bounds=bounds)
         variants = [(headers, expected)] if ranges is None else [
             ({**(headers or {}), "Range": "bytes=%d-%d" % limits}, self.expected(path, bounds=limits))
             for limits in ranges]
+        path_expected = {p: self.expected(p) for p in paths or ()}
         before = origin.snapshot()
         initial = product.resource()
         logs_before = (product.dir / "process.log").stat().st_size
-        if product.kind == "bakemono":
+        if product.kind == "razor":
             product.proc.send_signal(signal.SIGUSR1)
             def has_snapshot():
                 with (product.dir / "process.log").open() as f:
@@ -379,21 +386,28 @@ class Client:
             next_signal = 0
             while not done.wait(.1):
                 samples.append(product.resource())
-                if product.kind == "bakemono" and time.monotonic() >= next_signal:
+                if product.kind == "razor" and time.monotonic() >= next_signal:
                     product.proc.send_signal(signal.SIGUSR1)
                     next_signal = time.monotonic() + .5
         monitor = threading.Thread(target=sample)
         monitor.start()
         barrier = threading.Barrier(concurrency)
         start = time.monotonic()
+        harness_cpu = time.process_time()
         def worker(index):
             request_headers, request_expected = variants[index % len(variants)]
+            request_paths = list(paths or [path])
+            random.Random(index).shuffle(request_paths)
             c = http.client.HTTPConnection("127.0.0.1", product.port, timeout=120)
             rows = []
             barrier.wait()
             try:
                 while (duration is not None and time.monotonic() - start < duration) or (count is not None and len(rows) < count):
-                    rows.append(self.request(product, path, headers=request_headers, expected=request_expected,
+                    request_path = request_paths[len(rows) % len(request_paths)]
+                    if unique_paths:
+                        request_path += f"-{index}-{len(rows)}"
+                    rows.append(self.request(product, request_path, headers=request_headers,
+                                             expected=path_expected.get(request_path, request_expected),
                                              status=206 if bounds or ranges else 200, slow=slow, connection=c, case=name))
             finally:
                 c.close()
@@ -420,6 +434,9 @@ class Client:
                    "seconds": elapsed, "requests_per_second": len(rows) / elapsed,
                    "mib_per_second": payload / MIB / elapsed, "ttfb_ms": quantiles("ttfb_ms"),
                    "completion_ms": quantiles("completion_ms"), "unexpected_errors": len(errors),
+                   "object_requests": {size: sum(size in r["path"] for r in rows) for size in ("small", "large")},
+                   "harness_cpu_cores": (time.process_time() - harness_cpu) / elapsed,
+                   "process_io_bytes": {k: samples[-1][k] - initial[k] for k in ("read_bytes", "write_bytes")},
                    "statuses": {str(s): sum(r["status"] == s for r in rows) for s in set(r["status"] for r in rows)},
                    "origin": {k: after[k] - before[k] for k in after},
                    "cpu_seconds_per_gib": (samples[-1]["cpu_seconds"] - initial["cpu_seconds"]) / (payload / (1 << 30)) if payload else None,
@@ -427,7 +444,7 @@ class Client:
                    "goroutine_peak_sampled": max(goroutines) if goroutines else None,
                    "server_stats_peak_sampled": {field: max(map(int, re.findall(r"\b" + field + r":(\d+)", logs)), default=0)
                                                   for field in ("InFlight", "CacheWriters", "BufferReserved", "SharedFillTasks", "SharedFillWaiters")}
-                                                  if product.kind == "bakemono" else None,
+                                                  if product.kind == "razor" else None,
                    "resource_samples": samples}
         self.summaries.append(summary)
         save(self.output / "batches.json", self.summaries)
@@ -444,8 +461,10 @@ def functional(args, fixtures, output):
         cleanup.callback(alternate.close)
         client = Client(fixtures, output)
         cleanup.callback(client.raw.close)
-        product = Product("bakemono", output / "functional", origin, args)
+        product = Product("razor", output / "functional", origin, args)
         cleanup.callback(product.stop)
+        large_bytes = fixtures[("large", 1)].stat().st_size
+        large_label = f"{large_bytes // MIB}MiB"
         evidence = []
         def record(name, **details):
             evidence.append({"name": name, "result": "PASS", **details})
@@ -469,7 +488,7 @@ def functional(args, fixtures, output):
         for _ in range(2):
             client.checked(product, "/large-full")
         assert origin.snapshot("/large-full")["get"] == 1
-        record("200MiB full MISS/HIT", origin=origin.snapshot("/large-full"), sha256=client.expected("/large-full")[1])
+        record(large_label + " full MISS/HIT", origin=origin.snapshot("/large-full"), sha256=client.expected("/large-full")[1])
         for size, concurrency in [("small", 100), ("large", 16)]:
             path = f"/{size}-coalesced"
             origin.rules[path] = {"header_delay": .5}
@@ -482,13 +501,14 @@ def functional(args, fixtures, output):
         assert origin.snapshot(path)["bytes"] == 2 * MIB
         record("overlap 2.5MiB responses fetch only2MiB", origin=origin.snapshot(path))
         client.checked(product, path, headers={"Range": "bytes=0-"}, status=206)
-        assert origin.snapshot(path)["bytes"] == 200 * MIB
-        for value, bounds in [("bytes=-17", (200 * MIB - 17, 200 * MIB - 1)), ("bytes=199229440-", (199229440, 200 * MIB - 1))]:
+        assert origin.snapshot(path)["bytes"] == large_bytes
+        for value, bounds in [("bytes=-17", (large_bytes - 17, large_bytes - 1)),
+                              (f"bytes={large_bytes - 10 * MIB}-", (large_bytes - 10 * MIB, large_bytes - 1))]:
             client.checked(product, path, headers={"Range": value}, expected=client.expected(path, bounds=bounds), status=206)
-        assert origin.snapshot(path)["bytes"] == 200 * MIB
-        client.checked(product, path, headers={"Range": "bytes=209715200-"}, expected=None, status=416)
+        assert origin.snapshot(path)["bytes"] == large_bytes
+        client.checked(product, path, headers={"Range": f"bytes={large_bytes}-"}, expected=None, status=416)
         client.checked(product, path, headers={"Range": "bytes=0-16", "If-Range": '"old"'})
-        record("200MiB native Range / suffix / open /416 / If-Range mismatch")
+        record(large_label + " native Range / suffix / open /416 / If-Range mismatch")
         overlap = [(i * 8 * MIB, (i * 8 + 16) * MIB - 1) for i in range(4)]
         for concurrency in (8, 32):
             summary = client.batch(product, origin, f"different-overlapping-ranges-c{concurrency}",
@@ -507,7 +527,7 @@ def functional(args, fixtures, output):
         product.stop()
         product.start()
         client.checked(product, "/large-full")
-        client.checked(product, path, headers={"Range": "bytes=-17"}, expected=client.expected(path, bounds=(200 * MIB - 17, 200 * MIB - 1)), status=206)
+        client.checked(product, path, headers={"Range": "bytes=-17"}, expected=client.expected(path, bounds=(large_bytes - 17, large_bytes - 1)), status=206)
         assert origin.snapshot() == before, (before, origin.snapshot())
         record("clean restart reuses full object and verified blocks")
         for path in ("/large-full", "/large-ranges"):
@@ -515,7 +535,7 @@ def functional(args, fixtures, output):
         before = origin.snapshot()
         client.checked(product, "/large-full")
         client.checked(product, "/large-ranges", headers={"Range": "bytes=0-16"}, expected=client.expected("/large-ranges", bounds=(0, 16)), status=206)
-        assert origin.snapshot()["bytes"] - before["bytes"] == 201 * MIB
+        assert origin.snapshot()["bytes"] - before["bytes"] == large_bytes + MIB
         record("authenticated exact PURGE fences full object and range family")
         # Creator closes its TCP request before headers; follower still gets the full object.
         path = "/large-cancel"
@@ -532,7 +552,7 @@ def functional(args, fixtures, output):
             gate.set()
             follower.result()
         assert origin.snapshot(path)["get"] == 1
-        record("creator cancellation leaves follower's200MiB fill alive")
+        record("creator cancellation leaves follower's" + large_label + " fill alive")
         # Existing semantics preserve the old creator's private passthrough, but
         # invalidate shared publication and reject old followers.
         path = "/small-purge-inflight"
@@ -583,7 +603,7 @@ def functional(args, fixtures, output):
         product.start()
         client.checked(product, path)
         assert origin.snapshot(path)["get"] == 2
-        record("SIGKILL during200MiB fill; restart refetches exact complete body")
+        record("SIGKILL during" + large_label + " fill; restart refetches exact complete body")
         path = "/large-reload"
         entered, gate = threading.Event(), threading.Event()
         origin.rules[path] = {"entered": entered, "gate": gate}
@@ -595,7 +615,7 @@ def functional(args, fixtures, output):
             gate.set()
             old.result()
         client.checked(product, path, expected=client.expected(path, version=2))
-        record("SIGHUP pins old200MiB response; new runtime uses new origin")
+        record("SIGHUP pins old" + large_label + " response; new runtime uses new origin")
         product.reload({"http.parent_proxy.upstream_targets": ("STRING", origin.url),
                         "http.health.interval": ("INT", 1), "http.health.failures": ("INT", 1),
                         "http.health.successes": ("INT", 1)})
@@ -627,7 +647,7 @@ def functional(args, fixtures, output):
         record("saturation rejects503 and recovers", statuses=summary["statuses"])
         client.checked(product, "/small-after-overload")
         product.stop()
-        product = Product("bakemono", output / "capacity", origin, args, capacity=32)
+        product = Product("razor", output / "capacity", origin, args, capacity=32)
         cleanup.callback(product.stop)
         for i in range(160):
             client.checked(product, f"/small-wrap-{i}")
@@ -650,7 +670,7 @@ def benchmark(args, fixtures, output):
         cleanup.callback(origin.close)
         client = Client(fixtures, output)
         cleanup.callback(client.raw.close)
-        for kind in ("bakemono", "ats"):
+        for kind in args.products:
             product = Product(kind, output / (kind + "-benchmark"), origin, args)
             try:
                 for size, steps in [("small", (1, 8, 32, 100)), ("large", (1, 8, 32))]:
@@ -665,13 +685,24 @@ def benchmark(args, fixtures, output):
                         # A real slow origin lets all cold clients contend before data arrives.
                         origin.rules[path] = {"header_delay": .2}
                         summary = client.batch(product, origin, f"{size}-cold-c{c}", path, c, count=1)
-                        if kind == "bakemono":
+                        if kind == "razor":
                             assert summary["origin"]["get"] == 1, summary
                 path = f"/large-slow-origin-{kind}"
                 origin.rules[path] = {"chunk_delay": .001}
                 client.batch(product, origin, "large-slow-origin-c8", path, 8, count=1)
                 client.batch(product, origin, "large-slow-client-c8", path, 8, count=1, slow=.001)
-                if kind == "bakemono":
+                if kind == "razor":
+                    paths = ["/small-mixed-hot"] * 9 + [f"/small-mixed-{i}" for i in range(7)] + ["/large-mixed-0", "/large-mixed-1"] * 2
+                    for path in dict.fromkeys(paths):
+                        client.checked(product, path)
+                    for c in (8, 32):
+                        for repeat in range(args.repeats):
+                            summary = client.batch(product, origin, f"mixed-hot-c{c}-r{repeat + 1}", paths[0], c,
+                                                   count=1, duration=args.seconds, paths=paths)
+                            assert summary["origin"]["get"] == 0, summary
+                    summary = client.batch(product, origin, "small-longtail-unique-c8", "/small-unique", 8, count=8, unique_paths=True)
+                    assert summary["origin"]["get"] == 64, summary
+                    assert summary["origin"]["bytes"] == 64 * fixtures[("small", 1)].stat().st_size, summary
                     path = "/large-range-overlap-load"
                     for c in (1, 8, 32):
                         bounds = (0, 16 * MIB - 1)
@@ -679,30 +710,16 @@ def benchmark(args, fixtures, output):
                                      headers={"Range": "bytes=0-%d" % bounds[1]}, bounds=bounds)
                 # A quiet post-load sample makes drained tasks/leases observable.
                 time.sleep(1)
-                if kind == "bakemono":
+                if kind == "razor":
                     product.proc.send_signal(signal.SIGUSR1)
                     time.sleep(.1)
             finally:
                 product.stop()
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--binary", type=Path, required=True)
-    p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--ats-environment", type=Path)
-    p.add_argument("--mode", choices=("functional", "benchmark", "all"), default="all")
-    p.add_argument("--seconds", type=float, default=4)
-    p.add_argument("--repeats", type=int, default=3)
-    args = p.parse_args()
-    assert args.seconds > 0 and args.repeats > 0
-    args.binary, args.output = args.binary.resolve(), args.output.resolve()
-    if args.mode != "functional":
-        assert args.ats_environment, "ATS environment JSON is required for the comparison"
-    args.output.mkdir(parents=True, exist_ok=False)
+def create_fixtures(fixture_dir, large_bytes):
     fixtures = {}
-    fixture_dir = args.output / "fixtures"
     fixture_dir.mkdir()
-    for size, length in (("small", 256 << 10), ("large", 200 * MIB)):
+    for size, length in (("small", 256 << 10), ("large", large_bytes)):
         for version in (1, 2):
             path = fixture_dir / f"{size}-v{version}.bin"
             source = random.Random(100 + version)
@@ -710,10 +727,35 @@ def main():
                 for offset in range(0, length, CHUNK):
                     f.write(source.randbytes(min(CHUNK, length - offset)))
             fixtures[(size, version)] = path
+    return fixtures
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--binary", type=Path, required=True)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--ats-environment", type=Path)
+    p.add_argument("--products", nargs="+", choices=("razor", "ats"), default=["razor", "ats"])
+    p.add_argument("--large-mib", type=int, choices=(100, 200), default=200)
+    p.add_argument("--cache-root", type=Path, help="new Razor cache directory on the disk under test; results stay under --output")
+    p.add_argument("--mode", choices=("functional", "benchmark", "all"), default="all")
+    p.add_argument("--seconds", type=float, default=4)
+    p.add_argument("--repeats", type=int, default=3)
+    args = p.parse_args()
+    assert args.seconds > 0 and args.repeats > 0
+    args.binary, args.output = args.binary.resolve(), args.output.resolve()
+    if args.mode != "functional" and "ats" in args.products:
+        assert args.ats_environment, "ATS environment JSON is required for the comparison"
+    args.output.mkdir(parents=True, exist_ok=False)
+    if args.cache_root:
+        args.cache_root = args.cache_root.resolve()
+        args.cache_root.mkdir(parents=True, exist_ok=False)
+    fixtures = create_fixtures(args.output / "fixtures", args.large_mib * MIB)
     metadata = {"time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
                 "source_status": subprocess.check_output(["git", "status", "--porcelain"], text=True),
                 "binary": str(args.binary), "binary_sha256": file_hash(args.binary),
+                "binary_version": subprocess.check_output([str(args.binary), "-v"], text=True).strip(),
                 "uname": list(os.uname()), "cpu_count": os.cpu_count(), "cpuinfo": Path("/proc/cpuinfo").read_text(),
                 "meminfo": Path("/proc/meminfo").read_text(), "disk": list(shutil.disk_usage(args.output)),
                 "go": subprocess.check_output(["go", "version"], text=True).strip(),

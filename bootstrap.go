@@ -59,30 +59,30 @@ func NewCache(cfg *appconfig.Config) (*cache.Cache, error) {
 
 // printHelp displays usage information
 func printHelp() {
-	fmt.Printf(`Bakemono - High Performance CDN Cache Server
+	fmt.Printf(`Razor - HTTP Object Cache Proxy
 
 Usage:
-  bakemono [options]
+  razor [options]
 
 Options:
   -d          Run in daemon mode (background)
-  -c string   Path to records.config file (default: "conf/records.config")
+  -c string   Path to config directory (default: "conf")
   -p string   Path to PID file (optional, recommended for daemon mode)
   -h          Show this help message
   -v          Show version information
 
 Examples:
   # Run in foreground
-  bakemono
+  razor
 
   # Run in background
-  bakemono -d
+  razor -d
 
   # Run with custom config and PID file
-  bakemono -d -c /etc/bakemono/records.config -p /var/run/bakemono.pid
+  razor -d -c /etc/razor -p /var/run/razor.pid
 
   # Show version
-  bakemono -v
+  razor -v
 
 For more information, visit: https://github.com/Monsterwi/bakemono
 `)
@@ -90,7 +90,7 @@ For more information, visit: https://github.com/Monsterwi/bakemono
 
 // printVersion displays version information
 func printVersion() {
-	fmt.Printf("Bakemono CDN Cache Server\n")
+	fmt.Printf("Razor HTTP Object Cache Proxy\n")
 	fmt.Printf("Version: %s\n", Version)
 	fmt.Printf("Build Date: %s\n", BuildDate)
 	fmt.Printf("Go Version: %s\n", runtime.Version())

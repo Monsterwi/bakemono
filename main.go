@@ -16,14 +16,14 @@ import (
 var (
 	daemonMode  = flag.Bool("d", false, "Run in daemon mode")
 	configDir   = flag.String("c", "conf", "Path to config directory")
-	pidFile     = flag.String("p", "/var/run/bakemono.pid", "PID file")
+	pidFile     = flag.String("p", "/var/run/razor.pid", "PID file")
 	showHelp    = flag.Bool("h", false, "Show help message")
 	showVersion = flag.Bool("v", false, "Show version information")
 )
 
-const (
-	Version   = "1.0.0"
-	BuildDate = "2026-01-06"
+var (
+	Version   = "0.1.0-dev"
+	BuildDate = "unknown"
 )
 
 func main() {
@@ -55,7 +55,7 @@ func main() {
 
 		// Parent process: release resources and exit
 		if d != nil {
-			fmt.Printf("Bakemono started in background (PID: %d)\n", d.Pid)
+			fmt.Printf("Razor started in background (PID: %d)\n", d.Pid)
 			return
 		}
 

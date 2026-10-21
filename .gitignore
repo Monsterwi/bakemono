@@ -24,3 +24,6 @@ go.work
 # local build artifacts
 /bakemono
 /razor
+
+# Python acceptance tool artifacts
+__pycache__/

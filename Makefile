@@ -1,13 +1,13 @@
 .PHONY: build clean test test-race test-integration pressure-app universal all
 
-VERSION=0.0.1
-BIN=bakemono
+VERSION?=0.1.0-dev
+BIN=razor
 DIR_SRC=./
 DOCKER_CMD=docker
 
 GO_ENV=CGO_ENABLED=0
-Revision=$(shell git rev-parse --short HEAD)
-GO_FLAGS=-ldflags="-X main.Version=$(VERSION) -X 'main.Revision=$(Revision)' -X 'main.Time=`date`' -extldflags -static"
+BUILD_DATE?=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+GO_FLAGS=-ldflags="-X main.Version=$(VERSION) -X main.BuildDate=$(BUILD_DATE) -extldflags -static"
 GO=go
 # Pin local Make targets and CI to the same maintained patch.
 export GOTOOLCHAIN=go$(shell awk '$$1 == "go" { print $$2 }' go.mod)

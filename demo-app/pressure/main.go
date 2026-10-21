@@ -14,9 +14,9 @@ import (
 const LOOP = 5000
 
 func main() {
-	//_ = os.Remove("/tmp/bakemono-pressure/cache.db")
+	//_ = os.Remove("/tmp/razor-pressure/cache.db")
 
-	v, err := cache.NewCache(1, []string{"/tmp/bakemono-pressure/cache.db"}, []int64{1024 * 5120 * 1000})
+	v, err := cache.NewCache(1, []string{"/tmp/razor-pressure/cache.db"}, []int64{1024 * 5120 * 1000})
 	if err != nil {
 		panic(err)
 	}

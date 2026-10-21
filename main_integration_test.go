@@ -23,7 +23,7 @@ import (
 // storage and a loopback origin. The access log marks handler completion, so the
 // second request cannot race the first request's cache commit.
 func TestBinaryCacheMissThenHit(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "bakemono")
+	binary := filepath.Join(t.TempDir(), "razor")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build local binary: %v\n%s", err, output)
