@@ -42,7 +42,7 @@ func (s *Server) fetchFill(task *fillTask, r *http.Request, key []byte, resource
 		return fillResult{err: err}
 	}
 	defer release()
-	originRequest := withRequestRuntime(r.Clone(task.ctx), task.ctx, resources.runtime)
+	originRequest := withRequestRuntime(r, task.ctx, resources.runtime)
 	if stored != nil {
 		originRequest.Header.Del("If-None-Match")
 		originRequest.Header.Del("If-Modified-Since")
@@ -81,7 +81,7 @@ func (s *Server) fetchFill(task *fillTask, r *http.Request, key []byte, resource
 				_ = s.cache.InvalidateFill(task.token)
 			}
 			stored = nil
-			originRequest = withRequestRuntime(r.Clone(task.ctx), task.ctx, resources.runtime)
+			originRequest = withRequestRuntime(r, task.ctx, resources.runtime)
 			originRequest.Header.Del("If-None-Match")
 			originRequest.Header.Del("If-Modified-Since")
 			continue

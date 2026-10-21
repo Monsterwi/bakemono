@@ -37,7 +37,7 @@ func requestRuntime(r *http.Request) *runtimeSnapshot {
 }
 
 func withRequestRuntime(r *http.Request, ctx context.Context, runtime *runtimeSnapshot) *http.Request {
-	return r.WithContext(context.WithValue(ctx, runtimeContextKey{}, runtime))
+	return proxy.CloneRequest(r, context.WithValue(ctx, runtimeContextKey{}, runtime))
 }
 
 func newRuntime(cfg *appconfig.Config, p *proxy.HTTPProxy, version uint64) (*runtimeSnapshot, error) {
@@ -49,6 +49,9 @@ func newRuntime(cfg *appconfig.Config, p *proxy.HTTPProxy, version uint64) (*run
 		return nil, err
 	}
 	rt := &runtimeSnapshot{config: cfg, proxy: p, version: version, namespace: p.CacheNamespace(), admission: budget.New(cfg.MaxRequests, cfg.MaxQueuedRequests)}
+	if cfg.SharedFillPublicStatic == 1 {
+		rt.namespace += ":" + proxy.PublicRequestVersion
+	}
 	rt.writers = budget.New(min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation()), cfg.MaxQueuedCacheWriters)
 	return rt, nil
 }
@@ -144,10 +147,17 @@ type restartConfig struct {
 	port, connections, headerTimeout, idleTimeout                 int
 	ramAlgorithm                                                  string
 	ramBytes                                                      int
+	publicStatic                                                  int
 }
 
 func restartSettings(c *appconfig.Config) restartConfig {
-	return restartConfig{c.ConfigDir, c.LogfileDir, c.AccessLogFilename, c.ErrorLogFilename, c.TLSCertFile, c.TLSKeyFile, c.PurgeToken, c.ServerPort, c.MaxClientConnections, c.RequestHeaderTimeout, c.KeepAliveTimeout, c.RAMCacheAlgorithm, c.RAMCacheBytes}
+	return restartConfig{
+		configDir: c.ConfigDir, logDir: c.LogfileDir, accessLog: c.AccessLogFilename, errorLog: c.ErrorLogFilename,
+		cert: c.TLSCertFile, key: c.TLSKeyFile, purgeToken: c.PurgeToken, port: c.ServerPort,
+		connections: c.MaxClientConnections, headerTimeout: c.RequestHeaderTimeout, idleTimeout: c.KeepAliveTimeout,
+		ramAlgorithm: c.RAMCacheAlgorithm, ramBytes: c.RAMCacheBytes, publicStatic: c.SharedFillPublicStatic,
+	}
+
 }
 
 // File content is part of restart compatibility; paths alone miss in-place edits.

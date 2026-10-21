@@ -109,6 +109,9 @@ func (h *HTTPProxy) trusted(ip netip.Addr) bool {
 }
 
 func (h *HTTPProxy) forwarding(r *http.Request) (chain, clientIP, scheme string) {
+	if publicScheme, ok := r.Context().Value(publicRequestKey{}).(string); ok {
+		return "", "", publicScheme
+	}
 	clientIP = GetIP(r)
 	chain = clientIP
 	scheme = "http"
@@ -277,6 +280,19 @@ func (h *HTTPProxy) SelectOrigin(r *http.Request) (*Origin, error) {
 	}
 	return &Origin{proxy: h, host: host}, nil
 }
+
+// ConfiguredOrigins returns pinned handles in stable configuration order, including
+// unhealthy targets for cache lookup. Handles share this proxy's pool and lifetime.
+func (h *HTTPProxy) ConfiguredOrigins() []*Origin {
+	origins := make([]*Origin, 0, len(h.upstreams))
+	for _, host := range h.upstreams {
+		origins = append(origins, &Origin{proxy: h, host: host})
+	}
+	return origins
+}
+
+// Available reports health without re-enabling a target removed from selection.
+func (o *Origin) Available() bool { return o.proxy.ReadAlive(o.host) }
 
 // Identity includes the configured scheme, authority, base path and fixed query.
 func (o *Origin) Identity() string { return o.host }
