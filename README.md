@@ -46,13 +46,13 @@ CONFIG proxy.config.cache.max_object_bytes INT 268435456
 CONFIG proxy.config.cache.range_block_bytes INT 1048576
 ```
 
-Authorization/Cookie 等旁路请求保留原代理行为。公共模式使用独立、版本化内容命名空间；切换模式安全 MISS，不删除旧文件。该能力已通过服务级回归，专用测试机的本轮真实二进制验收由 #19 完成。
+Authorization/Cookie 等旁路请求保留原代理行为。公共模式使用独立、版本化内容命名空间；切换模式安全 MISS，不删除旧文件。该能力已通过服务级回归，专用测试机上已完成本次两策略/HDD/SSD矩阵和两次全新SSD两小时实测，证据见下文 #19 报告。
 
 生产者不依赖首个客户端继续存活。PURGE 后的新请求不能加入旧任务，旧任务也不能重新发布缓存。如果源站响应不可共享，正文仅交付给原始创建者，其他订阅者受控失败，不并发重试源站。普通整对象路径仍等待完整提交。公共静态模式下，identity 编码、强 ETag、可共享且大于 `max(1 MiB, range_block_bytes)` 的完整 GET 与单 Range 共用块：首个所需块完整校验并提交后开始发送，发送当前块时最多预取本区间下一块。小文件保留整对象路径；冷 GET 可增加一次共享 HEAD 分类，不为每块重复 HEAD。
 
 `CONFIG proxy.config.cache.range_block_bytes INT 1048576` 支持 64 KiB–8 MiB 的 2 的幂，重启生效，SIGHUP 改变会被拒绝。块大小与格式进入 manifest/块身份；此轮使用 v2 布局，对旧 v1 块安全 MISS，保留旧文件。完整 fresh Range 可在全部源站不健康时离线读取；缺块或过期时仍需可用源站，整次响应固定一个源站和版本。
 
-发送缓冲与生产者 staging 都计入 `write_buffer_bytes` 的保守预留；额度不足跳过预取，发送完当前块先释放读缓冲，再等待后块，磁盘容量按至多两块窗口检查。`Stats` 的 `RangeBlockHits/Misses` 是各读者已准备块的逻辑命中，`RangeHitBytes/MissBytes` 是已准备请求区间的尝试字节（不代表实际网络或唯一回源字节）；源站实际正文另见 `Origin.Bytes`。请求只有全部块复用且完整成功才计 HIT。发送前失败返回受控错误；发送后失败、PURGE 或版本变化会中断流，客户端必须检查正文读取错误与 Content-Length。合成响应保守使用 `Cache-Control: no-cache`；提交不等于每块 fsync，不读取未提交字节。服务级回归已验证，本轮 HDD/SSD 与 soak 尚待 #19 验收。
+发送缓冲与生产者 staging 都计入 `write_buffer_bytes` 的保守预留；额度不足跳过预取，发送完当前块先释放读缓冲，再等待后块，磁盘容量按至多两块窗口检查。`Stats` 的 `RangeBlockHits/Misses` 是各读者已准备块的逻辑命中，`RangeHitBytes/MissBytes` 是已准备请求区间的尝试字节（不代表实际网络或唯一回源字节）；源站实际正文另见 `Origin.Bytes`。请求只有全部块复用且完整成功才计 HIT。发送前失败返回受控错误；发送后失败、PURGE 或版本变化会中断流，客户端必须检查正文读取错误与 Content-Length。合成响应保守使用 `Cache-Control: no-cache`；提交不等于每块 fsync，不读取未提交字节。服务级回归已验证，本轮 HDD/SSD 三轮矩阵与两策略全新 SSD 各两小时实测已通过，完整范围和限制见 #19 报告。
 
 ## 快速开始
 
@@ -118,7 +118,7 @@ CONFIG proxy.config.cache.ram_cache_algorithm STRING otter
 CONFIG proxy.config.cache.ram_cache_bytes INT 10485760
 ```
 
-算法只接受 `otter` / `s3-fifo`；预算为每 stripe 的正文权重字节，`0` 禁用，最大 1 TiB。两项重启生效，SIGHUP 改变会拒绝并保留现服务。策略切换保留磁盘文件及其身份，不新增读盘 promotion。空值预留 1 字节，过大值/超过 64 KiB 的 key 跳过 RAM 并安全回退磁盘；字节预算不包括节点、key、ghost 与 Go runtime，不能当作 RSS 限额。算法变体、边界及公平基准入口见 [RAM 缓存策略](docs/RAM_CACHE.md)。本轮硬件/soak 验收完成前不宣称 S3-FIFO 性能优于默认策略。
+算法只接受 `otter` / `s3-fifo`；预算为每 stripe 的序列化 cache value 权重字节（包括 Doc/HTTP 元数据、manifest 及正文），`0` 禁用，最大 1 TiB。两项重启生效，SIGHUP 改变会拒绝并保留现服务。策略切换保留磁盘文件及其身份，不新增读盘 promotion。空值预留 1 字节，过大值/超过 64 KiB 的 key 跳过 RAM 并安全回退磁盘；该 value 字节预算不包括外部节点、key、ghost 与 Go runtime，不能当作 RSS 限额。算法变体、边界及公平基准入口见 [RAM 缓存策略](docs/RAM_CACHE.md)。本轮硬件和两策略各两小时实测已通过；结果限于所测工作负载，不宣称 S3-FIFO 普遍优于默认策略。
 
 完整配置项及热更新边界见 [conf/records.config](conf/records.config)。默认整对象限额为 64 MiB；示例将其调整为 256 MiB，约 200 MiB 对象的测试也需配置足够缓存容量。`write_buffer_bytes` 是写入预算，不是进程 RSS 上限。
 
@@ -189,19 +189,21 @@ python3 tools/hey_benchmark.py \
   --seconds 10 --repeats 3
 ```
 
-本轮 100 MiB 交付的完整数据、版本与边界见 [2026-10-21 压测报告](docs/BENCHMARK_2026-10-21.md)：
+本轮公共分块缓存的 [专机验收报告](docs/benchmarks/CDN_ACCEPTANCE_2026-10-21.md) 基于测量源码 `5ccf32c`：24项功能/布局/三轮主压力/checked-hey/物理文件冷读及两策略各一次全新SSD ≥7200秒长测，**全部26项实测通过**。四次历史中止/失败及修复均在报告保留；旧 `12571fc` 的 Otter 两小时虽通过，S3-FIFO 约 100 分钟时截断导致该次整体验收失败，旧时间不抵扣两次新长测。
 
-| 场景 | 实测结果 |
+| 本轮场景 | 修复版已完成实测结果 |
 | --- | --- |
-| HDD/SSD 主矩阵 | 94 批、342,271 请求，批次非预期错误 0；其中 60 个主动限额 503 单列 |
-| 独立 Go 客户端交叉测量 | 正文读取检查版 hey：24 批、1,680,294 个热缓存请求，实际读取字节及错误校验通过；每批前后 hash 一致 |
-| 100 个等价小文件冷请求 | 仅回源 1 次 / 256 KiB |
-| 32 个等价 100 MiB 冷请求 | 仅回源 1 次 / 100 MiB |
-| 8 个并发重叠 Range | 返回合计 128 MiB，只获取 40 MiB 区间并集，另有 1 次 HEAD；后续热请求新增回源 0 |
-| 256 KiB / 32 并发热缓存 | hey 中位 QPS：HDD 14,495.49 / SSD 14,430.41 |
-| 100 MiB / 8 并发热缓存 | hey 中位吞吐：HDD 3982.59 / SSD 4377.74 MiB/s |
+| HDD/SSD × 两 RAM 策略主压力 | 228 批、664,149 个逐响应长度/SHA 校验请求，非预期错误 0；主动限额功能的 120 个预期 503 单列 |
+| checked-hey 交叉测量 | 48 批、2,776,124 个实际正文读取/字节检查请求，每批前后 SHA；另有 12 次物理文件冷读通过 |
+| 100 个实际 TCP IP/UA/trace 公共冷请求 | 默认1MiB布局、100MiB主测：所需块一个正文生产者；HEAD 1、GET 1、正文 1 MiB |
+| 100 MiB 公共完整 GET 冷突发 | 默认1MiB布局：每轮 HEAD 1+块 GET 100、正文 100 MiB；不同于历史整对象 GET 1 次 |
+| 重叠区间 | 功能正文并集 24 MiB，第二次只补 8 MiB；压力四个区间并集 28 MiB |
+| 吞吐/时延与资源 | 两策略/两介质均三轮完整保留；HDD/S3 拖动 r2 的 50.88 MiB/s 波动未剔除，原因未证实；Otter 的 HDD矩阵/SSD长测 ResidentBytes 快照分别10.53/10.76 MiB，超过配置10MiB；弱一致采样不证明同刻精确驻留量或同步硬预算违约，预算也不是RSS限额 |
+| 两策略全新 SSD 长测 | Otter 7200.279144秒/122,666 GET，S3-FIFO 7200.089907秒/123,096 GET；非预期错误0、最终活动与Origin队列均排空 |
+| 长测分类与资源 | 未分类GET分别26/30、Bypass均0，原因未证实；RSS采样峰69.82/70.18MiB，累计分配及GC成本完整保留于报告 |
+| 文档交付 | 最终准确性审查、交付提交及其CI由Git/Issue外部证据记录，测量源码与后续文档提交区分 |
 
-上述热缓存数字为 32 逻辑核测试机、服务 GOMAXPROCS=8 下的同机 loopback 结果，主要命中 RAM/OS page cache，不能写成公网 CDN 带宽或生产容量。报告另列实际发生块 I/O 的缓存冷读，不混为一种指标。测试机路径见 [测试环境](docs/TEST_ENVIRONMENT.md)；历史 200 MiB / ATS 9.2.3 对照见 [旧报告](docs/ACCEPTANCE_2026-10-20.md)，两台机器的数字不直接计算提升比例。
+以上为同机 HTTP/1.1 loopback 结果，不代表 WAN、TLS/H2 压力或裸盘吞吐。缓存文件小于主机 RAM，warm 磁盘路径可能是 OS page cache。历史 [2026-10-21 保守整对象报告](docs/BENCHMARK_2026-10-21.md) 与 [2026-10-20 /200 MiB/ATS 9.2.3 报告](docs/ACCEPTANCE_2026-10-20.md) 保留；旧冷整对象/并集和吞吐数字不冒充新公共块路径结果。测试机见 [测试环境](docs/TEST_ENVIRONMENT.md)。
 
 ## 当前边界
 
@@ -211,7 +213,7 @@ python3 tools/hey_benchmark.py \
 - 普通整对象路径等待完整提交；块级 RWW 等待首块提交，不读取未校验/未提交字节。没有 stale-if-error、跨节点缓存一致性或 io_uring 后端。
 - 文件写入完成不等同于逐对象 fsync；异常退出可能安全冷启动相关 stripe。缓存文件需保持单进程独占，格式及恢复约束见 [存储格式](docs/CACHE_STORAGE_FORMAT.md)。
 
-本轮离线 Range、公共静态合并、提交后 RWW 和可选 RAM 策略仍需完成 [HDD/SSD 与 soak 验收 #19](https://github.com/Monsterwi/bakemono/issues/19)。[性能剖析 #18](https://github.com/Monsterwi/bakemono/issues/18)、内核升级和 io_uring 不纳入本轮。
+本轮离线 Range、公共静态合并、提交后 RWW 和可选 RAM 策略已完成实现；两次旧版本长测失败修复后，5ccf32c 新源码24项矩阵与两策略全新SSD各两小时，共26项实测通过；最终文档审查及交付提交的CI仍是交付门槛，见 [HDD/SSD 与 soak 验收 #19](https://github.com/Monsterwi/bakemono/issues/19)。[性能剖析 #18](https://github.com/Monsterwi/bakemono/issues/18)、内核升级和 io_uring 不纳入本轮。
 
 ## 项目结构
 
