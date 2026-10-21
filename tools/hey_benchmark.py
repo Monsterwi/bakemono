@@ -109,10 +109,26 @@ def main():
             with product.cache_file.open("rb") as cache_file:
                 os.fsync(cache_file.fileno())
                 os.posix_fadvise(cache_file.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
-            row = client.batch(product, origin, f"physical-file-cold-r{repeat + 1}", path, 1, count=1)
-            assert row["origin"]["get"] == 0, row
-            assert row["process_io_bytes"]["read_bytes"] >= fixtures[("large", 1)].stat().st_size, row
-            save(args.output / "physical-reads.json", client.summaries)
+            name = f"physical-file-cold-r{repeat + 1}"
+            before = origin.snapshot()
+            initial = product.resource()
+            command = [str(args.hey), "-n", "1", "-c", "1", "-t", "120", "-cpus", "1", "-host", "bench.local",
+                       "-H", "Accept-Encoding: identity", "-disable-compression", "-o", TEMPLATE,
+                       f"http://127.0.0.1:{product.port}{path}"]
+            raw = json.loads(subprocess.check_output(command, text=True, timeout=180))
+            final = product.resource()
+            save(args.output / (name + ".json"), raw)
+            expected_bytes = fixtures[("large", 1)].stat().st_size
+            row = checked_summary(raw, expected_bytes)
+            row.update(name=name, process_io_bytes={k: final[k] - initial[k] for k in ("read_bytes", "write_bytes")},
+                       cpu_seconds_per_gib=(final["cpu_seconds"] - initial["cpu_seconds"]) / (expected_bytes / (1 << 30)))
+            # fadvise is advisory; allow residual pages but require >=99% actual disk reads.
+            assert row["process_io_bytes"]["read_bytes"] >= expected_bytes * .99, row
+            client.checked(product, path)
+            assert origin.snapshot() == before, (before, origin.snapshot())
+            results.append(row)
+            save(args.output / "physical-reads.json", [r for r in results if r["name"].startswith("physical-")])
+            print(name, round(row["mib_per_second"], 2), "MiB/s", row["process_io_bytes"], flush=True)
         product.proc.send_signal(signal.SIGUSR1)
     save(args.output / "outcome.json", {"success": True})
 

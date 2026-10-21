@@ -27,10 +27,12 @@ cd /data/bakemono-lab
 | 用途 | 路径 | 设备及首次核验可用空间 |
 | --- | --- | --- |
 | 源码、构建、工具、配置、结果 | `/data/bakemono-lab` | `/dev/sdl6`，约 362 GiB |
-| SATA 机械盘缓存 | `/data3/bakemono-lab/cache` | `/dev/sdc`，`ST4000NM0295`，`ROTA=1`，约 3.64 TiB |
-| SSD 缓存 | `/ssd1/bakemono-lab/cache` | `/dev/sdk`，`INTEL SSDSC2BB80`，`ROTA=0`，约 92 GiB |
+| HDD 机械盘缓存 | `/data3/bakemono-lab/cache` | `/dev/sdc`，`ST4000NM0295`，7200 rpm SAS，约 3.64 TiB |
+| SSD 缓存 | `/ssd1/bakemono-lab/cache` | `/dev/sdk`，`INTEL SSDSC2BB800G4`，SATA 6 Gb/s SSD，约 92 GiB |
 
 空间会变化，每次测试开始前重新执行 `df -hT`。`/ssd2` 是 PERC H730 Mini 暴露的逻辑设备，当前 `ROTA=1`；未确认底层介质，不将它用于 SSD 基线。
+
+`smartctl -i` 已核实 `/data3` 实际为 SAS 机械盘，`/ssd1` 为 SATA SSD；不再仅凭 `ROTA` 推断接口类型。
 
 以下目录已创建：
 

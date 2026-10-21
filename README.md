@@ -129,6 +129,18 @@ python3 tools/acceptance.py \
 
 `--cache-root` 也必须尚不存在，工具不会清理已有缓存。压测包括热缓存、冷热门对象、唯一长尾 URL、混合大小对象、Range、慢源站与慢客户端；混合负载按每个客户端洗牌后的加权 URL 列表循环，实际比例记录在结果中。ATS 对照入口也在该工具中，但现有适配器面向 **ATS 9.2 的 records.config/runroot**；ATS 10.2 的环境适配尚未验收，不能直接宣称可用。
 
+另提供 [hey 交叉测量工具](tools/hey_benchmark.py)，复用同一源站、进程和采样机制，使用固定 `hey v0.1.4` 测量热缓存，减少 Python 客户端对吞吐的影响。每批前后验证 SHA256；hey 本身检查状态、传输错误和声明的正文长度，不逐响应计算 hash。工具还在恢复完成后，对本项目静止的缓存文件执行 `fsync`/`POSIX_FADV_DONTNEED`，并要求实际读盘字节达到对象大小的 99%，单独验证近全量物理冷读。逐出是建议，不能假定每一页均被清除。
+
+```bash
+GOBIN=/path/to/tools go install github.com/rakyll/hey@v0.1.4
+python3 tools/hey_benchmark.py \
+  --binary "$PWD/razor" --hey /path/to/tools/hey \
+  --fixtures /path/to/results/razor-cdn-unique-run/fixtures \
+  --output /path/to/results/razor-hey-unique-run \
+  --cache-root /path/to/cache-disk/razor-hey-unique-run \
+  --seconds 10 --repeats 3
+```
+
 已验收代码在旧项目名下取得以下结果，原始版本、环境与限制见 [2026-10-20 验收报告](docs/ACCEPTANCE_2026-10-20.md)：
 
 | 场景 | 实测结果 |
@@ -148,6 +160,8 @@ python3 tools/acceptance.py \
 - 所有源站被健康检查摘除时，fresh 完整对象仍可 HIT，但已缓存的 Range 当前会返回 502。这是下一步优先修复的可用性问题。
 - 完整提交后交付会增加冷大对象的首字节等待。没有流式 RWW、stale-if-error、跨节点缓存一致性或 io_uring 后端。
 - 文件写入完成不等同于逐对象 fsync；异常退出可能安全冷启动相关 stripe。缓存文件需保持单进程独占，格式及恢复约束见 [存储格式](docs/CACHE_STORAGE_FORMAT.md)。
+
+后续优先收敛已有能力：[修复离线源站下的 Range HIT](https://github.com/Monsterwi/bakemono/issues/16)、[明确合并回源的请求等价边界](https://github.com/Monsterwi/bakemono/issues/17)、[依据剖析完成一项效率优化](https://github.com/Monsterwi/bakemono/issues/18)。流式 RWW、内核升级和 io_uring 暂不进入这一版。
 
 ## 项目结构
 
