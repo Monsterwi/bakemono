@@ -11,25 +11,31 @@ import (
 	"github.com/Monsterwi/razor/proxy"
 )
 
-type counters struct{ requests, rejected, cancelled, hits, misses, bypass, bytes, ttfbCount, ttfbNanos, cacheErrors, cacheSkipped atomic.Uint64 }
+type counters struct {
+	rangeHits, rangeMisses, rangeHitBytes, rangeMissBytes                                                       atomic.Uint64
+	requests, rejected, cancelled, hits, misses, bypass, bytes, ttfbCount, ttfbNanos, cacheErrors, cacheSkipped atomic.Uint64
+}
 
 // Stats contains only aggregate, bounded-cardinality counters. BufferReserved is
-// the conservative payload reservation for active writers, not a total RSS cap.
+// the conservative payload reservation for writers and block readers, not a total RSS cap.
 type Stats struct {
 	Goroutines                                                                                                                  int
 	RuntimeVersion                                                                                                              uint64
 	RetiredRuntimes                                                                                                             int
-	InFlight, Queued, CacheWriters, CacheQueued, DiskQueued                                                                     int
+	InFlight, Queued, CacheWriters, CacheQueued, RangeReaders, RangeReaderQueued, DiskQueued                                    int
 	BufferReserved, DiskBufferedBytes                                                                                           int64
 	Requests, Rejected, Cancelled, Hits, Misses, Bypass, Bytes, TTFBCount, TTFBNanoseconds, CacheWriteErrors, CacheWriteSkipped uint64
 	SharedFillTasks, SharedFillWaiters                                                                                          int
 	SharedFillJoined, SharedFillCompleted, SharedFillUnshareable, SharedFillFailed, SharedFillCancelled                         uint64
+	RangeBlockHits, RangeBlockMisses, RangeHitBytes, RangeMissBytes                                                             uint64
 	RAM                                                                                                                         []cache.RAMStats
 	Origin                                                                                                                      proxy.Stats
 }
 
 func (s *Server) Stats() Stats {
 	st := Stats{Goroutines: runtime.NumGoroutine(), Requests: s.counters.requests.Load(), Rejected: s.counters.rejected.Load(), Cancelled: s.counters.cancelled.Load(), Hits: s.counters.hits.Load(), Misses: s.counters.misses.Load(), Bypass: s.counters.bypass.Load(), Bytes: s.counters.bytes.Load(), TTFBCount: s.counters.ttfbCount.Load(), TTFBNanoseconds: s.counters.ttfbNanos.Load(), CacheWriteErrors: s.counters.cacheErrors.Load(), CacheWriteSkipped: s.counters.cacheSkipped.Load()}
+	st.RangeBlockHits, st.RangeBlockMisses = s.counters.rangeHits.Load(), s.counters.rangeMisses.Load()
+	st.RangeHitBytes, st.RangeMissBytes = s.counters.rangeHitBytes.Load(), s.counters.rangeMissBytes.Load()
 	s.mu.Lock()
 	st.Origin = s.closedOrigin
 	if s.current != nil {
@@ -48,7 +54,11 @@ func (s *Server) Stats() Stats {
 		b = rt.writers.Stats()
 		st.CacheWriters += b.InFlight
 		st.CacheQueued += b.Queued
-		st.BufferReserved += int64(b.InFlight) * int64(rt.config.CacheWriterReservation())
+		st.BufferReserved += int64(b.InFlight) * int64(rt.config.CacheWriterReservation()-rt.config.RangeReaderReservation())
+		b = rt.rangeReaders.Stats()
+		st.RangeReaders += b.InFlight
+		st.RangeReaderQueued += b.Queued
+		st.BufferReserved += int64(b.InFlight) * int64(rt.config.RangeReaderReservation())
 		addOriginStats(&st.Origin, rt.proxy.Stats())
 	}
 	s.mu.Unlock()

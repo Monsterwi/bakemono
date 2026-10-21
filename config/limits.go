@@ -105,6 +105,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("proxy.config.%s must be between %d and %d", f.name, f.min, f.max)
 		}
 	}
+	if c.RangeBlockBytes&(c.RangeBlockBytes-1) != 0 {
+		return fmt.Errorf("proxy.config.cache.range_block_bytes must be a power of two")
+	}
 	if c.CacheWriteBufferBytes < c.CacheWriterReservation() {
 		return fmt.Errorf("cache write budget cannot hold one writer (%d bytes)", c.CacheWriterReservation())
 	}
@@ -112,9 +115,14 @@ func (c *Config) Validate() error {
 }
 
 // CacheWriterReservation covers the retained head, growing 1 MiB fragment,
-// serialized document, bounded HTTP metadata and published-fragment records.
+// serialized document, bounded HTTP metadata and published-fragment records,
+// plus one producer staging block and an independent committed-block reader.
 // The HTTP path caps its metadata and key at 64 KiB, and writes in 32 KiB pieces.
-func (c *Config) CacheWriterReservation() int { return 6<<20 + (c.MaxCacheObjectBytes/(1<<20)+2)*128 }
+func (c *Config) CacheWriterReservation() int {
+	// One slot covers a producer staging block plus an independent sending reader.
+	return 6<<20 + (c.MaxCacheObjectBytes/(1<<20)+2)*128 + c.RangeBlockBytes + c.RangeReaderReservation()
+}
+func (c *Config) RangeReaderReservation() int { return c.RangeBlockBytes + 2<<20 + 64<<10 }
 func (c *Config) loadLimits(rc *RecordsConfig) error {
 	for _, f := range c.resourceFields() {
 		name := "proxy.config." + f.name

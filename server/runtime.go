@@ -22,12 +22,12 @@ var ErrReloadBusy = errors.New("reload busy: retired runtime still has active re
 // A request and each independent producer retain one immutable runtime until all
 // body I/O ends. At most current + one retired runtime can consume resources.
 type runtimeSnapshot struct {
-	config             *appconfig.Config
-	proxy              *proxy.HTTPProxy
-	admission, writers *budget.Limiter
-	namespace          string
-	version            uint64
-	refs               int // guarded by Server.mu
+	config                           *appconfig.Config
+	proxy                            *proxy.HTTPProxy
+	admission, writers, rangeReaders *budget.Limiter
+	namespace                        string
+	version                          uint64
+	refs                             int // guarded by Server.mu
 }
 
 type runtimeContextKey struct{}
@@ -52,7 +52,9 @@ func newRuntime(cfg *appconfig.Config, p *proxy.HTTPProxy, version uint64) (*run
 	if cfg.SharedFillPublicStatic == 1 {
 		rt.namespace += ":" + proxy.PublicRequestVersion
 	}
-	rt.writers = budget.New(min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation()), cfg.MaxQueuedCacheWriters)
+	slots := min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation())
+	rt.writers = budget.New(slots, cfg.MaxQueuedCacheWriters)
+	rt.rangeReaders = budget.New(slots, cfg.MaxRequests)
 	return rt, nil
 }
 
@@ -148,6 +150,7 @@ type restartConfig struct {
 	ramAlgorithm                                                  string
 	ramBytes                                                      int
 	publicStatic                                                  int
+	rangeBlockBytes                                               int
 }
 
 func restartSettings(c *appconfig.Config) restartConfig {
@@ -155,9 +158,8 @@ func restartSettings(c *appconfig.Config) restartConfig {
 		configDir: c.ConfigDir, logDir: c.LogfileDir, accessLog: c.AccessLogFilename, errorLog: c.ErrorLogFilename,
 		cert: c.TLSCertFile, key: c.TLSKeyFile, purgeToken: c.PurgeToken, port: c.ServerPort,
 		connections: c.MaxClientConnections, headerTimeout: c.RequestHeaderTimeout, idleTimeout: c.KeepAliveTimeout,
-		ramAlgorithm: c.RAMCacheAlgorithm, ramBytes: c.RAMCacheBytes, publicStatic: c.SharedFillPublicStatic,
+		ramAlgorithm: c.RAMCacheAlgorithm, ramBytes: c.RAMCacheBytes, publicStatic: c.SharedFillPublicStatic, rangeBlockBytes: c.RangeBlockBytes,
 	}
-
 }
 
 // File content is part of restart compatibility; paths alone miss in-place edits.

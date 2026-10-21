@@ -24,6 +24,7 @@ type Config struct {
 	RAMCacheBytes                                               int
 	MaxClientConnections                                        int
 	SharedFillPublicStatic                                      int
+	RangeBlockBytes                                             int
 	resourceDefaults                                            bool
 	CacheWriteTimeout                                           int
 	SharedFillMaxTasks, SharedFillMaxWaiters, SharedFillTimeout int

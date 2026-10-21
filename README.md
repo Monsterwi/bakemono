@@ -2,7 +2,7 @@
 
 **Razor 是一个用 Go 实现、借鉴 Apache Traffic Server 缓存架构的 HTTP 对象缓存代理。** 面向下载与分发场景，重点解决热点对象重复回源、大文件区间复用，以及取消、失效和重启时的缓存正确性。
 
-当前版本使用 `net/http`，支持整对象合并回源、1 MiB 固定块 Range 缓存、磁盘缓存恢复、鉴权 PURGE、TLS/HTTP/2 和配置快照热更新。定位为具有真实二进制验收证据的单进程缓存代理；生产容量仍需在目标硬件上测量。
+当前版本使用 `net/http`，支持整对象合并回源、可配置块的 Range/公共静态大 GET 缓存与提交后 RWW、磁盘缓存恢复、鉴权 PURGE、TLS/HTTP/2 和配置快照热更新。定位为具有真实二进制验收证据的单进程缓存代理；生产容量仍需在目标硬件上测量。
 
 功能状态以本 README 和对应版本的验收报告为准，早期设计与状态文档保留供追溯。
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 合并回源 | 缓存 MISS 后、访问源站前登记共享任务；相同任务的并发请求共享一次填充，完整提交后各自读取缓存 |
 | 独立生命周期 | 首个客户端取消不影响其他订阅者；全部订阅者离开时取消回源；任务数、订阅者数、超时和写缓冲均有预算 |
-| 部分缓存 | 单 Range 请求拆成 1 MiB 块；用固定源站、强 ETag、表示和块位置隔离版本，重叠请求复用已有块和在途任务 |
+| 部分缓存 | 单 Range 与公共静态合格大 GET 共用可配置块（默认 1 MiB）；固定源站、强 ETag、布局和失效代次，首块提交后发送，重叠请求只补缺块 |
 | HTTP 缓存语义 | 保守准入、GET/HEAD、受支持的 Vary 变体、Age/新鲜度、条件请求和源站 304 重验证；私有及不支持的响应旁路 |
 | 持久缓存 | stripe 文件、目录索引、聚合写缓冲和 RAM cache；CRC/长度/身份校验，片段写入完成后才发布完整对象 |
 | 恢复与失效 | 干净关闭后的检查点恢复；异常退出时不把不可信片段作为 HIT；PURGE 失效代次阻止旧填充重新发布 |
@@ -36,11 +36,15 @@ flowchart LR
 
 默认模式的任务身份包含缓存命名空间、方法、Host、客户端 IP、完整请求头、TLS 状态和配置版本，只合并这些条件等价的请求。
 
-公共静态源站可显式配置 `CONFIG proxy.config.cache.shared_fill_public_static INT 1`（默认 0，重启生效）。此模式要求源站不按客户端身份生成不同内容：生产者使用固定 `User-Agent: Razor`，移除真实客户端 IP、Forwarded/X-Forwarded-For/X-Real-IP 和追踪头，保留可信代理解析后的 scheme/Host。不同 IP、UA、追踪信息的等价冷请求可以合并；未知头仍参与任务身份并发给源站，Accept-Encoding/Accept-Language 的不同值保持隔离。持久缓存继续遵守源站声明的这两个 Vary 维度；不支持的 Vary 不共享。
+公共静态源站可显式配置 `CONFIG proxy.config.cache.shared_fill_public_static INT 1`（默认 0，重启生效）。此模式要求源站不按客户端身份生成不同内容：生产者使用固定 `User-Agent: Razor`，移除真实客户端 IP、Forwarded/X-Forwarded-For/X-Real-IP 和追踪头，保留可信代理解析后的 scheme/Host。不同 IP、UA、追踪信息的等价冷请求可以合并；未知头仍参与任务身份并发给源站，Accept-Encoding/Accept-Language 的不同值保持隔离。持久缓存继续遵守源站声明的这两个 Vary 维度；不支持的 Vary 不共享。块布局按原始 Accept-Encoding/Accept-Language 分别隔离，包括缺省编码和显式 identity。不同保守任务竞争同一个 manifest 或块时，只有取得写预留的任务可以回源，冲突任务受控失败，避免重复源站生产者及未知头错误共享。
 
 Authorization/Cookie 等旁路请求保留原代理行为。公共模式使用独立、版本化内容命名空间；切换模式安全 MISS，不删除旧文件。该能力已通过服务级回归，专用测试机的本轮真实二进制验收由 #19 完成。
 
-生产者不依赖首个客户端继续存活。PURGE 后的新请求不能加入旧任务，旧任务也不能重新发布缓存。如果源站响应不可共享，正文仅交付给原始创建者，其他订阅者受控失败，不并发重试源站。完整对象和 Range 请求均等待所需数据提交后再发送正文，尚未提供 HTTP 层边写边读。
+生产者不依赖首个客户端继续存活。PURGE 后的新请求不能加入旧任务，旧任务也不能重新发布缓存。如果源站响应不可共享，正文仅交付给原始创建者，其他订阅者受控失败，不并发重试源站。普通整对象路径仍等待完整提交。公共静态模式下，identity 编码、强 ETag、可共享且大于 `max(1 MiB, range_block_bytes)` 的完整 GET 与单 Range 共用块：首个所需块完整校验并提交后开始发送，发送当前块时最多预取本区间下一块。小文件保留整对象路径；冷 GET 可增加一次共享 HEAD 分类，不为每块重复 HEAD。
+
+`CONFIG proxy.config.cache.range_block_bytes INT 1048576` 支持 64 KiB–8 MiB 的 2 的幂，重启生效，SIGHUP 改变会被拒绝。块大小与格式进入 manifest/块身份；此轮使用 v2 布局，对旧 v1 块安全 MISS，保留旧文件。完整 fresh Range 可在全部源站不健康时离线读取；缺块或过期时仍需可用源站，整次响应固定一个源站和版本。
+
+发送缓冲与生产者 staging 都计入 `write_buffer_bytes` 的保守预留；额度不足跳过预取，发送完当前块先释放读缓冲，再等待后块，磁盘容量按至多两块窗口检查。`Stats` 的 `RangeBlockHits/Misses` 是各读者已准备块的逻辑命中，`RangeHitBytes/MissBytes` 是已准备请求区间的尝试字节（不代表实际网络或唯一回源字节）；源站实际正文另见 `Origin.Bytes`。请求只有全部块复用且完整成功才计 HIT。发送前失败返回受控错误；发送后失败、PURGE 或版本变化会中断流，客户端必须检查正文读取错误与 Content-Length。合成响应保守使用 `Cache-Control: no-cache`；提交不等于每块 fsync，不读取未提交字节。服务级回归已验证，本轮 HDD/SSD 与 soak 尚待 #19 验收。
 
 ## 快速开始
 
@@ -178,11 +182,11 @@ python3 tools/hey_benchmark.py \
 
 - 只对明确可共享、受支持的响应进行缓存；不宣称完整实现所有 HTTP 缓存指令。Authorization/Cookie 请求旁路；HEAD MISS 直接访问源站。
 - Range 面向具有稳定强 ETag 的 identity 表示和单区间请求；不做任意 206 响应的通用缓存，也不提供多 Range 块缓存。
-- 所有源站被健康检查摘除时，fresh 完整对象仍可 HIT，但已缓存的 Range 当前会返回 502。这是下一步优先修复的可用性问题。
-- 完整提交后交付会增加冷大对象的首字节等待。没有流式 RWW、stale-if-error、跨节点缓存一致性或 io_uring 后端。
+- 所有源站被健康检查摘除时，fresh 完整对象及完整 fresh Range 区间仍可 HIT；缺块、过期、损坏区间受控失败，不启用已移除的源站。
+- 普通整对象路径等待完整提交；块级 RWW 等待首块提交，不读取未校验/未提交字节。没有 stale-if-error、跨节点缓存一致性或 io_uring 后端。
 - 文件写入完成不等同于逐对象 fsync；异常退出可能安全冷启动相关 stripe。缓存文件需保持单进程独占，格式及恢复约束见 [存储格式](docs/CACHE_STORAGE_FORMAT.md)。
 
-后续优先收敛已有能力：[修复离线源站下的 Range HIT](https://github.com/Monsterwi/bakemono/issues/16)、[明确合并回源的请求等价边界](https://github.com/Monsterwi/bakemono/issues/17)、[依据剖析完成一项效率优化](https://github.com/Monsterwi/bakemono/issues/18)。流式 RWW、内核升级和 io_uring 暂不进入这一版。
+本轮离线 Range、公共静态合并、提交后 RWW 和可选 RAM 策略仍需完成 [HDD/SSD 与 soak 验收 #19](https://github.com/Monsterwi/bakemono/issues/19)。[性能剖析 #18](https://github.com/Monsterwi/bakemono/issues/18)、内核升级和 io_uring 不纳入本轮。
 
 ## 项目结构
 
