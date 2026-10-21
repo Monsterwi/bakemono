@@ -29,7 +29,8 @@ def checked_summary(raw, expected_bytes):
     assert raw["bytes"] == raw["requests"] * expected_bytes, raw
     return {"requests": raw["requests"], "seconds": raw["seconds"], "requests_per_second": raw["rps"],
             "mib_per_second": raw["bytes"] / MIB / raw["seconds"], "unexpected_errors": 0,
-            "completion_ms": {"p" + str(row["Percentage"]): row["Latency"] * 1000 for row in raw["latency"]}}
+            "completion_ms": {"p" + str(row["Percentage"]): row["Latency"] * 1000
+                              for row in raw["latency"] if row["Percentage"] > 0}}
 
 
 def main():

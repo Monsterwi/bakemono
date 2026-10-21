@@ -11,6 +11,8 @@ class HeySummaryTest(unittest.TestCase):
         result = checked_summary(raw, 262144)
         self.assertEqual(result["mib_per_second"], .25)
         self.assertEqual(result["completion_ms"]["p99"], 10)
+        single = checked_summary({**raw, "latency": [{"Percentage": 0, "Latency": 0}]}, 262144)
+        self.assertEqual(single["completion_ms"], {})
         for change in ({"status": {"200": 1, "502": 1}}, {"errors": {"EOF": 1}},
                        {"bytes": 262144}, {"requests": 0}, {"seconds": 0}):
             with self.subTest(change=change), self.assertRaises(AssertionError):
