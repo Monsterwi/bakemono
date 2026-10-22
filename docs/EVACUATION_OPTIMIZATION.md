@@ -1,5 +1,7 @@
 # Bakemono Evacuation 优化实现总结
 
+> 历史原型笔记：以下接口、参数及“从未落盘缓冲读取”等描述不能作为当前 HTTP 交付路径依据。当前发布/恢复边界见 [存储格式](CACHE_STORAGE_FORMAT.md)，块级 RWW 见 [当前实现](RWW_IMPLEMENTATION.md)。
+
 ## ✅ 优化目标
 
 ### 问题描述

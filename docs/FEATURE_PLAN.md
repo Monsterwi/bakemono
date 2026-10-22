@@ -1,6 +1,6 @@
 # Razor 下一轮实施清单
 
-状态：#16/#17/#20/#21功能实现和集成回归已完成，测量源码5ccf32c的24项HDD/SSD矩阵及两策略各一次全新SSD ≥7200秒长测全部26项实测通过。Otter实际7200.279144秒/122,666 GET，S3-FIFO实际7200.089907秒/123,096 GET，均排空且无非预期错误。normal/race/vet/build、双轴代码审查、16项真实工具和测量源码首轮CI通过；最终文档准确性审查、后续交付提交及其CI按Git/Issue外部证据完成。历史f969c1c/12571fc真实长测失败及四次旧运行记录保留，旧Otter通过时间不抵扣本次。需求与验收统一由[总计划 #1](https://github.com/Monsterwi/bakemono/issues/1)及子Issue管理；#1/#18保持打开，不合主分支或发布。
+状态：#16/#17/#20/#21功能实现和集成回归已完成，测量源码5ccf32c的24项HDD/SSD矩阵及两策略各一次全新SSD ≥7200秒长测全部26项实测通过。Otter实际7200.279144秒/122,666 GET，S3-FIFO实际7200.089907秒/123,096 GET，均排空且无非预期错误。normal/race/vet/build、双轴代码审查、16项真实工具和测量源码首轮CI通过；最终文档准确性审查、后续交付提交及其CI按Git/Issue外部证据完成。历史f969c1c/12571fc真实长测失败及四次旧运行记录保留，旧Otter通过时间不抵扣本次。需求与验收统一由[总计划 #1](https://github.com/Monsterwi/bakemono/issues/1)及子Issue管理；#1/#18保持打开；已按用户指令由 [#24](https://github.com/Monsterwi/razor/issues/24) 将验收集成提交 c93f4d7 快进合并 main，未发布。以下基线与调度段保留原轮次实施记录；当前实现说明见 [缓存填充设计](CACHE_FILL_DESIGN.md)。
 
 基线：已验收 `d212f7147b7b74abe995a0bb7711e9ba068cc620`。集成分支 `integration/razor-cache-next`，工作树 `/tmp/razor-cache-next`。保留原 `/workspace/bakemono`、`/tmp/razor-delivery` 的改动、历史工作树和所有已有缓存文件。
 

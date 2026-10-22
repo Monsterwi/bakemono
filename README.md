@@ -45,6 +45,7 @@ go vet ./...
 
 ## 文档与边界
 
+- [合并回源、部分对象缓存与 RWW](docs/CACHE_FILL_DESIGN.md)
 - [功能与配置契约](docs/FEATURE_PLAN.md)
 - [RAM 缓存策略](docs/RAM_CACHE.md)
 - [磁盘格式与恢复](docs/CACHE_STORAGE_FORMAT.md)

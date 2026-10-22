@@ -1,5 +1,7 @@
 # Bakemono Cache TODO List
 
+> 历史探索清单：勾选项、接口与预期收益不代表当前 HTTP 服务状态，也不作为新增任务来源。当前实现见 [实现状态](IMPLEMENTATION_STATUS.md) 与 [RWW](RWW_IMPLEMENTATION.md)，需求以 [GitHub #1](https://github.com/Monsterwi/razor/issues/1) 及子 Issue 为准。
+
 ## 🔴 高优先级 - 性能关键优化
 
 ### 1. Directory 存储结构重构（最关键）

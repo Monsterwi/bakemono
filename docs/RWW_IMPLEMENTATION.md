@@ -1,327 +1,84 @@
-# Bakemono RWW (Read While Write) 实现总结
+# Razor 块级 RWW 实现
 
-## 1. 概述
+RWW（Read While Write）在当前 HTTP 服务中表示：**完整对象尚未填完时，已完整校验并提交的块就可发送，后续块继续填充。** 不读取当前块的未提交字节。请求共享和块身份见 [合并回源与部分对象缓存](CACHE_FILL_DESIGN.md)。本文对照源码基线 `c93f4d7`。
 
-RWW (Read While Write) 是参考 Apache Traffic Server 实现的缓存系统核心特性，允许在文档正在写入时，同时从写入者读取数据，大幅提升并发性能和响应速度。
+## 适用路径
 
-## 2. 核心组件
+| 路径 | 当前行为 |
+| --- | --- |
+| 普通整对象 MISS | 等待整对象完整提交，再由各订阅者读取 |
+| 合格单 Range | 首个所需块提交后发送，返回 206 |
+| 公共静态模式的合格大 GET | 与 Range 共用块，首块提交后发送，返回 200 |
+| 不可缓存/不支持的请求 | 普通代理旁路；流式透传不等于缓存 RWW |
 
-### 2.1 数据结构
+大 GET 要求开启 `shared_fill_public_static`，对象长度大于 `max(1 MiB, 块大小)`，且满足块缓存的强 ETag、HEAD、identity 编码和准入条件。fresh 整对象命中和小对象继续保留原路径。
 
-#### OpenDirEntry
-```go
-type OpenDirEntry struct {
-    mutex   sync.RWMutex
-    writers []*CacheWriter
-}
-```
-- 管理同一文档的多个写入者（当前实现支持多写入者）
-- 使用 RWMutex 保护并发访问
+## 管线时序
 
-#### OpenDir
-```go
-type OpenDir struct {
-    mutex   sync.RWMutex
-    entries map[string]*OpenDirEntry
-}
-```
-- 全局管理所有正在写入的文档
-- Key 映射到 OpenDirEntry
-- 提供 `OpenWrite`、`OpenRead`、`CloseWrite` 接口
-
-#### CacheWriter (增强)
-```go
-type CacheWriter struct {
-    // ... 原有字段 ...
-    
-    // RWW支持
-    mutex  sync.RWMutex    // 保护 buffer 和状态
-    closed bool            // 写入是否已关闭
-    od     *OpenDirEntry   // 所属的 OpenDirEntry
-}
-```
-- 添加了互斥锁保护内部状态
-- 添加了 closed 标志
-- 在创建时自动注册到 OpenDir
-- 在 Close 时自动从 OpenDir 注销
-
-#### CacheReader (增强)
-```go
-type CacheReader struct {
-    // ... 原有字段 ...
-    
-    // RWW支持
-    writer *CacheWriter    // 如果是 RWW 模式，指向写入者
-}
-```
-- 添加了 writer 字段
-- `Read()` 方法根据 writer 是否为 nil 选择不同路径
-
-### 2.2 文件结构
-
-```
-bakemono/
-├── open_dir.go              # OpenDir 和 OpenDirEntry 实现
-├── cache_write.go           # CacheWriter 增强（RWW 支持）
-├── cache_read.go            # CacheReader 增强（RWW 读取逻辑）
-├── stripe.go                # Stripe 集成 OpenDir
-├── aggregate_write_buffer.go # AggBuffer 增大到 8MB
-└── rww_test.go              # RWW 单元测试
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant S as serveBlocks
+    participant F as fillGroup与生产者
+    participant O as 固定源站
+    participant K as 缓存
+    C->>S: GET 或单 Range
+    S->>F: 共享 manifest 探测（缺失时）
+    F->>O: HEAD 获取总长与强 ETag
+    F->>K: 提交 manifest
+    S->>F: 确保首个所需块
+    F->>O: 对齐 Range + If-Match
+    F->>F: 完整接收与校验该块
+    F->>K: 提交块并唤醒订阅者
+    S->>K: 独立读取已提交块
+    par 最多预取一块
+        S->>F: 准备下一块（额度不足可放弃预取）
+        F->>O: 下一块 Range + If-Match
+    and 发送当前块
+        S->>C: 200/206 头及当前块所需切片
+    end
+    Note over S,K: 释放当前读者额度，之后逐块重复
 ```
 
-## 3. 关键实现逻辑
+控制循环是 [`serveBlocks`](../server/range_cache.go)：`ensureRangeManifest` → `ensureRangeBlock` → `readPreparedRangeBlock` → `checkRangeVersion` → `streamResponse`。发送当前块时最多启动一个下一块任务，且不超出本次请求区间。相同块的等价请求共享生产者，每个客户端保持独立位置、数据切片和发送速度。
 
-### 3.1 Writer 注册流程
+阻塞第二块时，客户端仍应收到完整首块。这由 `TestRangeCommittedBlockArrivesBeforeSecondBlock` 与 `TestPublicGETCommittedBlockArrivesBeforeSecondBlock` 的同步屏障和真实 HTTP 读取断言验证，不是只检查返回 200/206。
 
-```go
-func (s *Stripe) NewWriter(key []byte) (*CacheWriter, error) {
-    w := &CacheWriter{ ... }
-    
-    // 注册到 OpenDir
-    if s.OpenDir != nil {
-        s.OpenDir.OpenWrite(key, w)
-    }
-    
-    return w, nil
-}
+## “校验并提交”包含什么
+
+1. 回源必须精确返回所需 206 区间、总长度、强 ETag、identity 编码和 Content-Length，无不支持的缓存语义/Trailer。
+2. `readExactRange` 完整接收块正文，并额外读一次确认 EOF；短读、超长或读错误不发布。
+3. `writeRangeObject` 复用 `CacheVC`/`cacheFill` 完整对象写入，存储 Doc 带 CRC32。一个逻辑 HTTP 块可能包含多个底层 fragment；可配置块大小不改变底层 fragment 的定义。
+4. [`CacheWriter.Close`](../cache/cache_write.go) 最后写 fragment 0，等待相应写入完成并校验目录/覆盖代次、对象所有权和失效凭证后发布完整对象。HTTP 读者使用 `OpenReadCommitted`，再次按存储校验读取。
+
+提交意味着该块已完成存储写入与可读性发布，**不等于每块调用 fsync**。当前磁盘数据路径使用 `ReadAt/WriteAt` 和聚合缓冲；不是 io_uring/native AIO，也不是读者直接订阅 Writer 缓冲的零拷贝广播。异常退出恢复策略见 [存储文档](CACHE_STORAGE_FORMAT.md)。
+
+## 有界内存与背压
+
+HTTP 不缓存整份大响应到内存。生产者暂存一个完整块，读者在额度下读取当前已提交块；下一块预取使用 `TryAcquire`，额度不足时可退回按需准备。当前块发送完成后释放读者额度，避免拿着当前数据无限等待更多预取额度。
+
+写者槽数为 `min(max_writers, write_buffer_bytes / CacheWriterReservation())`，读者另有按槽限额。预留包含生产者暂存块、发送读者、fragment 与元数据开销；不是“两个块大小就是整个进程内存上限”。磁盘容量按必要块窗口检查，无须先容纳整对象，但不能小于所需窗口。
+
+块准备完成不代表目录被永久固定。并发环形写入可能逐出尚未发送的块；`readPreparedRangeBlock` 对缺失/写入中的块先检查原 token 和版本，再按固定源站/ETag重新补块。已有独立校验字节可完成当前发送；后续读失败仍必须中断。
+
+## 协议与失败边界
+
+- 发送前裁剪首尾块，设置正确的 Content-Length/Content-Range。完整 GET 为 200，单 Range 为 206；If-Range 不匹配时按完整表示旁路，非法区间可返回 416。
+- 合成的 200/206 目前向下游发送 `Cache-Control: no-cache`，因为还未汇总所有块的有效期；内部仍按 manifest 与各块 freshness 决定复用。
+- 响应头发送前，失败可按具体错误返回 5xx 或安全旁路；并非所有失败都可降级，写入所有权冲突不会通过旁路重复生产。
+- 响应头发送后，后续源站/读取失败、已观察到的版本变化或 PURGE 失效会通过 `http.ErrAbortHandler` 中断 HTTP 响应/H2 流。不能在文件尾追加错误正文，不能换源或换版本继续拼接。
+- 每块开始发送前检查失效；已经发出及网络缓冲内的字节无法撤回。客户端取消会取消本请求预取订阅并等待其退出；其他仍订阅同一块的客户端可继续。
+
+## 配置和回归
+
+`proxy.config.cache.range_block_bytes` 默认 `1048576`（1 MiB），允许 64 KiB–8 MiB 的 2 次幂，修改须重启。较小块降低冷读首块等待和非对齐放大，但增加元数据/回源请求；较大块相反，需用实际负载测量。
+
+[RWW 回归](../server/rww_test.go)覆盖首块提前到达、GET/Range 共用、重叠区间回源并集、可配置块与非对齐尾块、100 MiB 最小预算窗口、后续失败与取消。[淘汰回归](../server/rww_eviction_test.go)覆盖准备后被淘汰和多客户端环形窗口；[版本回归](../server/range_version_fence_test.go)覆盖已知替换中止及同强 ETag/总长刷新继续。
+
+运行相关行为回归（在仓库根目录）：
+
+```bash
+go test ./server -run 'Test(RangeCommittedBlockArrivesBeforeSecondBlock|PublicGETCommittedBlockArrivesBeforeSecondBlock|PublicGETAndOverlappingRangeShareBlockProducers|RangeOnlyFetchesMissingAlignedUnion|CommittedBlockStreamAbortsOnLaterOriginFailure)$' -count=1 -timeout 120s
 ```
 
-- Writer 创建时自动注册到 OpenDir
-- OpenDir 维护 key → OpenDirEntry → []*CacheWriter 的映射
-- Writer Close 时自动注销
-
-### 3.2 Reader 查找 Writer
-
-```go
-func (s *Stripe) Get(key []byte) (bool, *CacheReader, error) {
-    // 1. 检查 RamCache
-    reader, hit := s.loadFromRamCache(key)
-    if hit {
-        return true, reader, nil
-    }
-    
-    // 2. RWW: 检查 OpenDir
-    if s.OpenDir != nil {
-        entry := s.OpenDir.OpenRead(key)
-        if entry != nil {
-            // 找到活跃的 Writer
-            entry.mutex.RLock()
-            var writer *CacheWriter
-            if len(entry.writers) > 0 {
-                writer = entry.writers[0] // 选择第一个
-            }
-            entry.mutex.RUnlock()
-            
-            if writer != nil {
-                // 从 Writer 创建 Reader
-                return true, NewCacheReaderFromWriter(s, key, writer), nil
-            }
-        }
-    }
-    
-    // 3. 从 Directory 查找（磁盘）
-    // ...
-}
-```
-
-- 查找顺序：**RamCache → OpenDir → Directory**
-- 如果在 OpenDir 找到，则返回 RWW Reader
-
-### 3.3 从 Writer 读取逻辑
-
-```go
-func (r *CacheReader) readFromWriter(p []byte) (n int, err error) {
-    for {
-        if r.dataOffset >= len(r.currentData) {
-            // 需要新数据
-            r.writer.mutex.RLock()
-            writerClosed := r.writer.closed
-            writerCurrentKey := r.writer.currentKey
-            writerBufferLen := len(r.writer.buffer)
-            isCurrent := string(r.currentKey) == string(writerCurrentKey)
-            
-            if isCurrent {
-                // 从 Writer 的当前 Buffer 读取
-                bufferCopy := make([]byte, writerBufferLen)
-                copy(bufferCopy, r.writer.buffer)
-                r.currentData = bufferCopy
-            }
-            r.writer.mutex.RUnlock()
-            
-            if !isCurrent {
-                // Writer 已切换到下一个 Fragment
-                // 从磁盘/AggBuffer 读取已完成的 Fragment
-                hit, _, d := r.stripe.Dm.Get(r.currentKey)
-                if hit {
-                    ck := r.stripe.readChunkInternal(offset, size)
-                    r.currentData = ck.DataRaw
-                }
-            }
-        }
-        
-        // 复制数据
-        n = copy(p, r.currentData[r.dataOffset:])
-        r.dataOffset += n
-        r.bytesRead += int64(n)
-        
-        // Fragment 完成，切换到下一个
-        if r.dataOffset >= int(ChunkDataSize) {
-            r.currentKey = NextCacheKey(r.currentKey)
-        }
-        
-        return n, nil
-    }
-}
-```
-
-### 3.4 关键路径说明
-
-#### 路径1：从 Writer Buffer 读取
-- **触发条件**：`r.currentKey == writer.currentKey`
-- **数据来源**：Writer 的内存 buffer（拷贝）
-- **优势**：零磁盘 I/O，超低延迟
-
-#### 路径2：从已完成的 Fragment 读取
-- **触发条件**：`r.currentKey != writer.currentKey`（Writer 已切换到下一个 Fragment）
-- **数据来源**：
-  1. 先尝试从 AggregateWriteBuffer（Pending/Current）
-  2. 如果不在 AggBuffer，则从磁盘读取 + Overlay
-- **优势**：支持已完成 Fragment 的快速读取
-
-#### 路径3：等待 Writer 生产数据
-- **触发条件**：Writer Buffer 中没有新数据，且 Writer 未关闭
-- **行为**：Sleep 10ms 后重试
-- **优势**：避免忙等待，减少 CPU 消耗
-
-## 4. 并发控制
-
-### 4.1 锁层次
-
-```
-OpenDir.mutex (RWMutex)
-  └─> OpenDirEntry.mutex (RWMutex)
-        └─> CacheWriter.mutex (RWMutex)
-```
-
-- **写入路径**：Writer 持有自己的 mutex
-- **读取路径**：Reader 仅在需要访问 Writer 状态时短暂持有 Writer.mutex (RLock)
-- **锁粒度**：细粒度锁，减少竞争
-
-### 4.2 避免死锁
-
-- **一致的锁顺序**：OpenDir → OpenDirEntry → CacheWriter → Stripe
-- **短暂持锁**：读取 Writer 状态后立即释放锁
-- **拷贝数据**：从 Writer Buffer 拷贝数据，而不是持有引用
-
-## 5. AggregateWriteBuffer 优化
-
-### 5.1 为什么增大到 8MB？
-
-原始问题：
-- ChunkDataSize = 4MB
-- Doc header ≈ 72 bytes
-- Chunk 总大小 ≈ 4MB + 72B
-- AggBufferSize = 4MB（旧值）
-
-结果：**一个 Chunk 会跨越两个 AggBuffer**，导致：
-- `IsFullyInCache` 返回 false
-- 从磁盘读取时数据不完整
-- Chunk 校验失败
-
-解决方案：**AggBufferSize = 8MB**
-- 确保单个 Chunk 完整地存在于一个 buffer 中
-- `IsFullyInCache` 正确返回 true
-- Reader 可以直接从 AggBuffer 读取完整 Chunk
-
-## 6. 性能表现
-
-### 6.1 测试场景
-- **数据量**：8.39MB (2 * 4MB + 1KB)
-- **Fragment 数**：3个
-- **写入方式**：256KB/chunk，间歇 sleep 1ms
-
-### 6.2 测试结果
-- **RWW 读取时间**：0.24秒
-- **数据正确性**：✅ 100% 匹配
-- **持久化验证**：✅ 二次读取正确
-
-### 6.3 性能优化点
-1. **零拷贝**：从 Writer Buffer 拷贝，避免磁盘 I/O
-2. **异步写入**：Writer 使用 AggregateWriteBuffer 异步刷盘
-3. **Overlay 机制**：AggregateWriteBuffer 的 Overlay 确保读取最新数据
-4. **细粒度锁**：减少锁竞争
-
-## 7. 测试覆盖
-
-### 7.1 TestRWW
-- **场景**：正常 RWW 流程
-- **验证点**：
-  - Reader 从 Writer 创建（RWW 模式）
-  - 数据完整性（8MB+ 数据）
-  - Fragment 切换（3个 Fragment）
-  - 持久化验证（Writer Close 后再次读取）
-
-### 7.2 TestRWWMissing
-- **场景**：读取不存在的 Key
-- **验证点**：
-  - OpenDir 中无 Writer
-  - Directory 中无数据
-  - 正确返回 Miss
-
-## 8. 与 ATS 的对比
-
-### 8.1 相似之处
-- **OpenDir/OpenDirEntry 结构**：与 ATS 一致
-- **Writer 注册机制**：自动注册/注销
-- **读取优先级**：RamCache → OpenDir → Directory
-- **Fragment 处理**：多 Fragment 支持
-
-### 8.2 差异之处
-| 特性 | ATS | Bakemono |
-|------|-----|----------|
-| 事件模型 | 事件驱动（Continuation） | Goroutine + Channel |
-| 锁机制 | ProxyMutex | sync.RWMutex |
-| Buffer 大小 | 4MB | 8MB（优化后） |
-| 等待策略 | 事件调度 + 重试计数器 | Sleep + 轮询 |
-| 日志级别 | DEBUG | DEBUG + INFO |
-
-### 8.3 命名对齐
-- ✅ `OpenDir` / `OpenDirEntry`
-- ✅ `CacheWriter` / `CacheReader` (对应 ATS 的 CacheVC)
-- ✅ `Stripe` (对应 ATS 的 StripeSM)
-- ✅ `fragmentCount` / `earliestKey` / `firstKey`
-
-## 9. 未来优化方向
-
-1. **Retry 机制**：参考 ATS 增加 `writer_lock_retry` 和最大重试次数
-2. **性能指标**：添加 RWW 命中率、平均延迟等指标
-3. **Alternate 选择**：支持 HTTP Header 匹配选择 Alternate
-4. **错误处理**：更细致的错误分类和处理
-5. **内存优化**：优化 bufferCopy，考虑引用而非拷贝
-
-## 10. 使用示例
-
-```go
-// 写入
-writer, _ := stripe.NewWriter(key)
-writer.Write(data)  // 流式写入
-writer.Close()
-
-// 并发读取（RWW）
-reader, _ := stripe.Get(key)  // 自动检测 OpenDir
-data := io.ReadAll(reader)    // 从 Writer Buffer 或 Disk 读取
-```
-
----
-
-**实现文件**：
-- `open_dir.go`: OpenDir 实现
-- `cache_write.go`: CacheWriter RWW 增强
-- `cache_read.go`: CacheReader RWW 读取逻辑
-- `rww_test.go`: 单元测试
-
-**参考文档**：
-- `/root/code/trafficserver/src/iocore/cache/RWW_DIAGRAMS.md`
-- `/root/code/trafficserver/src/iocore/cache/CacheRead.cc`
-
-
+缓存底层仍保留 `NewCacheReaderFromWriter` / `CacheWriter.ReadAtContext` 等活跃 Writer 读取接口；它们不是当前 HTTP 交付路径，不能据此声称 HTTP 已支持未提交字节级 RWW。[简表](RWW_SUMMARY.md)与 [ATS 对比](RWW_ATS_COMPARISON.md)使用同一行为边界。
