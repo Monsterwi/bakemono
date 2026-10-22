@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -58,16 +59,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type requestBody struct {
 	io.ReadCloser
+	mu         sync.Mutex
+	closed     bool
 	controller *http.ResponseController
 	idle       time.Duration
 }
 
 func (b *requestBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	}
 	_ = b.controller.SetReadDeadline(time.Now().Add(b.idle))
+	b.mu.Unlock()
 	return b.ReadCloser.Read(p)
 }
 
 func (b *requestBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	// The origin transport may still read or close this body after ServeHTTP returns.
+	b.closed = true
 	_ = b.controller.SetReadDeadline(time.Now())
 	return b.ReadCloser.Close()
 }
