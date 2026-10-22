@@ -41,7 +41,7 @@ go vet ./...
 
 已验收源码 `5ccf32c`：HDD/SSD 覆盖 256 KiB、100 MiB 主场景及 200 MiB 兼容回归，**26 项实测通过**。Otter 与 S3-FIFO 各完成一次全新 **2 小时 SSD 混合长测**，合计 **245,762 次业务 GET**，正文长度与 SHA 校验通过。
 
-实测为同机 HTTP/1.1，不能直接当作公网生产容量。三轮压力原值、吞吐/P99、资源数据及已知限制见[完整验收报告](docs/benchmarks/CDN_ACCEPTANCE_2026-10-21.md)。
+实测为同机 HTTP/1.1，不能直接当作公网生产容量。三轮压力原值、吞吐/P99、资源数据及已知限制见[完整验收报告](docs/benchmarks/CDN_ACCEPTANCE_2026-10-21.md)。 与 ATS 10.2.1 的实机对照见[基准报告](docs/benchmarks/ATS_COMPARISON_2026-10-22.md)。
 
 ## 文档与边界
 
