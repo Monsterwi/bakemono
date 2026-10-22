@@ -1,4 +1,0 @@
----
-description: 架构级规则 - 指导高性能HTTP缓存代理服务器的构建
-alwaysApply: true
----

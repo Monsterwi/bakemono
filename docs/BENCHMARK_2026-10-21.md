@@ -18,7 +18,7 @@ Go 客户端交叉测量与块层冷读单独统计，不与主矩阵混成一�
 | 二进制 SHA256 | `c9f6a6a2771bc68366adde3b4420ed4061113a985a8d82ac63faca860acc46ee` |
 | 主矩阵源码/工具 | 干净工作树 `a8d6a8643f2d108154b51a7f5484fc9a1f719a27` |
 | 正文错误检查版 hey/冷读工具 | `f1017877c656732790cc913ecf6aeb5a8c65cb29`；服务二进制完全相同 |
-| 主机 | `10.10.135.73`，CentOS 7 / Linux `3.10.0-957.el7.x86_64` |
+| 主机 | 专用测试机，CentOS 7 / Linux `3.10.0-957.el7.x86_64` |
 | CPU / 内存 | 2×Xeon E5-2620 v4，16 物理核 / 32 逻辑核，约 62 GiB RAM |
 | HDD | `/data3`，XFS，`/dev/sdc`，ST4000NM0295，7200 rpm **SAS** |
 | SSD | `/ssd1`，XFS，`/dev/sdk`，INTEL SSDSC2BB800G4，**SATA 6 Gb/s SSD** |
@@ -114,7 +114,7 @@ hey 服务进程采样峰 RSS 为 **124.15 / 122.84 MiB**，FD 为 **120 / 172**
 
 ## 复现与证据
 
-仓库入口：[tools/acceptance.py](../tools/acceptance.py)、[tools/hey_benchmark.py](../tools/hey_benchmark.py)，README 给出通用命令。测试机连接与工作目录见 [TEST_ENVIRONMENT.md](TEST_ENVIRONMENT.md)。
+仓库入口：[tools/acceptance.py](../tools/acceptance.py)、[tools/hey_benchmark.py](../tools/hey_benchmark.py)，README 给出通用命令。测试硬件与复现边界见 [TEST_ENVIRONMENT.md](TEST_ENVIRONMENT.md)。
 
 远端原始根目录：
 

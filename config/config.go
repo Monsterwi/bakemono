@@ -66,7 +66,7 @@ func GetDefaultConfig() *Config {
 		ConfigDir:             "conf",
 		ServerPort:            80,
 		UpstreamAlgo:          balancer.ConsistentHashBalancer,
-		UpstreamTargets:       []string{"http://10.62.216.7", "http://10.62.216.8"},
+		UpstreamTargets:       []string{"http://127.0.0.1:8081"},
 		LogfileDir:            "/var/log/razor",
 		AccessLogFilename:     "access.log",
 		ErrorLogFilename:      "error.log",

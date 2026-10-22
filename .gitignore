@@ -27,3 +27,22 @@ go.work
 
 # Python acceptance tool artifacts
 __pycache__/
+
+# Local editor and private environment settings
+.cursor/
+*.code-workspace
+.env
+.env.*
+!.env.example
+
+# Runtime data and debugging artifacts
+*.db
+*.log
+*.pid
+*.prof
+*.pprof
+*.core
+core
+core.[0-9]*
+/pressure-test
+/pressure-test-concurrent

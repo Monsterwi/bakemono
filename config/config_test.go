@@ -76,8 +76,15 @@ func TestGetDefaultConfig(t *testing.T) {
 		t.Errorf("Expected default LogfileDir to be '/var/log/razor', got '%s'", cfg.LogfileDir)
 	}
 
-	if len(cfg.UpstreamTargets) != 2 {
-		t.Errorf("Expected 2 default upstream targets, got %d", len(cfg.UpstreamTargets))
+	if len(cfg.UpstreamTargets) != 1 || cfg.UpstreamTargets[0] != "http://127.0.0.1:8081" {
+		t.Fatal("default upstream must be the local example origin")
+	}
+	records, err := LoadRecordsConfig("../conf/records.config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records.GetString("proxy.config.http.parent_proxy.upstream_targets", "") != cfg.UpstreamTargets[0] {
+		t.Fatal("example upstream differs from the safe application default")
 	}
 }
 

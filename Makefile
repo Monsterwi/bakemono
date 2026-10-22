@@ -1,4 +1,4 @@
-.PHONY: build clean test test-race test-integration pressure-app universal all
+.PHONY: build clean test test-race test-integration universal all
 
 VERSION?=0.1.0-dev
 BIN=razor
@@ -34,7 +34,4 @@ clean:
 	@$(GO) clean ./...
 	@rm -f $(BIN)
 
-pressure-app:
-	@$(GO_ENV) $(GO) build $(GO_FLAGS) -o pressure-test ./demo-app/pressure/
-	@$(GO_ENV) $(GO) build $(GO_FLAGS) -o pressure-test-concurrent ./demo-app/pressure-concurrent-rw/
 all: clean build

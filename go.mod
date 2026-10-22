@@ -4,7 +4,6 @@ go 1.26.10
 
 require (
 	github.com/go-resty/resty/v2 v2.17.0
-	github.com/goccy/go-yaml v1.18.0
 	github.com/lafikl/consistent v0.0.0-20220512074542-bdd3606bfc3e
 	github.com/maypok86/otter/v2 v2.2.1
 	github.com/sevlyar/go-daemon v0.1.6
