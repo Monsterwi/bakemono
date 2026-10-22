@@ -1,8 +1,12 @@
 package proxy
 
-import "net/http"
+import (
+	"net/http"
+	"sort"
+	"strings"
+)
 
-// GetCacheKey preserves the complete request target; URL equivalence is not assumed.
+// GetCacheKey treats query item order as irrelevant under the origin contract.
 func GetCacheKey(r *http.Request) string {
 	scheme := r.URL.Scheme
 	if scheme == "" {
@@ -19,9 +23,11 @@ func GetCacheKey(r *http.Request) string {
 	if path == "" {
 		path = "/"
 	}
-	key := "http-v2:" + scheme + "://" + authority + path
+	key := "http-v3:" + scheme + "://" + authority + path
 	if r.URL.RawQuery != "" || r.URL.ForceQuery {
-		key += "?" + r.URL.RawQuery
+		items := strings.Split(r.URL.RawQuery, "&")
+		sort.Strings(items)
+		key += "?" + strings.Join(items, "&")
 	}
 	return key
 }

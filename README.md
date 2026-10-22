@@ -19,7 +19,7 @@ make build
 ./razor -c /path/to/conf
 ```
 
-配置目录须包含 [records.config](conf/records.config) 和 [storage.config](conf/storage.config)。先按环境设置监听端口、源站、日志目录与缓存文件路径；仓库中的配置是示例。
+配置目录须包含 [records.config](conf/records.config) 和 [storage.config](conf/storage.config)。先按环境设置监听端口、源站、日志目录与缓存文件路径；仓库中的配置是示例。缓存身份忽略 query 参数项顺序，要求源站保证顺序无关；回源保留原始 query。
 
 仅当源站内容不随客户端身份变化时，开启公共静态模式。以下配置允许缓存 100/200 MiB 对象，并使用默认 1 MiB 块：
 

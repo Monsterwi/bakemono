@@ -47,7 +47,8 @@ func TestPublicStaticHundredClientsShareCanonicalOriginRequest(t *testing.T) {
 	results := make(chan *httptest.ResponseRecorder, clients)
 	for i := 0; i < clients; i++ {
 		go func(i int) {
-			r := httptest.NewRequest("GET", "http://cache.test/item?b=2&a=1", nil)
+			query := []string{"b=2&a=1", "a=1&b=2"}[i%2]
+			r := httptest.NewRequest("GET", "http://cache.test/item?"+query, nil)
 			r.RemoteAddr = fmt.Sprintf("192.0.2.%d:12345", i+1)
 			r.Header.Set("User-Agent", fmt.Sprintf("client-%d", i))
 			for _, field := range []string{"Forwarded", "X-Forwarded-For", "X-Real-IP", "Traceparent", "Tracestate", "Baggage", "X-Request-Id", "X-Correlation-Id"} {
@@ -220,7 +221,7 @@ func TestPublicStaticAuthenticatedRequestsRetainProxyIdentity(t *testing.T) {
 	}
 }
 
-func TestPublicStaticSchemeRawQueryPurgeAndRestartBoundary(t *testing.T) {
+func TestPublicStaticSchemeCanonicalQueryPurgeAndRestartBoundary(t *testing.T) {
 	var calls atomic.Int32
 	s, cfg := publicCacheServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
@@ -229,7 +230,8 @@ func TestPublicStaticSchemeRawQueryPurgeAndRestartBoundary(t *testing.T) {
 		}
 		calls.Add(1)
 		w.Header().Set("Cache-Control", "public,max-age=3600")
-		fmt.Fprintf(w, "%s|%s", r.Header.Get("X-Forwarded-Proto"), r.URL.RawQuery)
+		w.Header().Set("Seen-Query", r.URL.RawQuery)
+		fmt.Fprintf(w, "%s|%s|%s", r.Header.Get("X-Forwarded-Proto"), r.URL.Query().Get("a"), r.URL.Query().Get("b"))
 	})
 	request := func(scheme, query string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", "http://cache.test/item?"+query, nil)
@@ -241,15 +243,18 @@ func TestPublicStaticSchemeRawQueryPurgeAndRestartBoundary(t *testing.T) {
 	}
 	for _, item := range []struct{ scheme, query string }{{"https", "b=2&a=1"}, {"http", "b=2&a=1"}, {"https", "a=1&b=2"}} {
 		for range 2 {
-			if got := request(item.scheme, item.query); got.Code != 200 || got.Body.String() != item.scheme+"|"+item.query {
+			if got := request(item.scheme, item.query); got.Code != 200 || got.Body.String() != item.scheme+"|1|2" || got.Header().Get("Seen-Query") != "b=2&a=1" {
 				t.Fatalf("%d %q", got.Code, got.Body.String())
 			}
 		}
 	}
-	if calls.Load() != 3 {
+	if calls.Load() != 2 {
 		t.Fatalf("cache identity aliased or lost: %d", calls.Load())
 	}
-	purgeRequest := httptest.NewRequest("PURGE", "http://cache.test/item?b=2&a=1", nil)
+	if got := request("https", "a=9&b=2"); got.Code != 200 || got.Body.String() != "https|9|2" || calls.Load() != 3 {
+		t.Fatalf("distinct query value collided: status=%d body=%q calls=%d", got.Code, got.Body.String(), calls.Load())
+	}
+	purgeRequest := httptest.NewRequest("PURGE", "http://cache.test/item?a=1&b=2", nil)
 	purgeRequest.RemoteAddr = "192.0.2.1:12345"
 	purgeRequest.Header.Set("X-Forwarded-Proto", "https")
 	purgeRequest.Header.Set("Authorization", "Bearer public-test-purge")
@@ -257,6 +262,11 @@ func TestPublicStaticSchemeRawQueryPurgeAndRestartBoundary(t *testing.T) {
 	s.ServeHTTP(rec, purgeRequest)
 	if rec.Code != 200 {
 		t.Fatalf("PURGE public selector %d", rec.Code)
+	}
+	for _, item := range []struct{ scheme, query string }{{"http", "a=1&b=2"}, {"https", "b=2&a=9"}} {
+		if got := request(item.scheme, item.query); got.Code != 200 || calls.Load() != 3 {
+			t.Fatalf("PURGE evicted distinct identity: status=%d origin=%d", got.Code, calls.Load())
+		}
 	}
 	if got := request("https", "b=2&a=1"); got.Code != 200 || calls.Load() != 4 {
 		t.Fatalf("public PURGE missed namespace: status=%d origin=%d", got.Code, calls.Load())

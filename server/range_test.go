@@ -32,8 +32,9 @@ func TestRangeOverlapsReuseCommittedBlocks(t *testing.T) {
 	for _, spec := range []struct {
 		header     string
 		start, end int
-	}{{"bytes=0-1572863", 0, 1572864}, {"bytes=1048576-2097151", 1048576, 2097152}} {
-		got := fetch(s, "http://cache.test/item", http.Header{"Range": {spec.header}})
+		query      string
+	}{{"bytes=0-1572863", 0, 1572864, "b=2&a=1"}, {"bytes=1048576-2097151", 1048576, 2097152, "a=1&b=2"}} {
+		got := fetch(s, "http://cache.test/item?"+spec.query, http.Header{"Range": {spec.header}})
 		if got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data[spec.start:spec.end]) {
 			t.Fatalf("range %s status=%d length=%d", spec.header, got.Code, got.Body.Len())
 		}
@@ -234,9 +235,13 @@ func TestRangePurgeFencesAllBlocksAndKeepsAdjacentURL(t *testing.T) {
 	var blocked atomic.Bool
 	data := bytes.Repeat([]byte("a"), 2<<20)
 	var adjacentBytes atomic.Int64
+	var firstBlockGets atomic.Int32
 	s, _ := purgeServer(t, "test-secret", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"one"`)
 		w.Header().Set("Cache-Control", "public,max-age=3600")
+		if r.URL.Path == "/item" && r.Header.Get("Range") == "bytes=0-1048575" {
+			firstBlockGets.Add(1)
+		}
 		if r.URL.Path == "/item" && r.Header.Get("Range") == "bytes=1048576-2097151" && blocked.CompareAndSwap(false, true) {
 			close(entered)
 			<-release
@@ -255,7 +260,7 @@ func TestRangePurgeFencesAllBlocksAndKeepsAdjacentURL(t *testing.T) {
 	defer func() { once.Do(func() { close(release) }); endpoint.Close() }()
 	first := make(chan error, 1)
 	go func() {
-		req, _ := http.NewRequest("GET", endpoint.URL+"/item", nil)
+		req, _ := http.NewRequest("GET", endpoint.URL+"/item?b=2&a=1", nil)
 		req.Host = "cache.test"
 		req.Header.Set("Range", "bytes=0-2097151")
 		resp, err := endpoint.Client().Do(req)
@@ -273,15 +278,15 @@ func TestRangePurgeFencesAllBlocksAndKeepsAdjacentURL(t *testing.T) {
 		first <- err
 	}()
 	<-entered
-	if got = purge(s, "http://cache.test/item", "test-secret"); got.Code != 200 {
+	if got = purge(s, "http://cache.test/item?a=1&b=2", "test-secret"); got.Code != 200 {
 		t.Fatal(got.Code)
 	}
 	once.Do(func() { close(release) })
 	if err := <-first; err != nil {
 		t.Fatal(err)
 	}
-	if got = fetch(s, "http://cache.test/item", http.Header{"Range": {"bytes=0-2097151"}}); got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data) {
-		t.Fatalf("post purge=%d bytes=%d", got.Code, got.Body.Len())
+	if got = fetch(s, "http://cache.test/item?b=2&a=1", http.Header{"Range": {"bytes=0-2097151"}}); got.Code != 206 || !bytes.Equal(got.Body.Bytes(), data) || firstBlockGets.Load() != 2 {
+		t.Fatalf("post purge=%d bytes=%d first-block-fetches=%d", got.Code, got.Body.Len(), firstBlockGets.Load())
 	}
 	if got = fetch(s, "http://cache.test/item-adjacent", http.Header{"Range": {"bytes=0-100"}}); got.Code != 206 || adjacentBytes.Load() != 1<<20 {
 		t.Fatalf("adjacent was evicted: status=%d originbytes=%d", got.Code, adjacentBytes.Load())

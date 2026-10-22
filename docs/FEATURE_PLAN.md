@@ -23,7 +23,7 @@
 
 - 默认保守模式不变；公共静态模式显式启用，表示本实例缓存路由的源站不按客户端身份生成差异内容。本轮不新增路由 DSL。
 - 仅规范化符合现有准入的无正文请求；Authorization/Cookie、private、Set-Cookie、未知缓存语义保持保守处理。不可共享响应不交给等待者，不触发所有等待者立即独立重试。
-- 缓存身份、任务身份和真正发往源站的请求使用同一规范化规则。原始 path/query 字节、有效 scheme/Host、源站命名空间、表示与 PURGE 代次继续隔离；不排序查询参数。
+- 缓存身份、任务身份与 PURGE 统一使用同一根键。后续源站契约已明确 query 参数项顺序无关：HTTP 键 v3 按原始项排序，保留重复数量、参数字节和编码差异；原始 path、有效 scheme/Host、源站命名空间、表示与 PURGE 代次继续隔离。实际回源保留原始 query 字节，客户端相关头规范化规则不变；旧键空间安全 MISS，保留缓存文件。
 - 公共缓存生产者不携带真实客户端 IP/Forwarded/X-Forwarded-For/X-Real-IP。可信转发 scheme 先解析，Host/scheme 含义保留；不能清了头却让 proxy.rewrite 再注入客户端身份。普通旁路请求保留原代理语义。
 - User-Agent 固定为 Razor；删除 Traceparent、Tracestate、Baggage、X-Request-Id、X-Correlation-Id，原始关联留在本地日志。其他头仍保守参与任务身份和回源，不提供任意忽略头的配置。
 - 首版 Vary 仍仅支持 Accept-Encoding/Accept-Language 及其组合，值不做语义折叠。首次 MISS 也按这两个维度分组。Vary:* 或未支持维度不共享。

@@ -31,7 +31,8 @@ func TestHundredEquivalentColdRequestsShareOneCompleteFill(t *testing.T) {
 	responses := make(chan *httptest.ResponseRecorder, clients)
 	for i := 0; i < clients; i++ {
 		go func(i int) {
-			req := httptest.NewRequest("GET", "http://cache.test/item", nil)
+			query := []string{"b=2&a=1", "a=1&b=2"}[i%2]
+			req := httptest.NewRequest("GET", "http://cache.test/item?"+query, nil)
 			req.RemoteAddr = fmt.Sprintf("192.0.2.1:%d", 10000+i)
 			rec := httptest.NewRecorder()
 			s.ServeHTTP(rec, req)

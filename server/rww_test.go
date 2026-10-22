@@ -202,7 +202,11 @@ func TestPublicGETAndOverlappingRangeShareBlockProducers(t *testing.T) {
 	}
 	full, part := make(chan result, 1), make(chan result, 1)
 	request := func(value, ua string, out chan result) {
-		req, _ := http.NewRequest("GET", endpoint.URL+"/item", nil)
+		query := "b=2&a=1"
+		if value != "" {
+			query = "a=1&b=2"
+		}
+		req, _ := http.NewRequest("GET", endpoint.URL+"/item?"+query, nil)
 		req.Host = "cache.test"
 		req.Header.Set("Accept-Encoding", "identity")
 		req.Header.Set("User-Agent", ua)

@@ -199,7 +199,7 @@ func NewHTTPProxy(targetHosts []string, algorithm string, options ...Option) (*H
 
 func (h *HTTPProxy) rewrite(p *httputil.ProxyRequest, target *url.URL) {
 	stripHopHeaders(p.Out.Header)
-	// Cache identity and the origin must see the same query bytes.
+	// Forward original bytes; cache identity only normalizes query item order.
 	p.Out.URL.RawQuery = p.In.URL.RawQuery
 	p.SetURL(target)
 	for _, name := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP"} {
