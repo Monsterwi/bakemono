@@ -119,11 +119,11 @@ func (od *OpenDir) Acquire(key []byte) *OpenDirEntry {
 
 // Release cannot drop a replacement entry after an invalidation.
 func (od *OpenDir) Release(key []byte, expected *OpenDirEntry) {
-	od.mutex.Lock()
-	defer od.mutex.Unlock()
 	if expected == nil {
 		return
 	}
+	od.mutex.Lock()
+	defer od.mutex.Unlock()
 	expected.mutex.Lock()
 	expected.RefCount--
 	remove := expected.RefCount <= 0
