@@ -8,43 +8,49 @@ import (
 
 const responseBufferSize = 256 << 10
 
-// Runtime-owned buffers have a strict payload cap and survive GC.
-// LIFO reuse favors recently touched data; no body allocation or I/O holds mu.
+type responseBuffer struct{ data []byte }
+
+// The lease cap bounds active payload; idle sync.Pool entries remain GC-managed.
+// The usual path preserves per-P reuse without a shared free-list lock.
 type responseBufferPool struct {
-	mu        sync.Mutex
-	buffers   [][]byte
-	capacity  int64
-	allocated atomic.Int64
-	inUse     atomic.Int64
-	changed   chan struct{}
-	waiters   int
+	buffers        sync.Pool
+	capacity       int64
+	totalAllocated atomic.Int64
+	inUse          atomic.Int64
+	mu             sync.Mutex
+	changed        chan struct{}
+	waiters        atomic.Int64
 }
 
 func newResponseBufferPool(requests int) *responseBufferPool {
-	return &responseBufferPool{capacity: int64(requests) * responseBufferSize, changed: make(chan struct{})}
+	p := &responseBufferPool{capacity: int64(requests) * responseBufferSize, changed: make(chan struct{})}
+	p.buffers.New = func() any {
+		p.totalAllocated.Add(responseBufferSize)
+		return &responseBuffer{data: make([]byte, responseBufferSize)}
+	}
+	return p
 }
-func (p *responseBufferPool) acquire(ctx context.Context) ([]byte, error) {
+
+func (p *responseBufferPool) acquire(ctx context.Context) (*responseBuffer, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		p.mu.Lock()
-		if n := len(p.buffers); n > 0 {
-			b := p.buffers[n-1]
-			p.buffers[n-1] = nil
-			p.buffers = p.buffers[:n-1]
-			p.inUse.Add(responseBufferSize)
-			p.mu.Unlock()
-			return b, nil
+		active := p.inUse.Load()
+		if active < p.capacity {
+			if p.inUse.CompareAndSwap(active, active+responseBufferSize) {
+				return p.buffers.Get().(*responseBuffer), nil
+			}
+			continue
 		}
-		if p.allocated.Load() < p.capacity {
-			p.allocated.Add(responseBufferSize)
-			p.inUse.Add(responseBufferSize)
+		p.mu.Lock()
+		// Register under the notification lock and recheck after a racing release.
+		if p.inUse.Load() < p.capacity {
 			p.mu.Unlock()
-			return make([]byte, responseBufferSize), nil
+			continue
 		}
 		changed := p.changed
-		p.waiters++
+		p.waiters.Add(1)
 		p.mu.Unlock()
 		var err error
 		select {
@@ -52,21 +58,20 @@ func (p *responseBufferPool) acquire(ctx context.Context) ([]byte, error) {
 		case <-ctx.Done():
 			err = ctx.Err()
 		}
-		p.mu.Lock()
-		p.waiters--
-		p.mu.Unlock()
+		p.waiters.Add(-1)
 		if err != nil {
 			return nil, err
 		}
 	}
 }
-func (p *responseBufferPool) release(b []byte) {
-	p.mu.Lock()
+
+func (p *responseBufferPool) release(buffer *responseBuffer) {
+	p.buffers.Put(buffer)
 	p.inUse.Add(-responseBufferSize)
-	p.buffers = append(p.buffers, b)
-	if p.waiters > 0 {
+	if p.waiters.Load() > 0 {
+		p.mu.Lock()
 		close(p.changed)
 		p.changed = make(chan struct{})
+		p.mu.Unlock()
 	}
-	p.mu.Unlock()
 }

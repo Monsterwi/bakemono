@@ -146,11 +146,12 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache
 
 func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, r *http.Request) error {
 	runtime := requestRuntime(r)
-	buf, err := runtime.responseBuffers.acquire(r.Context())
+	buffer, err := runtime.responseBuffers.acquire(r.Context())
 	if err != nil {
 		return err
 	}
-	defer runtime.responseBuffers.release(buf)
+	defer runtime.responseBuffers.release(buffer)
+	buf := buffer.data
 	controller := http.NewResponseController(w)
 	idle := time.Duration(runtime.config.TransactionTimeoutIn) * time.Second
 	for {

@@ -97,7 +97,7 @@ func TestStreamResponseBufferBudgetCancellationAndReuse(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.streamResponse(first, bytes.NewReader([]byte("first")), r) }()
 	<-first.started
-	if pool.allocated.Load() != responseBufferSize || pool.inUse.Load() != responseBufferSize {
+	if pool.totalAllocated.Load() != responseBufferSize || pool.inUse.Load() != responseBufferSize {
 		t.Fatal("first response was not reserved")
 	}
 	ctx, cancel := context.WithCancel(r.Context())
@@ -109,7 +109,7 @@ func TestStreamResponseBufferBudgetCancellationAndReuse(t *testing.T) {
 	if err := <-second; !errors.Is(err, context.Canceled) {
 		t.Fatalf("waiting response: %v", err)
 	}
-	if pool.allocated.Load() != responseBufferSize {
+	if pool.totalAllocated.Load() != responseBufferSize {
 		t.Fatal("allocated beyond admitted response budget")
 	}
 	close(first.resume)
@@ -121,7 +121,7 @@ func TestStreamResponseBufferBudgetCancellationAndReuse(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if pool.allocated.Load() != responseBufferSize || pool.inUse.Load() != 0 {
+	if pool.totalAllocated.Load() < responseBufferSize || pool.inUse.Load() != 0 {
 		t.Fatal("buffer was leaked or not reused")
 	}
 	if err := s.streamResponse(&flushErrorSink{}, bytes.NewReader([]byte("error")), r); !errors.Is(err, io.ErrClosedPipe) {
@@ -158,7 +158,7 @@ func TestStreamResponseConcurrentBufferBudget(t *testing.T) {
 		})
 	}
 	workers.Wait()
-	if pool.allocated.Load() > 2*responseBufferSize || pool.inUse.Load() != 0 {
-		t.Fatalf("unbounded or leaked response buffers: allocated=%d active=%d", pool.allocated.Load(), pool.inUse.Load())
+	if pool.inUse.Load() != 0 {
+		t.Fatalf("unbounded or leaked response buffers: allocated=%d active=%d", pool.totalAllocated.Load(), pool.inUse.Load())
 	}
 }

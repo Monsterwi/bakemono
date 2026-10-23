@@ -27,7 +27,7 @@ type Stats struct {
 	RuntimeVersion                                                                                                              uint64
 	RetiredRuntimes                                                                                                             int
 	InFlight, Queued, CacheWriters, CacheQueued, RangeReaders, RangeReaderQueued, DiskQueued                                    int
-	ResponseBufferCapacityBytes, ResponseBufferAllocatedBytes, ResponseBufferInUseBytes                                         int64
+	ResponseBufferCapacityBytes, ResponseBufferTotalAllocatedBytes, ResponseBufferInUseBytes                                    int64
 	BufferReserved, DiskBufferedBytes                                                                                           int64
 	Requests, Rejected, Cancelled, Hits, Misses, Bypass, Bytes, TTFBCount, TTFBNanoseconds, CacheWriteErrors, CacheWriteSkipped uint64
 	SharedFillTasks, SharedFillWaiters                                                                                          int
@@ -58,7 +58,7 @@ func (s *Server) Stats() Stats {
 			continue
 		}
 		st.ResponseBufferCapacityBytes += rt.responseBuffers.capacity
-		st.ResponseBufferAllocatedBytes += rt.responseBuffers.allocated.Load()
+		st.ResponseBufferTotalAllocatedBytes += rt.responseBuffers.totalAllocated.Load()
 		st.ResponseBufferInUseBytes += rt.responseBuffers.inUse.Load()
 		b := rt.admission.Stats()
 		st.InFlight += b.InFlight
