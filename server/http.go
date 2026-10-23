@@ -28,7 +28,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	stop := context.AfterFunc(s.ctx, cancel)
 	defer func() { stop(); cancel() }()
-	r = withRequestRuntime(r, ctx, runtime)
+	// This context already descends from the request; producers clone before mutation.
+	r = r.WithContext(context.WithValue(ctx, runtimeContextKey{}, runtime))
 	release, err := runtime.admission.Acquire(ctx, time.Duration(runtime.config.QueueTimeout)*time.Second)
 	if err != nil {
 		if ctx.Err() != nil {

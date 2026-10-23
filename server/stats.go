@@ -57,7 +57,7 @@ func (s *Server) Stats() Stats {
 		if rt == nil {
 			continue
 		}
-		st.ResponseBufferCapacityBytes += int64(cap(rt.responseBuffers.buffers)) * responseBufferSize
+		st.ResponseBufferCapacityBytes += rt.responseBuffers.capacity
 		st.ResponseBufferAllocatedBytes += rt.responseBuffers.allocated.Load()
 		st.ResponseBufferInUseBytes += rt.responseBuffers.inUse.Load()
 		b := rt.admission.Stats()

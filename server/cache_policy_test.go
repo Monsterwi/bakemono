@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -410,5 +411,30 @@ func TestColdHeadPreservesMethodAndWarmHeadUsesGet(t *testing.T) {
 	s.ServeHTTP(head, httptest.NewRequest("HEAD", "http://cache.test/item", nil))
 	if calls.Load() != 2 || head.Header().Get("X-Origin-Method") != "GET" || head.Body.Len() != 0 {
 		t.Fatalf("HEAD calls=%d method=%s body=%q", calls.Load(), head.Header().Get("X-Origin-Method"), head.Body.String())
+	}
+}
+
+func TestCacheRequestsPreserveCallerHeadersAndURL(t *testing.T) {
+	s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public,max-age=3600")
+		w.Header().Set("ETag", `"origin"`)
+		fmt.Fprint(w, "body")
+	})
+	r := httptest.NewRequest("GET", "http://cache.test/item?b=2&a=1", nil)
+	r.Header.Set("If-None-Match", `"client"`)
+	r.Header["X-Multi"] = []string{"one", "two"}
+	headers, url := r.Header.Clone(), r.URL.String()
+	for range 2 {
+		response := httptest.NewRecorder()
+		s.ServeHTTP(response, r)
+		if response.Code != 200 || response.Body.String() != "body" {
+			t.Fatalf("response: %d %q", response.Code, response.Body.String())
+		}
+		if !reflect.DeepEqual(r.Header, headers) || r.URL.String() != url {
+			t.Fatal("cache path mutated caller request metadata")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected MISS then HIT, origin calls=%d", calls.Load())
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,5 +135,30 @@ func TestStreamResponseBufferBudgetCancellationAndReuse(t *testing.T) {
 	}
 	if pool.inUse.Load() != 0 {
 		t.Fatal("short write leaked a buffer")
+	}
+}
+
+func TestStreamResponseConcurrentBufferBudget(t *testing.T) {
+	s := new(Server)
+	r := streamRequest()
+	pool := newResponseBufferPool(2)
+	requestRuntime(r).responseBuffers = pool
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	r = r.WithContext(ctx)
+	var workers sync.WaitGroup
+	for range 16 {
+		workers.Go(func() {
+			for range 5 {
+				if err := s.streamResponse(&streamSink{}, bytes.NewReader(make([]byte, 1<<20)), r); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	workers.Wait()
+	if pool.allocated.Load() > 2*responseBufferSize || pool.inUse.Load() != 0 {
+		t.Fatalf("unbounded or leaked response buffers: allocated=%d active=%d", pool.allocated.Load(), pool.inUse.Load())
 	}
 }
