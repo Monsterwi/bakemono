@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Monsterwi/razor/cache"
@@ -40,7 +41,6 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		s.proxyWithoutCache(w, r)
 		return
 	}
-	token, _ := s.cache.BeginFill(key, key)
 	selected, selectedInfo, lookupErr := s.lookupCached(key, r)
 	if lookupErr != nil {
 		s.proxyWithoutCache(w, r)
@@ -62,6 +62,8 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 	if requestRuntime(r).config.SharedFillPublicStatic == 1 && blockGETEligible(r) && s.serveBlocks(w, r, key, true) {
 		return
 	}
+	// Capture the invalidation fence before origin work, never on a fresh HIT.
+	token, _ := s.cache.BeginFill(key, key)
 	s.serveSharedMiss(w, r, key, token)
 }
 
@@ -138,8 +140,15 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache
 	}
 }
 
+var responseBuffers = sync.Pool{New: func() any {
+	buf := make([]byte, 256*1024)
+	return &buf
+}}
+
 func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, r *http.Request) error {
-	buf := make([]byte, 32*1024)
+	buffer := responseBuffers.Get().(*[]byte)
+	defer responseBuffers.Put(buffer)
+	buf := *buffer
 	for {
 		n, readErr := body.Read(buf)
 		if n > 0 {
