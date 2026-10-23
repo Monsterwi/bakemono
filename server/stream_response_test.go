@@ -94,6 +94,8 @@ func TestStreamResponseBufferBudgetCancellationAndReuse(t *testing.T) {
 	r := streamRequest()
 	pool := requestRuntime(r).responseBuffers
 	first := &stalledStreamSink{started: make(chan struct{}), resume: make(chan struct{})}
+	resume := sync.OnceFunc(func() { close(first.resume) })
+	t.Cleanup(resume)
 	done := make(chan error, 1)
 	go func() { done <- s.streamResponse(first, bytes.NewReader([]byte("first")), r) }()
 	<-first.started
@@ -101,10 +103,23 @@ func TestStreamResponseBufferBudgetCancellationAndReuse(t *testing.T) {
 		t.Fatal("first response was not reserved")
 	}
 	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	second := make(chan error, 1)
 	go func() {
 		second <- s.streamResponse(&streamSink{}, bytes.NewReader([]byte("second")), r.WithContext(ctx))
 	}()
+	until := time.Now().Add(time.Second)
+	for pool.waiters.Load() == 0 {
+		select {
+		case err := <-second:
+			t.Fatalf("response bypassed exhausted buffer budget: %v", err)
+		default:
+		}
+		if time.Now().After(until) {
+			t.Fatal("response did not enter buffer wait")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 	if err := <-second; !errors.Is(err, context.Canceled) {
 		t.Fatalf("waiting response: %v", err)
@@ -112,7 +127,7 @@ func TestStreamResponseBufferBudgetCancellationAndReuse(t *testing.T) {
 	if pool.totalAllocated.Load() != responseBufferSize {
 		t.Fatal("allocated beyond admitted response budget")
 	}
-	close(first.resume)
+	resume()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
