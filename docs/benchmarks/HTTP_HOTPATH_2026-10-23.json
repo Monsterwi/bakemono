@@ -1,0 +1,276 @@
+{
+  "source_commit": "77e5186",
+  "baseline_commit": "e1b158a",
+  "rate": {
+    "baseline": {
+      "12000": {
+        "rounds": 3,
+        "successful": 720000,
+        "errors": 0,
+        "dropped": 0,
+        "cpu_us_request": 281.1666666666667,
+        "rss_mib": 34.04296875,
+        "queue_ms": {
+          "p50": 0.017079,
+          "p95": 0.068363,
+          "p99": 0.129734
+        },
+        "ttfb_ms": {
+          "p50": 0.199134,
+          "p95": 0.287462,
+          "p99": 0.539324
+        },
+        "first_body_ms": {
+          "p50": 0.210784,
+          "p95": 0.300309,
+          "p99": 0.563691
+        },
+        "completion_ms": {
+          "p50": 0.326863,
+          "p95": 0.43542,
+          "p99": 0.733042
+        }
+      },
+      "16000": {
+        "rounds": 3,
+        "successful": 960000,
+        "errors": 0,
+        "dropped": 0,
+        "cpu_us_request": 280.71875000000006,
+        "rss_mib": 35.85546875,
+        "queue_ms": {
+          "p50": 0.011346,
+          "p95": 0.060937,
+          "p99": 0.115243
+        },
+        "ttfb_ms": {
+          "p50": 0.189358,
+          "p95": 0.306718,
+          "p99": 0.788333
+        },
+        "first_body_ms": {
+          "p50": 0.202136,
+          "p95": 0.321263,
+          "p99": 0.804784
+        },
+        "completion_ms": {
+          "p50": 0.326298,
+          "p95": 0.480664,
+          "p99": 0.997597
+        }
+      }
+    },
+    "optimized": {
+      "12000": {
+        "rounds": 3,
+        "successful": 720000,
+        "errors": 0,
+        "dropped": 0,
+        "cpu_us_request": 269.16666666666663,
+        "rss_mib": 34.4296875,
+        "queue_ms": {
+          "p50": 0.015853,
+          "p95": 0.064153,
+          "p99": 0.121246
+        },
+        "ttfb_ms": {
+          "p50": 0.186401,
+          "p95": 0.272461,
+          "p99": 0.481976
+        },
+        "first_body_ms": {
+          "p50": 0.199076,
+          "p95": 0.285862,
+          "p99": 0.512521
+        },
+        "completion_ms": {
+          "p50": 0.317831,
+          "p95": 0.421451,
+          "p99": 0.680411
+        }
+      },
+      "16000": {
+        "rounds": 3,
+        "successful": 960000,
+        "errors": 0,
+        "dropped": 0,
+        "cpu_us_request": 266.43749999999994,
+        "rss_mib": 36.4453125,
+        "queue_ms": {
+          "p50": 0.012452,
+          "p95": 0.060212,
+          "p99": 0.112398
+        },
+        "ttfb_ms": {
+          "p50": 0.181434,
+          "p95": 0.274976,
+          "p99": 0.644523
+        },
+        "first_body_ms": {
+          "p50": 0.193134,
+          "p95": 0.289012,
+          "p99": 0.669826
+        },
+        "completion_ms": {
+          "p50": 0.317511,
+          "p95": 0.442449,
+          "p99": 0.866961
+        }
+      }
+    }
+  },
+  "saturation": {
+    "baseline": {
+      "32": {
+        "rounds": 3,
+        "qps": 27814.03260124413,
+        "p99_ms": 4.0405750000000005,
+        "cpu_us_request": 293.6566708126335,
+        "rss_mib": 37.49609375,
+        "errors": 0
+      },
+      "100": {
+        "rounds": 3,
+        "qps": 27460.457018863006,
+        "p99_ms": 15.798078,
+        "cpu_us_request": 297.6218644320759,
+        "rss_mib": 44.1328125,
+        "errors": 0
+      }
+    },
+    "optimized": {
+      "32": {
+        "rounds": 3,
+        "qps": 29237.28246143825,
+        "p99_ms": 3.875976,
+        "cpu_us_request": 279.84487640726104,
+        "rss_mib": 37.51953125,
+        "errors": 0
+      },
+      "100": {
+        "rounds": 3,
+        "qps": 29520.797863980853,
+        "p99_ms": 14.681516,
+        "cpu_us_request": 277.4344509046334,
+        "rss_mib": 45.40234375,
+        "errors": 0
+      }
+    }
+  },
+  "functional": {
+    "delivery-functional-ssd1": {
+      "passed": 14,
+      "total": 14
+    },
+    "delivery-functional-data3": {
+      "passed": 14,
+      "total": 14
+    },
+    "delivery-functional-s3fifo": {
+      "passed": 14,
+      "total": 14
+    }
+  },
+  "compatibility": {
+    "compat200-ssd1": {
+      "success": true,
+      "origin_unchanged_on_hit": true
+    },
+    "compat200-data3": {
+      "success": true,
+      "origin_unchanged_on_hit": true
+    },
+    "upgrade-ssd1": {
+      "success": true,
+      "origin_unchanged": true
+    },
+    "upgrade-data3": {
+      "success": true,
+      "origin_unchanged": true
+    }
+  },
+  "large_paired": {
+    "baseline": {
+      "8": {
+        "rounds": 3,
+        "mib_per_second": 1024.7374963998436,
+        "cpu_s_gib": 5.075692307692306,
+        "rss_mib": 97.3046875,
+        "errors": 0
+      },
+      "32": {
+        "rounds": 3,
+        "mib_per_second": 1005.2352113419462,
+        "cpu_s_gib": 5.766400000000001,
+        "rss_mib": 99.52734375,
+        "errors": 0
+      }
+    },
+    "optimized": {
+      "8": {
+        "rounds": 3,
+        "mib_per_second": 982.4704150228481,
+        "cpu_s_gib": 5.303138461538463,
+        "rss_mib": 86.83984375,
+        "errors": 0
+      },
+      "32": {
+        "rounds": 3,
+        "mib_per_second": 989.7675017155038,
+        "cpu_s_gib": 5.833599999999997,
+        "rss_mib": 100.18359375,
+        "errors": 0
+      }
+    }
+  },
+  "earlier_non_interleaved_large": {
+    "baseline-final-large": {
+      "8": {
+        "mib_per_second": 1426.023010859887,
+        "cpu_s_gib": 3.6680205128205134,
+        "rss_mib": 90.05859375
+      },
+      "32": {
+        "mib_per_second": 1438.3862884472574,
+        "cpu_s_gib": 3.9487999999999994,
+        "rss_mib": 100.39453125
+      }
+    },
+    "delivery-large": {
+      "8": {
+        "mib_per_second": 1003.9944852877768,
+        "cpu_s_gib": 5.204114285714286,
+        "rss_mib": 84.95703125
+      },
+      "32": {
+        "mib_per_second": 1047.782422251269,
+        "cpu_s_gib": 5.632000000000001,
+        "rss_mib": 103.4921875
+      }
+    }
+  },
+  "methods": {
+    "date": "2026-10-23",
+    "protocol": "HTTP/1.1 loopback, no TLS",
+    "go": "1.26.10",
+    "GOMAXPROCS": 8,
+    "saturation": "256KiB, unpinned, C32/C100; B,O,O,B,B,O, 10s each",
+    "rate": "256KiB; 12000/16000 offered RPS, 100 workers, 20s, 3 rounds; B/O, O/B, B/O",
+    "large": "100MiB, pinned, C8/C32; B,O,O,B,B,O, 10s each",
+    "pinned_server_cpus": "0,2,4,6,8,10,12,14",
+    "pinned_client_cpus": "1,3,5,7,9,11,13,15",
+    "aggregation": "median of per-round measurements, not pooled latency percentiles"
+  },
+  "local_validation": {
+    "normal": "passed",
+    "race_GOFLAGS": "passed",
+    "vet": "passed",
+    "tool_tests": 20,
+    "remote_CI": "pending push authorization"
+  },
+  "metadata_open_allocations": {
+    "baseline": 130,
+    "optimized": 17,
+    "scope": "OpenReadCommitted + LoadHTTPInfo + Close; warm single RAM entry"
+  }
+}

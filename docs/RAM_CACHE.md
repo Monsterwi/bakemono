@@ -31,3 +31,9 @@ go test ./cache -run '^$' -bench '^BenchmarkRAMTrace$' -benchmem -benchtime=2s -
 MB/s 只按请求引用的逻辑正文大小折算，基准不复制整个正文，不能作为 HTTP 或磁盘吞吐。开发机三轮短轨迹校准见 [原始输出](benchmarks/RAM_POLICY_2026-10-21.txt) 与 [说明](benchmarks/RAM_POLICY_2026-10-21.md)；同源码两策略/HDD/SSD三轮矩阵和两次全新SSD各两小时实测已通过，见[专机验收报告](benchmarks/CDN_ACCEPTANCE_2026-10-21.md)。报告保留策略适用范围、累计分配/GC和弱一致快照边界，不把单机结果当通用性能胜负。
 
 本次 Otter 的 HDD矩阵与 SSD长测分别观察到 ResidentBytes 为11,037,524B（10.53MiB）和11,282,849B（10.76MiB）的快照，均超过配置10MiB。Items/value汇总与策略ChargedBytes不是原子同刻取得，异步维护也是已知边界；不能将独立峰值合成精确同步驻留量、唯一归因或同步预算违约证明。完整外部元数据、heap/RSS及峰值/趋势以报告和原始统计为准。
+
+## HTTP 发送缓冲
+
+发送缓冲独立于 RAM 条目与 `CacheWriteBufferBytes` / `BufferReserved`。每 runtime 活动 payload 上限为 `max_requests × 256 KiB`，默认 64 MiB，按需分配；额度等待可取消，流结束归还。空闲缓冲使用 `sync.Pool`，由 GC 管理，不承诺硬空闲保留量或进程 RSS 上限。热更新未排空期间，新旧 runtime 的容量相加。
+
+Stats 的 `ResponseBufferCapacityBytes` 与 `ResponseBufferInUseBytes` 分别是活动容量、当前租约字节数；`ResponseBufferTotalAllocatedBytes` 是当前及未排空旧 runtime 创建以来累计分配的 payload，清池后重新分配可使它超过容量，旧 runtime 移除后汇总值可下降。不能将累计值解释为驻留内存。实测收益与大文件代价见[HTTP 热路径报告](benchmarks/HTTP_HOTPATH_2026-10-23.md)。
