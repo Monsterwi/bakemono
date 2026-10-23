@@ -2,80 +2,71 @@ package server
 
 import (
 	"context"
-	"math/rand/v2"
+	"sync"
 	"sync/atomic"
 )
 
 const responseBufferSize = 256 << 10
 
-// A runtime retains at most one buffer per admitted request, even across GC.
-// Shards avoid serializing every response on a single channel's lock.
+// Runtime-owned buffers have a strict payload cap and survive GC.
+// LIFO reuse favors recently touched data; no body allocation or I/O holds mu.
 type responseBufferPool struct {
-	buffers   [8]chan []byte
+	mu        sync.Mutex
+	buffers   [][]byte
 	capacity  int64
 	allocated atomic.Int64
 	inUse     atomic.Int64
+	changed   chan struct{}
+	waiters   int
 }
 
 func newResponseBufferPool(requests int) *responseBufferPool {
-	p := &responseBufferPool{capacity: int64(requests) * responseBufferSize}
-	for i := range p.buffers {
-		p.buffers[i] = make(chan []byte, requests)
-	}
-	return p
+	return &responseBufferPool{capacity: int64(requests) * responseBufferSize, changed: make(chan struct{})}
 }
-
-func (p *responseBufferPool) take(start int) []byte {
-	for i := range p.buffers {
-		select {
-		case buffer := <-p.buffers[(start+i)%len(p.buffers)]:
-			return buffer
-		default:
-		}
-	}
-	return nil
-}
-
 func (p *responseBufferPool) acquire(ctx context.Context) ([]byte, error) {
-	start := rand.IntN(len(p.buffers))
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if buffer := p.take(start); buffer != nil {
+		p.mu.Lock()
+		if n := len(p.buffers); n > 0 {
+			b := p.buffers[n-1]
+			p.buffers[n-1] = nil
+			p.buffers = p.buffers[:n-1]
 			p.inUse.Add(responseBufferSize)
-			return buffer, nil
+			p.mu.Unlock()
+			return b, nil
 		}
-		for allocated := p.allocated.Load(); allocated < p.capacity; allocated = p.allocated.Load() {
-			if p.allocated.CompareAndSwap(allocated, allocated+responseBufferSize) {
-				buffer := make([]byte, responseBufferSize)
-				p.inUse.Add(responseBufferSize)
-				return buffer, nil
-			}
+		if p.allocated.Load() < p.capacity {
+			p.allocated.Add(responseBufferSize)
+			p.inUse.Add(responseBufferSize)
+			p.mu.Unlock()
+			return make([]byte, responseBufferSize), nil
 		}
-		var buffer []byte
+		changed := p.changed
+		p.waiters++
+		p.mu.Unlock()
+		var err error
 		select {
-		case buffer = <-p.buffers[0]:
-		case buffer = <-p.buffers[1]:
-		case buffer = <-p.buffers[2]:
-		case buffer = <-p.buffers[3]:
-		case buffer = <-p.buffers[4]:
-		case buffer = <-p.buffers[5]:
-		case buffer = <-p.buffers[6]:
-		case buffer = <-p.buffers[7]:
+		case <-changed:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			err = ctx.Err()
 		}
-		p.inUse.Add(responseBufferSize)
-		if err := ctx.Err(); err != nil {
-			p.release(buffer)
+		p.mu.Lock()
+		p.waiters--
+		p.mu.Unlock()
+		if err != nil {
 			return nil, err
 		}
-		return buffer, nil
 	}
 }
-
-func (p *responseBufferPool) release(buffer []byte) {
+func (p *responseBufferPool) release(b []byte) {
+	p.mu.Lock()
 	p.inUse.Add(-responseBufferSize)
-	p.buffers[rand.IntN(len(p.buffers))] <- buffer
+	p.buffers = append(p.buffers, b)
+	if p.waiters > 0 {
+		close(p.changed)
+		p.changed = make(chan struct{})
+	}
+	p.mu.Unlock()
 }
