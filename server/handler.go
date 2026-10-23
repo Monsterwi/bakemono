@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Monsterwi/razor/cache"
@@ -41,16 +40,16 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		s.proxyWithoutCache(w, r)
 		return
 	}
-	selected, selectedInfo, lookupErr := s.lookupCached(key, r)
+	selected, selectedInfo, policy, lookupErr := s.lookupCached(key, r)
 	if lookupErr != nil {
 		s.proxyWithoutCache(w, r)
 		return
 	}
 	if selected != nil {
-		if requestFresh(r, selectedInfo, s.now()) {
+		if requestPolicyFresh(r, policy) {
 			defer selected.Close()
 			s.cacheStatus(w, "HIT")
-			s.serveCacheHit(w, r, selected, selectedInfo)
+			s.serveCacheHit(w, r, selected, selectedInfo, policy)
 			return
 		}
 		selected.Close()
@@ -67,11 +66,11 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 	s.serveSharedMiss(w, r, key, token)
 }
 
-func (s *Server) lookupCached(key []byte, r *http.Request) (*cache.CacheVC, *cache.CacheHTTPInfo, error) {
+func (s *Server) lookupCached(key []byte, r *http.Request) (*cache.CacheVC, *cache.CacheHTTPInfo, freshness, error) {
 	// shortcut: bound negotiation fanout; excess variants safely bypass caching.
 	keys, keysErr := s.cache.KeysForSelectorLimit(key, maxHTTPVariants)
 	if keysErr != nil {
-		return nil, nil, keysErr
+		return nil, nil, freshness{}, keysErr
 	}
 	for _, candidate := range keys {
 		vc, err := s.cache.OpenReadCommitted([]byte(candidate))
@@ -84,12 +83,12 @@ func (s *Server) lookupCached(key []byte, r *http.Request) (*cache.CacheVC, *cac
 			continue
 		}
 		fields, valid := varyFields(info.ResponseHeaders)
-		if _, safe := responsePolicy(info, s.now()); valid && safe && string(representationKey(key, r.Header, fields)) == candidate {
-			return vc, info, nil
+		if policy, safe := responsePolicy(info, s.now()); valid && safe && string(representationKey(key, r.Header, fields)) == candidate {
+			return vc, info, policy, nil
 		}
 		vc.Close()
 	}
-	return nil, nil, nil
+	return nil, nil, freshness{}, nil
 }
 
 func (s *Server) handlePurge(key []byte, w http.ResponseWriter, r *http.Request) {
@@ -120,12 +119,9 @@ func copyHeaders(dst, src http.Header) {
 	}
 }
 
-func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC, info *cache.CacheHTTPInfo) {
+func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC, info *cache.CacheHTTPInfo, policy freshness) {
 	copyHeaders(w.Header(), info.ResponseHeaders)
-	if policy, ok := responsePolicy(info, s.now()); ok {
-		age := policy.age
-		w.Header().Set("Age", strconv.FormatInt(int64(age/time.Second), 10))
-	}
+	w.Header().Set("Age", strconv.FormatInt(int64(policy.age/time.Second), 10))
 	if clientNotModified(r, info.ResponseHeaders) {
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -140,22 +136,22 @@ func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache
 	}
 }
 
-var responseBuffers = sync.Pool{New: func() any {
-	buf := make([]byte, 256*1024)
-	return &buf
-}}
-
 func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, r *http.Request) error {
-	buffer := responseBuffers.Get().(*[]byte)
-	defer responseBuffers.Put(buffer)
-	buf := *buffer
+	runtime := requestRuntime(r)
+	buf, err := runtime.responseBuffers.acquire(r.Context())
+	if err != nil {
+		return err
+	}
+	defer runtime.responseBuffers.release(buf)
+	controller := http.NewResponseController(w)
+	idle := time.Duration(runtime.config.TransactionTimeoutIn) * time.Second
 	for {
 		n, readErr := body.Read(buf)
 		if n > 0 {
 			if err := r.Context().Err(); err != nil {
 				return err
 			}
-			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(time.Duration(requestRuntime(r).config.TransactionTimeoutIn) * time.Second))
+			_ = controller.SetWriteDeadline(time.Now().Add(idle))
 			written, err := w.Write(buf[:n])
 			if err != nil {
 				return err
@@ -163,7 +159,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, body io.Reader, r *http.R
 			if written != n {
 				return io.ErrShortWrite
 			}
-			if err := http.NewResponseController(w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
 				return err
 			}
 		}

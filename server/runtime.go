@@ -25,6 +25,7 @@ type runtimeSnapshot struct {
 	config                           *appconfig.Config
 	proxy                            *proxy.HTTPProxy
 	admission, writers, rangeReaders *budget.Limiter
+	responseBuffers                  *responseBufferPool
 	namespace                        string
 	version                          uint64
 	refs                             int // guarded by Server.mu
@@ -53,6 +54,7 @@ func newRuntime(cfg *appconfig.Config, p *proxy.HTTPProxy, version uint64) (*run
 		rt.namespace += ":" + proxy.PublicRequestVersion
 	}
 	slots := min(cfg.MaxCacheWriters, cfg.CacheWriteBufferBytes/cfg.CacheWriterReservation())
+	rt.responseBuffers = newResponseBufferPool(cfg.MaxRequests)
 	rt.writers = budget.New(slots, cfg.MaxQueuedCacheWriters)
 	rt.rangeReaders = budget.New(slots, cfg.MaxRequests)
 	return rt, nil

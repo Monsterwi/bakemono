@@ -160,7 +160,12 @@ func addAge(a, b time.Duration) time.Duration {
 
 func requestFresh(r *http.Request, info *cache.CacheHTTPInfo, now time.Time) bool {
 	p, ok := responsePolicy(info, now)
-	if !ok || p.validate || p.age >= p.lifetime || hasHeader(r.Header, "Pragma") {
+	return ok && requestPolicyFresh(r, p)
+}
+
+// The lookup policy is request-local: age and request constraints are never cached.
+func requestPolicyFresh(r *http.Request, p freshness) bool {
+	if p.validate || p.age >= p.lifetime || hasHeader(r.Header, "Pragma") {
 		return false
 	}
 	directives, ok := cacheDirectives(r.Header, true)

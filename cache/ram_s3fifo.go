@@ -21,7 +21,7 @@ const (
 
 type fifoEntry struct {
 	key     string
-	value   []byte
+	value   *ramEntry
 	charge  uint64
 	freq    uint8
 	segment int
@@ -41,7 +41,7 @@ type s3FIFO struct {
 func newS3FIFO(capacity uint64) *s3FIFO {
 	return &s3FIFO{capacity: capacity, entryLimit: int(min(capacity, 65536)), entries: make(map[string]*fifoEntry)}
 }
-func (c *s3FIFO) get(key string) ([]byte, bool) {
+func (c *s3FIFO) get(key string) (*ramEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e := c.entries[key]; e != nil && e.segment != fifoGhost {
@@ -57,10 +57,10 @@ func (c *s3FIFO) unlink(e *fifoEntry) {
 	switch e.segment {
 	case fifoSmall:
 		c.smallBytes -= e.charge
-		c.payloadBytes -= uint64(len(e.value))
+		c.payloadBytes -= uint64(len(e.value.data))
 	case fifoMain:
 		c.mainBytes -= e.charge
-		c.payloadBytes -= uint64(len(e.value))
+		c.payloadBytes -= uint64(len(e.value.data))
 	case fifoGhost:
 		c.ghostBytes -= e.charge
 		c.ghostMetadata -= uint64(128 + len(e.key))
@@ -74,10 +74,10 @@ func (c *s3FIFO) append(e *fifoEntry, segment int) {
 	switch segment {
 	case fifoSmall:
 		c.smallBytes += e.charge
-		c.payloadBytes += uint64(len(e.value))
+		c.payloadBytes += uint64(len(e.value.data))
 	case fifoMain:
 		c.mainBytes += e.charge
-		c.payloadBytes += uint64(len(e.value))
+		c.payloadBytes += uint64(len(e.value.data))
 	case fifoGhost:
 		c.ghostBytes += e.charge
 		c.ghostMetadata += uint64(128 + len(e.key))
@@ -122,14 +122,14 @@ func (c *s3FIFO) evict() {
 		return
 	}
 }
-func (c *s3FIFO) put(key string, value []byte) {
+func (c *s3FIFO) put(key string, value *ramEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	segment := fifoSmall
-	charge := uint64(max(1, len(value)))
+	charge := uint64(value.weight)
 	if old := c.entries[key]; old != nil {
 		if old.segment != fifoGhost {
-			c.payloadBytes = c.payloadBytes - uint64(len(old.value)) + uint64(len(value))
+			c.payloadBytes = c.payloadBytes - uint64(len(old.value.data)) + uint64(len(value.data))
 			if old.segment == fifoSmall {
 				c.smallBytes = c.smallBytes - old.charge + charge
 			} else {
@@ -163,7 +163,9 @@ func (c *s3FIFO) snapshot() RAMStats {
 	st := RAMStats{Stats: c.counters, ResidentBytes: c.payloadBytes, ChargedBytes: c.smallBytes + c.mainBytes, ResidentEntries: c.queues[fifoSmall].Len() + c.queues[fifoMain].Len(), SmallEntries: c.queues[fifoSmall].Len(), MainEntries: c.queues[fifoMain].Len(), GhostEntries: c.queues[fifoGhost].Len(), GhostBytes: c.ghostBytes, Promotions: c.promotions, GhostHits: c.ghostHits, EstimatedMetadataBytes: c.ghostMetadata}
 	for _, e := range c.entries {
 		if e.segment != fifoGhost {
-			st.EstimatedMetadataBytes += uint64(128 + len(e.key))
+			decoded := e.charge - uint64(max(1, len(e.value.data)))
+			st.DecodedMetadataBytes += decoded
+			st.EstimatedMetadataBytes += uint64(128+len(e.key)) + decoded
 		}
 	}
 	return st

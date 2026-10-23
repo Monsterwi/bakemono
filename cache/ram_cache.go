@@ -12,7 +12,7 @@ const maxRAMKeyBytes = 64 << 10
 // RamCache retains immutable serialized fragments; a miss always permits disk fallback.
 // The selected policy owns no HTTP or persistent-cache invalidation state.
 type RamCache struct {
-	otter     *otter.Cache[string, []byte]
+	otter     *otter.Cache[string, *ramEntry]
 	fifo      *s3FIFO
 	capacity  uint64
 	algorithm string
@@ -20,10 +20,10 @@ type RamCache struct {
 
 type RAMStats struct {
 	stats.Stats
-	Algorithm                                                 string
-	CapacityBytes, ResidentBytes, ChargedBytes                uint64
-	ResidentEntries, GhostEntries, SmallEntries, MainEntries  int
-	GhostBytes, EstimatedMetadataBytes, Promotions, GhostHits uint64
+	Algorithm                                                                       string
+	CapacityBytes, ResidentBytes, ChargedBytes                                      uint64
+	ResidentEntries, GhostEntries, SmallEntries, MainEntries                        int
+	GhostBytes, EstimatedMetadataBytes, DecodedMetadataBytes, Promotions, GhostHits uint64
 }
 
 func NewRamCache(capacity uint64) *RamCache {
@@ -49,11 +49,19 @@ func NewRamCacheWithAlgorithm(capacity uint64, algorithm string) (*RamCache, err
 		r.fifo = newS3FIFO(capacity)
 		return r, nil
 	}
-	r.otter = otter.Must(&otter.Options[string, []byte]{MaximumWeight: capacity, Weigher: func(_ string, value []byte) uint32 { return uint32(max(1, len(value))) }, StatsRecorder: stats.NewCounter()})
+	r.otter = otter.Must(&otter.Options[string, *ramEntry]{MaximumWeight: capacity, Weigher: func(_ string, value *ramEntry) uint32 { return value.weight }, StatsRecorder: stats.NewCounter()})
 	return r, nil
 }
 
 func (r *RamCache) Get(key []byte) ([]byte, bool) {
+	entry, ok := r.getEntry(key)
+	if !ok {
+		return nil, false
+	}
+	return entry.data, true
+}
+
+func (r *RamCache) getEntry(key []byte) (*ramEntry, bool) {
 	if r.fifo != nil {
 		return r.fifo.get(string(key))
 	}
@@ -68,10 +76,15 @@ func (r *RamCache) Put(key, value []byte) error {
 		r.Delete(key)
 		return nil
 	}
+	entry := newRAMEntry(value)
+	if uint64(entry.weight) > r.capacity {
+		r.Delete(key)
+		return nil
+	}
 	if r.fifo != nil {
-		r.fifo.put(string(key), value)
+		r.fifo.put(string(key), entry)
 	} else {
-		r.otter.Set(string(key), value)
+		r.otter.Set(string(key), entry)
 	}
 	return nil
 }
@@ -129,8 +142,9 @@ func (r *RamCache) Stats() RAMStats {
 	st.ChargedBytes = r.otter.WeightedSize()
 	for key, value := range r.otter.All() {
 		st.ResidentEntries++
-		st.ResidentBytes += uint64(len(value))
-		st.EstimatedMetadataBytes += uint64(128 + len(key))
+		st.ResidentBytes += uint64(len(value.data))
+		st.DecodedMetadataBytes += uint64(value.weight) - uint64(max(1, len(value.data)))
+		st.EstimatedMetadataBytes += uint64(128+len(key)) + uint64(value.weight) - uint64(max(1, len(value.data)))
 	}
 	return st
 }

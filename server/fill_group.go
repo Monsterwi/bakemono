@@ -227,7 +227,7 @@ func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []b
 		return
 	}
 	fields, valid := varyFields(info.ResponseHeaders)
-	_, safe := responsePolicy(info, s.now())
+	policy, safe := responsePolicy(info, s.now())
 	if !valid || !safe || string(representationKey(key, r.Header, fields)) != string(task.result.key) {
 		http.Error(w, "Completed object unavailable", http.StatusBadGateway)
 		return
@@ -236,7 +236,7 @@ func (s *Server) serveSharedMiss(w http.ResponseWriter, r *http.Request, key []b
 	if task.result.status != "" {
 		status = task.result.status
 	}
-	s.serveCacheHit(w, r, vc, info)
+	s.serveCacheHit(w, r, vc, info, policy)
 }
 
 func (s *Server) privateFill(task *fillTask, resp *http.Response) {

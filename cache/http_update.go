@@ -363,5 +363,6 @@ func (c *Cache) UpdateHTTPInfo(ctx context.Context, token *FillToken, source *Ca
 	}
 	_, _, r.Dir = s.DirMgr.Get(source.Key)
 	r.buf, r.Info, source.Info = data, info, info
+	r.doc = nil
 	return nil
 }

@@ -77,6 +77,11 @@ func TestMetadataRefreshPreservesFragmentedBodyAndRejectsPurge(t *testing.T) {
 	}
 	fresh, _ := c.OpenReadCommitted(key)
 	defer fresh.Close()
+	// The refreshing reader must also use the new header/body boundary.
+	refreshedBody, readErr := io.ReadAll(r)
+	if readErr != nil || !bytes.Equal(refreshedBody, body) {
+		t.Fatalf("refreshing reader body len=%d err=%v", len(refreshedBody), readErr)
+	}
 	metadata, err := fresh.LoadHTTPInfo()
 	if err != nil || metadata.ResponseHeaders.Get("X-Updated") != "yes" {
 		t.Fatalf("metadata=%v err=%v", metadata, err)

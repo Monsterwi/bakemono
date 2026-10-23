@@ -33,12 +33,17 @@ type CacheReader struct {
 	// Internal
 	buf     []byte // Buffer for reading data (contains [DocHeader][Info][Data])
 	readErr error
+	ram     *ramEntry
+	doc     *Doc
 
 	mutex sync.Mutex
 }
 
-// parseDocFromBuf parses Doc from r.buf. This is a helper to avoid storing Doc as state.
+// parseDocFromBuf reuses the header for the current immutable fragment.
 func (r *CacheReader) parseDocFromBuf() (*Doc, error) {
+	if r.doc != nil {
+		return r.doc, nil
+	}
 	if len(r.buf) < DocHeaderSize {
 		return nil, fmt.Errorf("buffer too small for doc header")
 	}
@@ -48,6 +53,7 @@ func (r *CacheReader) parseDocFromBuf() (*Doc, error) {
 		return nil, err
 	}
 
+	r.doc = doc
 	return doc, nil
 }
 
@@ -106,6 +112,11 @@ func (r *CacheReader) LoadHTTPInfo() (*CacheHTTPInfo, error) {
 	doc, err := r.parseDocFromBuf()
 	if err != nil {
 		return nil, err
+	}
+
+	if r.ram != nil && r.ram.info != nil && r.ram.checksum == doc.Checksum {
+		r.Info = r.ram.info.clone()
+		return r.Info, nil
 	}
 
 	// Parse Info from r.buf
@@ -248,6 +259,8 @@ func (r *CacheReader) loadFragment(idx int) (err error) {
 		}
 	}()
 
+	r.ram, r.doc = nil, nil
+
 	// 1. Determine Key
 	currentKey := FragmentKey(r.FirstKey, idx)
 	r.Key = currentKey
@@ -305,11 +318,11 @@ func (r *CacheReader) loadFromRamCache() bool {
 	if r.Stripe.RamCache == nil {
 		return false
 	}
-	val, ok := r.Stripe.RamCache.Get(r.Key)
+	val, ok := r.Stripe.RamCache.getEntry(r.Key)
 	if !ok {
 		return false
 	}
-	r.buf = val
+	r.buf, r.ram = val.data, val
 	return true
 }
 

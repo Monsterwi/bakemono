@@ -18,6 +18,7 @@ type counters struct {
 
 // Stats contains only aggregate, bounded-cardinality counters. BufferReserved is
 // the conservative payload reservation for writers and block readers, not a total RSS cap.
+// ResponseBuffer* reports the separate runtime-owned transmission buffer pool.
 type Stats struct {
 	SnapshotUnixNano                                                                                                            int64
 	Goroutines                                                                                                                  int
@@ -26,6 +27,7 @@ type Stats struct {
 	RuntimeVersion                                                                                                              uint64
 	RetiredRuntimes                                                                                                             int
 	InFlight, Queued, CacheWriters, CacheQueued, RangeReaders, RangeReaderQueued, DiskQueued                                    int
+	ResponseBufferCapacityBytes, ResponseBufferAllocatedBytes, ResponseBufferInUseBytes                                         int64
 	BufferReserved, DiskBufferedBytes                                                                                           int64
 	Requests, Rejected, Cancelled, Hits, Misses, Bypass, Bytes, TTFBCount, TTFBNanoseconds, CacheWriteErrors, CacheWriteSkipped uint64
 	SharedFillTasks, SharedFillWaiters                                                                                          int
@@ -55,6 +57,9 @@ func (s *Server) Stats() Stats {
 		if rt == nil {
 			continue
 		}
+		st.ResponseBufferCapacityBytes += int64(cap(rt.responseBuffers.buffers)) * responseBufferSize
+		st.ResponseBufferAllocatedBytes += rt.responseBuffers.allocated.Load()
+		st.ResponseBufferInUseBytes += rt.responseBuffers.inUse.Load()
 		b := rt.admission.Stats()
 		st.InFlight += b.InFlight
 		st.Queued += b.Queued

@@ -27,13 +27,13 @@ func (s *Server) produceFill(task *fillTask, r *http.Request, key []byte, resour
 
 func (s *Server) fetchFill(task *fillTask, r *http.Request, key []byte, resources fillResources) fillResult {
 	// A prior task may have committed between request lookup and atomic creation.
-	stored, previous, err := s.lookupCached(key, r)
+	stored, previous, policy, err := s.lookupCached(key, r)
 	if err != nil {
 		return fillResult{err: err}
 	}
 	if stored != nil {
 		defer stored.Close()
-		if requestFresh(r, previous, s.now()) {
+		if requestPolicyFresh(r, policy) {
 			return fillResult{key: stored.Key, status: "HIT"}
 		}
 	}
