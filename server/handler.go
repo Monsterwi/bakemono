@@ -46,7 +46,7 @@ func (s *Server) handleGet(key []byte, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if selected != nil {
-		if requestPolicyFresh(r, policy) {
+		if requestPolicyFresh(r, policy, s.now()) {
 			defer selected.Close()
 			s.cacheStatus(w, "HIT")
 			s.serveCacheHit(w, r, selected, selectedInfo, policy)
@@ -121,7 +121,15 @@ func copyHeaders(dst, src http.Header) {
 
 func (s *Server) serveCacheHit(w http.ResponseWriter, r *http.Request, vc *cache.CacheVC, info *cache.CacheHTTPInfo, policy freshness) {
 	copyHeaders(w.Header(), info.ResponseHeaders)
-	w.Header().Set("Age", strconv.FormatInt(int64(policy.age/time.Second), 10))
+	now := s.now()
+	age, valid := policy.currentAge(now)
+	if !valid {
+		policy, valid = responsePolicy(info, now)
+		age = policy.age
+	}
+	if valid {
+		w.Header().Set("Age", strconv.FormatInt(int64(age/time.Second), 10))
+	}
 	if clientNotModified(r, info.ResponseHeaders) {
 		w.WriteHeader(http.StatusNotModified)
 		return

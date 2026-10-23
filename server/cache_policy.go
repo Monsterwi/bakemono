@@ -84,12 +84,13 @@ func hasHeader(h http.Header, name string) bool {
 type freshness struct {
 	age, lifetime time.Duration
 	validate      bool
+	evaluated     time.Time
 }
 
 // responsePolicy is shared by admission, lookup and successful validation.
 // Unsupported directives deliberately bypass; stale responses are never served.
 func responsePolicy(info *cache.CacheHTTPInfo, now time.Time) (freshness, bool) {
-	var p freshness
+	p := freshness{evaluated: now}
 	if info == nil || info.Status != http.StatusOK || info.RequestMethod != http.MethodGet {
 		return p, false
 	}
@@ -160,11 +161,16 @@ func addAge(a, b time.Duration) time.Duration {
 
 func requestFresh(r *http.Request, info *cache.CacheHTTPInfo, now time.Time) bool {
 	p, ok := responsePolicy(info, now)
-	return ok && requestPolicyFresh(r, p)
+	return ok && requestPolicyFresh(r, p, now)
 }
 
 // The lookup policy is request-local: age and request constraints are never cached.
-func requestPolicyFresh(r *http.Request, p freshness) bool {
+func requestPolicyFresh(r *http.Request, p freshness, now time.Time) bool {
+	age, valid := p.currentAge(now)
+	if !valid {
+		return false
+	}
+	p.age = age
 	if p.validate || p.age >= p.lifetime || hasHeader(r.Header, "Pragma") {
 		return false
 	}
@@ -204,4 +210,13 @@ func deltaSeconds(value string) (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Duration(seconds) * time.Second, true
+}
+
+// Reuse parsed directives, but advance age through scheduling and buffer waits.
+func (p freshness) currentAge(now time.Time) (time.Duration, bool) {
+	elapsed := now.Sub(p.evaluated)
+	if elapsed < 0 {
+		return 0, false
+	}
+	return addAge(p.age, elapsed), true
 }

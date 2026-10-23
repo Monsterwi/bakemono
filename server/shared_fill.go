@@ -33,7 +33,7 @@ func (s *Server) fetchFill(task *fillTask, r *http.Request, key []byte, resource
 	}
 	if stored != nil {
 		defer stored.Close()
-		if requestPolicyFresh(r, policy) {
+		if requestPolicyFresh(r, policy, s.now()) {
 			return fillResult{key: stored.Key, status: "HIT"}
 		}
 	}

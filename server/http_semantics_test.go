@@ -727,3 +727,45 @@ func Test304RefreshPreservesRecoveredPreviousPhaseFragments(t *testing.T) {
 		t.Fatalf("304 append damaged recovered current-phase object: bytes=%d err=%v", len(got), err)
 	}
 }
+
+// A parsed lookup policy must not freeze age while a request is descheduled.
+func TestCachedPolicyAdvancesBetweenLookupAndResponse(t *testing.T) {
+	for _, expiry := range []bool{true, false} {
+		name := "age"
+		if expiry {
+			name = "expiry"
+		}
+		t.Run(name, func(t *testing.T) {
+			base := time.Now().UTC().Truncate(time.Second)
+			lifetime := 60
+			if expiry {
+				lifetime = 1
+			}
+			s, calls := cacheServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Cache-Control", fmt.Sprintf("public,max-age=%d", lifetime))
+				w.Header().Set("Date", base.Format(http.TimeFormat))
+				fmt.Fprint(w, "body")
+			})
+			server.WithClock(func() time.Time { return base })(s)
+			fetch(s, "http://cache.test/clock", nil)
+			var ticks atomic.Int32
+			server.WithClock(func() time.Time {
+				n := ticks.Add(1)
+				if (expiry && n >= 2) || (!expiry && n >= 3) {
+					return base.Add(3 * time.Second)
+				}
+				return base
+			})(s)
+			response := fetch(s, "http://cache.test/clock", nil)
+			if response.Code != 200 || response.Body.String() != "body" {
+				t.Fatal("clock test response failed")
+			}
+			if expiry && calls.Load() != 2 {
+				t.Fatal("served an object that expired after lookup")
+			}
+			if !expiry && (calls.Load() != 1 || response.Header().Get("Age") != "3") {
+				t.Fatalf("response age frozen: %v origin=%d", response.Header(), calls.Load())
+			}
+		})
+	}
+}
