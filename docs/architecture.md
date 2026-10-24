@@ -30,7 +30,7 @@
 | 内存 | 请求、生产者、读写者和缓冲分别限额；不是统一 RSS 硬上限 |
 | I/O | 普通 ReadAt/WriteAt 与聚合写；无 io_uring/native AIO；提交不等于 fsync |
 
-缓存层的对象模型、磁盘布局和读写路径见 [缓存设计](cache_design.md#razor-当前实现扩展)。
+缓存层的对象模型、磁盘布局和读写路径见 [缓存设计](cache_design.md)。
 
 设计入口：[合并与块缓存](cache_fill_design.md) · [RWW](rww_implementation.md) · [RAM](ram_cache.md) · [存储恢复](cache_storage_format.md)。
 

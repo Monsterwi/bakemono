@@ -25,10 +25,8 @@ Relevant upstream NOTICE attribution:
 
 Dependency notices remain with their respective modules in `go.mod` and `go.sum`.
 
-## Upstream cache design documentation
+## 缓存设计文档来源
 
-[docs/cache_design.md](docs/cache_design.md) preserves the original Tech Design section and four diagrams from
-[bocchi-the-cache/bakemono README](https://github.com/bocchi-the-cache/bakemono/blob/5279a99634d0c8ca7298f8b63b645de518fbe190/README.md),
-fixed at `5279a99634d0c8ca7298f8b63b645de518fbe190`, under Apache-2.0 (see [LICENSE](LICENSE)).
-Headings, whitespace and image paths were adjusted during import; a historical-scope note was added.
-Current Razor explanations, field comparisons and UML diagrams are appended as a separate extension.
+[缓存设计](docs/cache_design.md) 改编自 [bocchi-the-cache/bakemono README](https://github.com/bocchi-the-cache/bakemono/blob/5279a99634d0c8ca7298f8b63b645de518fbe190/README.md)
+的 Tech Design，固定提交为 `5279a99634d0c8ca7298f8b63b645de518fbe190`，采用 Apache-2.0（见 [LICENSE](LICENSE)）。
+说明已译为中文，字段、布局与 UML 图按项目实现更新；四张原始配图保留，并在文档来源处链接。

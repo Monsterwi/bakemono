@@ -1,0 +1,36 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Noto Serif CJK SC
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam ArrowColor #334155
+skinparam objectBackgroundColor #EFF6FF
+left to right direction
+package "同一分段中的两个桶（初始化示意）" {
+  object "桶 0" as B0 {
+    槽 0：桶头
+    槽 1：空闲
+    槽 2：空闲
+    槽 3：空闲
+  }
+  object "分段空闲链" as F {
+    DirFreeStart = 1
+    1 → 2 → 3 → 5 → 6 → 7
+  }
+  object "桶 1" as B1 {
+    槽 4：桶头
+    槽 5：空闲
+    槽 6：空闲
+    槽 7：空闲
+  }
+}
+B0 .. F : 非桶头空闲槽
+F .. B1 : 非桶头空闲槽
+note bottom of F
+  桶头不进入空闲链
+  分配时先桶头，再本桶空槽，最后分段空闲链
+  已用项通过 next 接入目标桶的碰撞链
+  图中槽号为分段内索引
+end note
+@enduml

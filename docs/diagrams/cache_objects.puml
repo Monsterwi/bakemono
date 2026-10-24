@@ -8,7 +8,7 @@ skinparam ArrowColor #334155
 skinparam classBackgroundColor #EFF6FF
 top to bottom direction
 hide methods
-class "manifest（独立缓存对象）" as M {
+class "清单（独立缓存对象）" as M {
   Version / BlockSize / Total
   ETag / Origin / Variant / Incarnation
 }
@@ -16,15 +16,15 @@ class "逻辑块（独立缓存对象）" as B {
   块键：URL + 源站/变体/版本/布局 + 块号
   默认 1 MiB，可配 64 KiB–8 MiB
 }
-class "Doc fragment（存储记录）" as F {
+class "Doc 片段（存储记录）" as F {
   72 B 头 + 元数据 + 正文
   正文每片最多 1 MiB
 }
 M "1" ..> "0..N" B : 按版本与块号派生键\n不记录已缓存块列表
-B "1" *-- "1..N" F : 一个块内按片键查找\n同 stripe，物理位置可不连续
+B "1" *-- "1..N" F : 一个块内按片键查找\n同卷，物理位置可不连续
 note right of F
-  整对象与 manifest 也复用 Doc 存储
-  fragment 0 最后提交
+  整对象与清单也复用 Doc 存储
+  第 0 片最后提交
   整个逻辑块提交后才允许 HTTP RWW
 end note
 @enduml

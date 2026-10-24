@@ -1,299 +1,173 @@
-# Tech Design
+# 缓存设计
 
-来源：[bocchi-the-cache/bakemono README @5279a99](https://github.com/bocchi-the-cache/bakemono/blob/5279a99634d0c8ca7298f8b63b645de518fbe190/README.md)，[Apache-2.0](../LICENSE)。本页保留原 Tech Design 内容，仅调整标题层级、空白和图片路径。
+缓存按键保存 HTTP 表示，使用紧凑内存目录定位磁盘记录，以环形日志复用磁盘空间，并用 RAM 加速读取。整对象、清单和每个逻辑块都是独立缓存对象，共用分片、校验与提交机制。
 
-> 以下原文、字段表和四张图保留原样，描述旧 Vol/Chunk 原型；旧格式、容量估算和规划不代表当前实现。当前设计见末尾 [Razor 当前实现扩展](#razor-当前实现扩展)。
+## 数据结构
 
-... until now.
+- **Doc**：磁盘记录，保存一个存储片段的头、元数据和正文。
+- **Dir**：常驻内存的紧凑目录项，指向一个 Doc。
+- **Stripe**：卷，管理数据文件中的固定区间、目录、写指针和恢复状态。
+- **RAM**：保存不可变片段的内存加速层，可独立淘汰。
 
-## Data Structure
+### 数据记录（Doc）
 
-There are 3 data structures in `bakemono`:
+正文按固定上限拆成片段（fragment），每片最多 **1 MiB**。每条记录由 **72 B 的 Doc v3 头 + 元数据 + 正文** 组成，头字段按大端序序列化。
 
-- **`Vol`**
-  - **volume**, represents a single file on disk.
-  - A `Vol` is what we finally persist on disk.
-  - We will support bare block device in the future.
-- **`Chunk`**
-  - basic unit of your k-v cache data.
-  - restored on disk.
-- **`Dir`**
-  - **directory**, a meta index of `Chunk`.
-  - All `Dir`s are loaded in memory. It is compact.
+| 字段 | 类型 | 字节 | 含义 |
+| --- | --- | ---: | --- |
+| Magic | uint32 | 4 | 固定 `0x5F129B13` |
+| Len | uint32 | 4 | 本片头、元数据和正文的实际总长 |
+| TotalLen | uint64 | 8 | 片 0 为对象总长；后续片为该片正文的逻辑结束偏移 |
+| FirstKey | [16]byte | 16 | 对象键 SHA-256 的前 16 B |
+| Key | [16]byte | 16 | 当前片键 SHA-256 的前 16 B |
+| HLen | uint32 | 4 | 元数据长度；HTTP 元数据只在片 0 |
+| DocType / VMajor / VMinor / Unused | 各 uint8 | 4 | 写入值为 `0 / 3 / 0 / 0` |
+| SyncSerial / WriteSerial | 各 uint32 | 8 | 组合成随机写者版本，标识同一次对象写入 |
+| Pinned | uint32 | 4 | 写入值为 0，不提供固定驻留保证 |
+| Checksum | uint32 | 4 | IEEE CRC32，覆盖校验字段置零的头、元数据和正文 |
 
-### 🧱 Chunk
-`Chunk` is the basic unit of cache data.
+片 0 保存总长与 HTTP 元数据，是对象的读取入口；其他片段按片号派生键，并校验写者版本和长度，避免替换过程中混读。代码见 [Doc](../cache/doc.go)、[片段键](../cache/cache.go)。
 
-| name           | data type      | desc                  |
-|----------------|----------------|-----------------------|
-| Magic          | uint32         | fixed: 0x00114514     |
-| Checksum       | uint32         | checksum of DataRaw   |
-| Key            | [3000]byte     | fixed size key bytes  |
-| DataLength     | uint32         |                       |
-| HeaderSize     | uint32         | fixed: 4096.          |
-| HeaderChecksum | uint32         | checksum of the above |
-| DataRaw        | variable bytes | raw data              |
+### 目录项（Dir）
 
-We force set chunk header size to 4KB this version, a sector size.
+Dir 使用 `[5]uint16` 保存 **10 B** 字段，通过位操作读写。
 
-### 🔖 Dir
-`Dir` is the meta index of `Chunk`.
-
-Every `Chunk` has a `Dir` to represent it in memory.
-
-`Dir` is always loaded in memory.
-```go
-type Dir struct {
-	/*
-	   unsigned int offset : 24;  // (0,1:0-7)
-	   unsigned int bigInternal : 2;      // (1:8-9)
-	   unsigned int sizeInternal : 6;     // (1:10-15)
-	   unsigned int tag : 12;     // (2:0-11)
-	   unsigned int phase : 1;    // (2:12)
-	   unsigned int head : 1;     // (2:13)
-	   unsigned int pinned : 1;   // (2:14)
-	   unsigned int token : 1;    // (2:15)
-	   unsigned int next : 16;    // (3)
-	   unsigned int offset_high : 16;
-
-	   if unused, raw[2] is `prev`, represents previous dir in freelist.
-
-	   approx_size = sectorSize(512) * (2**3big) * sizeInternal
-	*/
-	raw [5]uint16
-}
-```
-
-`Dir` is organized in raw 10 bytes. Use bit operations to get/set fields. This is a design of [Apache Traffic Server].
-We must save every bit to reduce memory usage.
-
-Note:
-- If Dir is unused, `raw[2]` is `prev`, represents previous dir in freelist. To save 1 byte.
-- Size is not exact. It is `sectorSize(512) * (2**3big) * sizeInternal`. Max to represent ~16GB using only 8 bits.
-
-Memory usage:
-
-If we have `100TB` data with `1MB` chunk size, we only need `100TB/1MB*10B = 1GB` memory to index `Dir`s.
-
-
-### 🪣 Segment, Bucket, Freelist
-`Segment` and `Bucket` are logical groups of `Dir`.
-
-`Segment` is a collection of `Bucket`s. `Bucket` is a collection of `dir`s.
-
-They are logically organized as below:
-![dirs_init.png](dirs_init.png)
-
-
-- `bucket` is group of fixed size `4` dirs.
-
-- `segment` has max size `2^16=65536` dirs.
-
-- `Dirs` is a linked list.
-
-- All **non-bucket-head** dirs to freelist when initializing, named `freeDirs`.
-
-- `map[segmentId]dirId` to index the first **free dir** of each segment.
-
-Note, dirs is an array in memory.
-
-Why `segments`? We could lock, flush meta per segment.
-
-### 🗂️ Vol
-`Vol` is the volume on disk. It is the final data structure we persist on disk.
-
-![vol](vol_struct.png)
-
-**Vol offset calculation**:
-
-init options are
-```go
-type VolOptions struct {
-	Fp        OffsetReaderWriterCloser
-	FileSize  Offset
-	ChunkAvgSize Offset
-
-	FlushMetaInterval time.Duration
-}
-```
-Max dirs size is nearly `FileSize/ChunkAvgSize` (There are alignment for bucket and segments).
-
-Meaning, we have max `FileSize/ChunkAvgSize` chunks in this volume.
-
-**Vol Multi meta**
-
-Meta A/B are designed to be flush alternately. To avoid data loss when power failure happens.
-
-In this version, only use meta A. Will implement multi meta in the future.
-
-## Write
-
-We use `md5` to hash key:
-- key -> segmentId
-- key -> bucketId
-
-Once `segmentId` and `bucketId` are known:
-- try to use **bucket-head** dir.
-- if bucket-head is used, try to use **non-bucket-head** dir in this bucket.
-- if all dirs in this bucket are used, try to grab a free dir from `freeDirs`.
-
-When no free dir in `freeDirs`:
-- rebuild `freeDirs` in this segment.
-- if still no free dir, purge 10% buckets randomly in this segment.
-
-Once get free dir, unlink it from `freeDirs` and link it as tail of bucket. Write `chunk offset`, `key` and `other metadata` to dir.
-
-One example:
-![dirs-used](dirs_used.png)
-
-
-Then, write data to disk.
-- rw lock the `Segment`
-- write data to data range of `Vol`
-
-Note: no hard limit for data size. But should **avoid too large data**, hold write lock too long.
-
-Chunk data is cyclic, we will overwrite old data when disk is full. The advantage is
-- sequential write is faster
-- no need to delete old data
-- no need to compact data in background
-- no write amplification
-
-![data-write](data_write.png)
-
-## Read
-
-We use `md5` to hash key same as write
-- key -> segmentId
-- key -> bucketId
-
-Once `segmentId` and `bucketId` are known:
-- find `key` dir linked list.
-- if not found, return `MISS`
-- if found, read `Chunk` data from disk.
-- Check again the `full key` in `Chunk`.
-
-Due to the only `12 bit tag` in dir, we have to check `key` again in `Chunk`.
-Collision is possible, but will be much less when file size is large(>100GB).
-
-There are a little read amplification due to approx size of `Dir`. But it is acceptable.
-
-## Metadata Persistence
-Flush/restore `meta A` with `FlushMetaInterval`.
-
-Will implement multi meta in the future.
-
-[Apache Traffic Server]: https://trafficserver.apache.org/
-
-## Razor 当前实现扩展
-
-Razor 使用 **RAM 加速 + Stripe 环形磁盘日志**。整对象、manifest 和每个 Range 逻辑块都作为独立缓存对象，复用同一套目录、分片、校验与提交机制。HTTP 层决定能否缓存和共享，存储层负责定位、写入所有权与数据完整性。
-
-### 字段扩展对照
-
-旧 Chunk 字段表保留为原型格式；当前记录为 **Doc v3**，按大端序序列化，头部合计 **72 B**，不再使用旧 4 KiB 固定头。以下名称与 [Doc 定义](../cache/doc.go) 一致。
-
-| 字段 | 字节 | 当前含义 |
+| 字段 | 位数 | 含义 |
 | --- | ---: | --- |
-| Magic | 4 | `0x5F129B13` |
-| Len | 4 | 本 fragment 的头、元数据和正文实际总长 |
-| TotalLen | 8 | 片 0 为对象总长；后续片为该片正文的逻辑结束偏移 |
-| FirstKey | 16 | 对象键 SHA-256 的前 16 B |
-| Key | 16 | 当前片键 SHA-256 的前 16 B |
-| HLen | 4 | 元数据长度；HTTP 元数据只在片 0 |
-| DocType / VMajor / VMinor / Unused | 4 | 各 1 B；当前 writer 写 `0 / 3 / 0 / 0` |
-| SyncSerial / WriteSerial | 8 | 各 4 B，组合成随机 writer 版本；不代表 fsync 次数 |
-| Pinned | 4 | 当前 writer 写 0，不提供 HTTP 块固定驻留保证 |
-| Checksum | 4 | IEEE CRC32，覆盖 checksum 置零的头、元数据和正文 |
+| offset / offset_high | 24 + 16 | 合成 40 bit 文件字节偏移 |
+| bigInternal / sizeInternal | 2 + 6 | 近似长度的级别与计数 |
+| tag | 12 | 键哈希的候选标签 |
+| phase | 1 | 环形写入的阶段标志 |
+| head / pinned / token | 各 1 | 标志位；token 位与 HTTP 填充的 FillToken 是不同状态 |
+| next | 16 | 同一分段内的下一目录项 |
 
-Dir 原有 10 B 布局保留，但应补充以下当前语义；新增状态存于 Dir 外部，不是给 10 B 结构直接加字段：
+空闲项复用 `raw[2]` 保存空闲链的前驱。近似长度为 `512 × 8^bigInternal × (sizeInternal+1)`，最多 **16 MiB**；实际记录长度取 Doc.Len。目录外另存每项 16 B 身份摘要，并在读取 Doc 时核对键摘要。
 
-| 字段 / 状态 | 当前解释 |
+目录按卷长度约每 8 KiB 一个槽规划，再按桶和分段取整；完整键映射、身份数组、RAM、缓冲和运行时另占内存，不能只用“对象数 × 10 B”估算总开销。代码见 [Dir](../cache/dir.go)、[DirManager](../cache/dir_manager.go)。
+
+### 分段、桶与空闲链
+
+Dir 保存在连续数组中，分段（segment）包含桶（bucket），每桶固定 **4 个槽**，每分段最多 **65,536 个槽**。同一桶的碰撞项通过 next 串联；桶头以外的空闲槽进入分段空闲链，由 `DirFreeStart` 记录入口。
+
+![UML 目录与空闲链](diagrams/directory.svg)
+
+MD5 将片段键映射到分段、桶和 tag。分配先找桶头、再找本桶空槽，最后取分段空闲链；没有可用项时重建空闲链，必要时回收部分桶。新项从空闲链移除，再接入目标桶的碰撞链。
+
+### 卷（Stripe）
+
+`CRC32(对象键) % 卷数量` 选择卷。同一对象的所有存储片段位于该卷；不同对象或逻辑块可分布到不同卷。一个数据文件可以切成多个互不重叠的卷区间，卷不跨文件边界。
+
+![UML 卷布局与读写](diagrams/cache_layout.svg)
+
+| 位置 / 字段 | 含义 |
 | --- | --- |
-| offset | 40 bit 文件字节偏移，不是 sector 编号 |
-| bigInternal / sizeInternal | 近似长度为 `512 × 8^big × (size+1)`，最多 16 MiB；旧原文的约 16 GB 估算不适用 |
-| tag / identities | 12 bit tag 仅定位候选；额外的 16 B 身份摘要数组和 Doc 键校验防止误命中 |
-| phase / allocation generation | phase 是 Dir 内 1 bit；完整覆盖代次保存在 Stripe/分配记录中 |
-| token / FillToken | 原 Dir 的 token 位不等于失效凭证；HTTP 填充使用独立 FillToken，派生块沿用父围栏 |
+| Path / Skip / Len | 数据路径、卷起点和卷长度 |
+| Skip 起的 24 B | 会话标记，保存 magic、版本和随机 session |
+| Start | `Skip + align512(24 + 目录保留区大小)`，环形数据区起点 |
+| WritePos | 已完成写入的尾部 |
+| Skip + Len | 卷末尾；剩余空间放不下完整记录时回卷 |
+| `<Path>.<Skip>.checkpoint` | 独立检查点文件，保存目录、键映射和写位置 |
 
-新增对象关系如下；图中是逻辑拆分关系，不表示块与片段都常驻。
+聚合写按记录实际字节推进，数据区起点按 512 B 对齐，**每条 Doc 的起点不保证扇区对齐**。记录可交错追加，同一对象的片段在磁盘上也可不连续。
+
+### RAM 缓存
+
+每卷默认使用 **10 MiB 权重预算**，默认策略为 Otter，可选 S3-FIFO；容量设为 0 可禁用。RAM 保存不可变序列化片段及可复用的解码元数据，每次读取仍检查目录有效性与 Doc 校验。
+
+写入、元数据更新和热片段迁移会填充 RAM；普通读盘不会自动晋升到 RAM。RAM 淘汰后，目录仍有效即可回磁盘读取。权重预算不等于进程 RSS，策略与统计见 [RAM 缓存](ram_cache.md)。
+
+### 清单与逻辑块
+
+部分对象缓存使用清单（manifest）记录总长、强 ETag、完整源站身份、变体、随机 Incarnation、布局版本和块大小；每个逻辑块独立保存。清单不维护全文件常驻位图，存在清单不代表块已齐全。
 
 ![UML 部分对象关系](diagrams/cache_objects.svg)
 
-manifest 的 `Version/BlockSize/Total/ETag/Origin/Variant/Incarnation` 定义版本和布局；session marker 与检查点的 `Session/Clean/geometry/Checksum` 定义恢复边界。它们都不是旧 Chunk 头的附加字段，格式见 [存储与恢复](cache_storage_format.md)。
-
-### 结构与磁盘布局
-
-![UML 缓存布局](diagrams/cache_layout.svg)
-
-| 层 | 当前实现 |
+| 身份 | 组成 |
 | --- | --- |
-| Cache / Stripe | `CRC32(对象键) % Stripe 数` 选 stripe；一个数据文件可切成多个互不重叠区间 |
-| DirManager | MD5 定位 segment/bucket/tag；每 bucket 4 个槽，碰撞链与 freelist 管理目录；额外身份摘要防误命中 |
-| Dir | 每项 10 B，记录文件字节偏移、近似长度、tag、phase 和链指针；指向一个 fragment |
-| Doc / fragment | v3、72 B 头，后接元数据与正文；正文每片最多 1 MiB；fragment 0 携带 HTTP 元数据及对象总长 |
-| RAM | 保存不可变序列化 fragment；默认 Otter，可选 S3-FIFO，每 stripe 默认 10 MiB 权重预算；不是独立权威副本 |
-| 检查点 | 独立 `<数据路径>.<Skip>.checkpoint` 文件，保存目录、完整键映射、写位置与 session |
+| URL 根键 | 配置命名空间、有效 scheme/Host、原始转义路径、排序后的原始 query 项 |
+| 整对象表示键 | URL 根键、受支持的 Vary 字段和值 |
+| 清单键 | URL 根键、完整源站身份、变体、布局版本和块大小 |
+| 逻辑块键 | URL 根键、源站、变体、强 ETag、Incarnation、布局、块大小和块号 |
+| 存储片键 | 片 0 用对象键，后续片用 `MD5(对象键 || uint64BE(片号))` |
 
-10 B 仅指 Dir 本体；额外身份数组、完整键映射、RAM、写缓冲与运行时都占内存，不能用“片段数 × 10 B”估算总开销。
+逻辑块决定回源区间和 RWW 屏障，默认 **1 MiB**，可配 **64 KiB–8 MiB** 的 2 次幂；存储片段的正文上限固定为 1 MiB。例如 4 MiB 逻辑块拆成 4 个存储片段，整个逻辑块提交后才可发送。
 
-数据区从 `Start = Skip + align512(24 + 目录保留区大小)` 开始，到 `Skip + Len` 结束。前 24 B 是会话 marker；目录恢复依据独立检查点，**不是旧 Vol 的 meta A/B**。数据区追加 Doc 记录，尾部放不下完整记录时回卷。
+缓存、任务和 PURGE 共用 URL 身份。query 按原始参数项排序，保留值、数量、空项与编码差异，回源不重排；源站须保证参数顺序无关。公共共享模式还要求内容不随客户端身份变化，完整规则见 [共享身份](cache_fill_design.md#共享身份)。
 
-Dir 的近似长度用于边界校验；实际读取长度取 Doc.Len。当前聚合写按记录实际字节推进，**不保证每个 Doc 的起点都按 512 B 或 4 KiB 对齐**；这里也没有“一个对象一个文件”的布局。
+## 写入
 
-### 读写与提交
+等价并发 MISS 由 fillGroup 共享一个独立回源生产者，无人为聚合等待窗口；缓存层 OpenDir 单独管理写入所有权。
 
-| 路径 | 顺序 |
+1. 回源前捕获 FillToken，取得目标对象的写入所有权；派生块继承父失效围栏。
+2. 接收正文并拆片，暂存片 0；后续片段构造 Doc 与 CRC 后进入聚合缓冲。
+3. 聚合缓冲分配文件偏移、覆盖代次和序号，磁盘写协程在该位置执行 WriteAt。
+4. 等待对应写入完成，复核所有权、覆盖代次和失效围栏，再发布该片的目录与 RAM 映射。
+5. 正文完整后写片 0；发布前确认此前片段仍有效，完成整个对象提交，再唤醒等待读者。
+
+![UML 缓存提交状态](diagrams/publication.svg)
+
+聚合缓冲为 **2 × 4 MiB**，每卷一个磁盘写协程。写者每片都等待对应写入完成，不保证每次都攒满 4 MiB。提交可读不等于逐块 fsync；失败写入不得作为完整对象命中。
+
+写到卷尾后从数据区起点继续追加，phase 与覆盖代次识别失效位置；即将覆盖的已访问片段可通过有界热片段迁移（evacuation）保留。迁移会产生额外读写，队列满可放弃，见 [迁移流程](evacuation.md)。
+
+## 读取
+
+1. HTTP 层确定表示键，通过对象键选择卷，再用片段键查目录。
+2. 检查目录偏移、phase 与正在覆盖的区间；有效后先查 RAM。
+3. RAM MISS 时通过 ReadAt 先读 72 B Doc 头，再按 Doc.Len 读取完整片段；不共享 Seek 游标。
+4. 校验 CRC、键摘要、写者版本与片段长度，HTTP 层另判断新鲜度、变体及失效凭证。
+5. 依次加载后续片段，将所需正文复制给客户端；片内正文位于 `Dir.offset + 72 + HLen`。
+
+| 请求路径 | 首次可发送时机 |
 | --- | --- |
-| 读 | HTTP 层选表示键 → stripe/目录 → 检查 phase/覆盖范围 → RAM；RAM MISS 才 ReadAt 读 Doc 头和完整 fragment |
-| 校验 | RAM 与磁盘都检查 CRC32、键/首键摘要、writer 版本、片号与长度；HTTP 层另判断 freshness、变体与失效凭证 |
-| 写 | 取得 OpenDir 写入所有权和 FillToken → 拆 fragment → 聚合缓冲分配偏移/代次 → WriteAt 完成 → 复核围栏并发布目录/RAM |
-| 完整提交 | fragment 1…N 可先写，fragment 0 最后写；发布头前复核全部已写片段仍有效，HTTP 仅使用 OpenReadCommitted |
+| 新鲜整对象命中 | 校验读取后 |
+| 普通整对象 MISS | 整对象完整提交后，各客户端独立读取 |
+| 合格单 Range / 公共大 GET | 首个所需逻辑块完整提交并校验后 |
 
-聚合缓冲是 **2 × 4 MiB**，每 stripe 一个磁盘写 worker；当前写者每片都等待对应 flush 完成，不能假定总会攒满 4 MiB 才写。读写用 Go 文件 ReadAt/WriteAt，不共享 Seek 游标；无 io_uring/native AIO。普通读盘当前不会自动将片段晋升到 RAM；写入、元数据更新和 evacuation 会填充 RAM。
+同一对象后续片段也按键重新查目录，不能用“文件基址 + HTTP Range 偏移”定位。块读取先完整校验，再裁剪首尾；小 Range 也可能产生整块回源和读取放大。
 
-![UML 发布状态](diagrams/publication.svg)
+### 范围请求与块级 RWW
 
-普通整对象 MISS 等完整提交后，各客户端独立读取。底层保留活跃 Writer 读取 API，但它不是 HTTP RWW 路径；“提交可读”也不等于逐块 fsync。
+请求区间用左闭右开 `[a,b)` 表示，块大小为 B，所需块号从 `floor(a/B)` 到 `floor((b-1)/B)`。第 i 块回源 `[iB, min((i+1)B, 总长))`，发送给源站时转换成 HTTP 闭区间 Range，并带 If-Match 与 identity 编码。
 
-### 部分对象缓存与定位
-
-**HTTP 逻辑块与存储 fragment 是两层粒度。** 逻辑块决定回源区间及 RWW 屏障，默认 1 MiB，可配 64 KiB–8 MiB；存储 fragment 正文上限固定 1 MiB。因此 4 MiB 逻辑块通常拆成 4 个 fragment，整个块提交后才可发送。
-
-| 对象 | 身份与内容 |
-| --- | --- |
-| URL 根键 | 配置命名空间、scheme/Host、原始路径、排序后的原始 query 项；缓存/任务/PURGE 统一，源站须保证 query 顺序无关 |
-| manifest | 固定完整源站、变体、总长、强 ETag、随机 Incarnation、布局 v2 和块大小；不存在全文件常驻位图 |
-| 逻辑块 i | 键包含 URL 根键、源站/变体/版本/Incarnation/布局及块号；正文为该固定区间 |
-| 存储片 j | 片 0 用对象键；后续片用 `MD5(对象键 || uint64BE(j))`；Doc 中再保存完整键的 SHA-256 截断摘要及 writer 版本 |
-
-请求区间用左闭右开 `[a,b)` 表示；块号从 `floor(a/B)` 到 `floor((b-1)/B)`，第 i 块回源 `[iB, min((i+1)B, 总长))`。源站请求转换成 HTTP 闭区间 `Range`，并带 If-Match 与 identity 编码。
-
-例如 B=1 MiB，fresh manifest 有效，客户端读 `[0.5,2.5 MiB)`；同版本的块 0、2 fresh 且未淘汰，块 1 缺失：
+例如 B=1 MiB，清单新鲜有效，客户端请求 `[0.5,2.5 MiB)`；同版本的块 0、2 新鲜且读取前未被淘汰，块 1 缺失：
 
 | 步骤 | 行为 |
 | --- | --- |
-| 1 | 读取 manifest 确定源站、版本与块布局；一般路径中缺失/过期则共享 HEAD |
-| 2 | 读块 0，发送后半 MiB；同时可准备块 1 |
-| 3 | 块 1 加入/创建共享任务，仅回源 `[1,2 MiB)`；精确校验 206、Content-Range、ETag、长度、EOF 和 Trailer 后提交 |
-| 4 | 发送完整块 1，再发送块 2 前半 MiB；最多准备下一块，额度不足改为按需获取 |
+| 1 | 读取清单，固定源站、版本和布局；一般路径中清单缺失或过期则共享 HEAD |
+| 2 | 读取块 0，发送后半 MiB，同时可准备块 1 |
+| 3 | 块 1 加入或创建共享任务，仅回源 `[1,2 MiB)`；校验 206、Content-Range、强 ETag、长度、EOF 和 Trailer 后提交 |
+| 4 | 发送整个块 1，再发送块 2 前半 MiB，完成响应 |
 
-每个逻辑块**独立选 stripe、查目录**；同一块的 fragment 在该 stripe 内逐片查键，物理位置可不连续。读取片内正文从 `Dir.offset + 72 + HLen` 开始；不能用“文件基址 + HTTP Range 偏移”直接定位。首尾块先完整读取并校验，再裁剪发送；极小 Range 也可能产生整块回源/读取放大。
+每请求最多提前准备下一块，预算不足时按需读取，不在后台补齐整个对象。每块发送前检查原始失效凭证和可观察版本；头已发送后的换版、失效或后块错误必须中断响应。HTTP RWW 读取完整提交块，不读取活跃写者的未提交字节。时序见 [合并回源](cache_fill_design.md#缺块合并与-rww-时序)、[RWW](rww_implementation.md)。
 
-合格公共大 GET 与单 Range 共用这些块。并发等价 MISS 由 fillGroup 合并为一个生产者，无人为聚合窗口；普通整对象按对象共享，块路径分别按 manifest/块共享。不同请求顺序读取自己的所需区间，不等待整个文件补齐。完整时序见 [合并回源](cache_fill_design.md#缺块合并与-rww-时序) 与 [RWW](rww_implementation.md)。
+## 元数据持久化
 
-### 淘汰、失效与恢复
+卷使用 **v2 会话标记、v3 Doc 和 v1 检查点**。检查点保存卷边界、写位置、phase、session、目录以及完整键/selector 映射，并用校验和保护。
 
-| 事件 | 当前行为 |
+| 阶段 | 操作 |
 | --- | --- |
-| RAM 满 | 按所选策略淘汰；目录仍有效可回磁盘；权重预算不等于进程 RSS |
-| 磁盘回卷 | 复用旧空间；phase 和 allocation generation 识别覆盖；近写指针的已访问片段可尝试有界 evacuation，迁移产生额外读写 |
-| 块/manifest 淘汰 | 独立淘汰；manifest 存在不代表块齐全；同版本刷新可沿用 Incarnation，丢失重建则换标识 |
-| PURGE / 版本 | URL 家族失效，派生块沿用原始 FillToken；每块发送前检查围栏，不跨源/版本拼接；已发字节无法撤回 |
-| 正常关闭 | 排空写入，sync 数据，再原子发布并 sync clean 检查点；下次仅恢复验证完整的对象 |
-| 异常退出 | 活动 session 不接受旧检查点；安全冷 MISS，不扫描旧日志重建，也不删除/截断缓存文件 |
-| 离线 | 同一仍配置源站的 manifest 与全部所需块均 fresh、完整可读时可零回源；不提供 stale-if-error |
+| 打开 | 独占底层 inode；只加载会话、布局和校验匹配的干净检查点，逐项验证全部片段；暴露访问前写入并同步新 session |
+| 运行中保存 | 同步数据并发布 dirty 检查点；活动会话不能用它恢复命中 |
+| 正常关闭 | 停止新工作、终止活跃写者并排空写入；sync 数据 → 写并 sync 临时 clean 检查点 → 原子替换 → sync 父目录 |
+| 异常退出 / 损坏 | 安全冷 MISS，不扫描旧日志重建，也不删除或截断原文件 |
 
-已知回卷期间 no-store 更新后仍可能命中旧对象的问题由 [#33](https://github.com/Monsterwi/razor/issues/33) 跟踪，尚未修复。多 Range 块缓存、跨节点合并/一致性/PURGE、未提交字节级 HTTP RWW 未支持。
+同一缓存 inode 不跨进程共享。关闭后恢复只接受验证完整的对象；提交不承诺逐块断电持久性。格式、限额与故障验证见 [存储与恢复](cache_storage_format.md)。
 
-代码：[Cache](../cache/cache.go)、[目录](../cache/dir_manager.go)、[读](../cache/cache_read.go)、[写](../cache/cache_write.go)、[块缓存](../server/range_cache.go)。细节：[磁盘格式/恢复](cache_storage_format.md)、[迁移](evacuation.md)、[RAM](ram_cache.md)、[配置](configuration.md)。
+## 失效与运行边界
+
+| 情况 | 行为 |
+| --- | --- |
+| PURGE | 配置令牌后启用，失效同 URL 的普通表示和块家族；派生块沿用原 FillToken，旧任务不能取得新代次后发布 |
+| 块或清单淘汰 | 块可独立丢失；同版本清单刷新可沿用 Incarnation，丢失后重建则换标识 |
+| 离线 | 同一仍配置源站的清单与所需块均新鲜、完整可读时零回源，不提供 stale-if-error |
+| 资源预算 | 请求、任务、读者、写者与缓冲分别限额；不是统一进程内存硬上限 |
+| 支持范围 | 单 Range 块缓存；不提供多 Range 块缓存、跨节点合并/失效、未提交字节级 HTTP RWW 或 io_uring/native AIO |
+
+默认最多 16 个共享任务、每任务 256 个订阅者、总期限 300 秒；默认对象限制 64 MiB，处理 100/200 MiB 对象需调大。参数见 [配置](configuration.md)。回卷期间 no-store 更新后仍可能命中旧对象的问题由 [#33](https://github.com/Monsterwi/razor/issues/33) 跟踪。
+
+## 来源
+
+目录与环形写思路源于 [bocchi-the-cache/bakemono Tech Design @5279a99](https://github.com/bocchi-the-cache/bakemono/blob/5279a99634d0c8ca7298f8b63b645de518fbe190/README.md)，采用 [Apache-2.0](../LICENSE)。本文将说明译为中文，并按项目实现更新字段、布局和图示。
+
+原始配图：[目录初始化](dirs_init.png)、[目录分配](dirs_used.png)、[卷结构](vol_struct.png)、[环形写入](data_write.png)。
