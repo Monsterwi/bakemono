@@ -24,3 +24,10 @@ Relevant upstream NOTICE attribution:
 > Paper: http://dx.doi.org/10.1145/3600006.3613147
 
 Dependency notices remain with their respective modules in `go.mod` and `go.sum`.
+
+## Upstream cache design documentation
+
+[docs/cache_design.md](docs/cache_design.md) preserves the Tech Design section and four diagrams from
+[bocchi-the-cache/bakemono README](https://github.com/bocchi-the-cache/bakemono/blob/5279a99634d0c8ca7298f8b63b645de518fbe190/README.md),
+fixed at `5279a99634d0c8ca7298f8b63b645de518fbe190`, under Apache-2.0 (see [LICENSE](LICENSE)).
+Headings, whitespace and image paths were adjusted; a reference-only scope note was added.

@@ -1,6 +1,6 @@
 # 合并回源与原生部分对象缓存
 
-[架构](ARCHITECTURE.md) · [RWW 管线](RWW_IMPLEMENTATION.md) · [存储提交](CACHE_STORAGE_FORMAT.md)。
+[架构](architecture.md) · [RWW 管线](rww_implementation.md) · [存储提交](cache_storage_format.md)。
 
 ## 整对象合并时序
 
@@ -47,7 +47,7 @@ Query 契约：源站明确保证顺序无关。只按 `&` 拆分并排序原始
 
 假设 fresh manifest 已存在，块 1 MiB；A 读 `[0,2 MiB)`，B 读 `[0.5,1.5 MiB)`，其他身份等价。区间左闭右开；各自发送速度独立。
 
-![UML 缺块合并与 RWW 时序](diagrams/block-rww.svg)
+![UML 缺块合并与 RWW 时序](diagrams/block_rww.svg)
 
 | 步骤 | 契约 |
 | --- | --- |
@@ -76,4 +76,4 @@ manifest 存在不代表块存在；没有整文件常驻位图。块可独立�
 
 例：100 MiB 对象依次读 `[0,16 MiB)`、`[8,24 MiB)`，若同版本、fresh、未淘汰，累计正文回源 24 MiB，第二次仅 8 MiB；HEAD 另计。非对齐请求有边界块放大。
 
-配置集中在 [FEATURE_PLAN.md](FEATURE_PLAN.md)，Stats 区分请求、块、源站 HEAD/GET/正文口径。多 Range、未提交字节级 HTTP RWW、跨节点合并/失效不支持。代码：[任务](../server/fill_group.go)、[整对象](../server/shared_fill.go)、[块](../server/range_cache.go)；回归：[合并](../server/coalescing_test.go)、[公共身份](../server/public_static_test.go)、[RWW](../server/rww_test.go)、[离线](../server/range_offline_test.go)。
+配置见 [configuration.md](configuration.md)，Stats 区分请求、块、源站 HEAD/GET/正文口径。多 Range、未提交字节级 HTTP RWW、跨节点合并/失效不支持。代码：[任务](../server/fill_group.go)、[整对象](../server/shared_fill.go)、[块](../server/range_cache.go)；回归：[合并](../server/coalescing_test.go)、[公共身份](../server/public_static_test.go)、[RWW](../server/rww_test.go)、[离线](../server/range_offline_test.go)。

@@ -1,6 +1,6 @@
 # RAM 缓存与发送缓冲
 
-RAM 是磁盘之上的可淘汰加速层；默认 Otter v2.2.1（adaptive W-TinyLFU），可选 S3-FIFO。每 stripe 默认 10 MiB，0 禁用；策略/容量重启生效，不改变磁盘身份、格式或读盘 promotion。配置见 [功能契约](FEATURE_PLAN.md#配置)。
+RAM 是磁盘之上的可淘汰加速层；默认 Otter v2.2.1（adaptive W-TinyLFU），可选 S3-FIFO。每 stripe 默认 10 MiB，0 禁用；策略/容量重启生效，不改变磁盘身份、格式或读盘 promotion。配置见 [配置](configuration.md)。
 
 ## 共同契约与预算
 
@@ -55,4 +55,4 @@ go test -race ./cache -run 'TestRAM|TestS3FIFO' -count=1
 go test ./cache -run '^$' -bench '^BenchmarkRAMTrace$' -benchmem -benchtime=2s -count=3
 ```
 
-10 MiB、256 B/256 KiB/1 MiB/4 MiB、0.5/1/4 倍工作集，覆盖扫描/热点切换/混合读写。逻辑 MB/s 不复制全部正文，不能当 HTTP 或磁盘吞吐。当前仅保留 [最新热命中压测](benchmarks/ATS_COMPARISON_2026-10-24.md)，不能据此比较淘汰策略或长测稳定性。
+10 MiB、256 B/256 KiB/1 MiB/4 MiB、0.5/1/4 倍工作集，覆盖扫描/热点切换/混合读写。逻辑 MB/s 不复制全部正文，不能当 HTTP 或磁盘吞吐。当前仅保留 [最新热命中压测](benchmarks/ats_comparison_2026-10-24.md)，不能据此比较淘汰策略或长测稳定性。

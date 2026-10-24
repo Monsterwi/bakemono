@@ -37,6 +37,6 @@
 
 读盘/迁移按有界 fragment 长度分配，不按整对象 TotalLen 分配。读者可继续使用已验证字节；后续片段覆盖、替换、损坏或缺失须报错。目录发布复核所有权、allocation generation 和 PURGE 代次。
 
-重开时 Stripe 与聚合写使用同一进程内 allocation generation，保留可表示的前一代，允许旧 phase 对象继续正确失效、刷新和迁移；不改变检查点格式。迁移机制见 [evacuation](EVACUATION_OPTIMIZATION.md)。
+重开时 Stripe 与聚合写使用同一进程内 allocation generation，保留可表示的前一代，允许旧 phase 对象继续正确失效、刷新和迁移；不改变检查点格式。迁移机制见 [evacuation](evacuation.md)。
 
 验证范围：[提交/回卷](../cache/storage_commit_test.go)、[恢复/损坏/子进程强杀](../cache/recovery_test.go)、[PURGE 后强杀](../cache/invalidation_restart_test.go)。覆盖进程崩溃与文件系统错误，未验证物理断电或恶意伪造 CRC。

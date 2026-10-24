@@ -28,11 +28,11 @@ CONFIG proxy.config.cache.max_object_bytes INT 268435456
 CONFIG proxy.config.cache.range_block_bytes INT 1048576
 ```
 
-公共模式要求资源不随客户端身份变化；公共模式、块大小和 RAM 策略修改须重启。[配置与约束](docs/FEATURE_PLAN.md)。
+公共模式要求资源不随客户端身份变化；公共模式、块大小和 RAM 策略修改须重启。[配置与约束](docs/configuration.md)。
 
 ## 文档与验证
 
-[UML 架构](docs/ARCHITECTURE.md) · [合并回源时序](docs/CACHE_FILL_DESIGN.md) · [RWW](docs/RWW_IMPLEMENTATION.md) · [实现状态](docs/IMPLEMENTATION_STATUS.md)
+[UML 架构](docs/architecture.md) · [原项目 Tech Design](docs/cache_design.md) · [合并回源时序](docs/cache_fill_design.md) · [RWW](docs/rww_implementation.md) · [实现状态](docs/implementation_status.md)
 
 ```bash
 make test
@@ -40,6 +40,6 @@ make test-race
 go vet ./...
 ```
 
-[最新压测](docs/benchmarks/ATS_COMPARISON_2026-10-24.md)：源码 `8581267`，256 KiB 热命中，C32/C100；三轮原值和配置随报告附带。本轮未覆盖大文件、HDD 或长测，同机结果不代表公网生产容量。
+[最新压测](docs/benchmarks/ats_comparison_2026-10-24.md)：源码 `8581267`，256 KiB 热命中，C32/C100；三轮原值和配置随报告附带。本轮未覆盖大文件、HDD 或长测，同机结果不代表公网生产容量。
 
 块路径要求强 ETag、identity；普通整对象等完整提交。不支持多 Range 块缓存、未提交字节级 RWW、跨节点一致性或 io_uring；提交不等于逐块 fsync。

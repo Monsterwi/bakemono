@@ -1,10 +1,10 @@
 # 块级 RWW
 
-完整对象未填完时，已完整校验并提交的块即可发送。**当前块的未提交字节不可读。** 共享身份见 [缓存填充设计](CACHE_FILL_DESIGN.md)。
+完整对象未填完时，已完整校验并提交的块即可发送。**当前块的未提交字节不可读。** 共享身份见 [缓存填充设计](cache_fill_design.md)。
 
 ## 管线时序
 
-![UML 块级 RWW 时序](diagrams/block-rww.svg)
+![UML 块级 RWW 时序](diagrams/block_rww.svg)
 
 | 路径 | 开始发送 | 响应 |
 | --- | --- | --- |
@@ -25,7 +25,7 @@
 | 背压 | 写者/读者/预取有独立额度；预取 TryAcquire，失败退回按需；发送结束释放当前读者 |
 | 淘汰 | 已准备块并非永久 pinned；丢失后按原 token、源站、ETag 受控补块；独立校验字节可完成当前发送 |
 
-写者槽数为 `min(max_writers, write_buffer_bytes / CacheWriterReservation())`；读者另有限额。预算包含块、fragment、元数据等，磁盘只需必要窗口；不等于“两个块”或进程 RSS 上限。[发送缓冲预算](RAM_CACHE.md#http-发送缓冲)另计。
+写者槽数为 `min(max_writers, write_buffer_bytes / CacheWriterReservation())`；读者另有限额。预算包含块、fragment、元数据等，磁盘只需必要窗口；不等于“两个块”或进程 RSS 上限。[发送缓冲预算](ram_cache.md#http-发送缓冲)另计。
 
 ## 失败边界
 
@@ -37,7 +37,7 @@
 | If-Range 不匹配 / 非法区间 | 完整表示旁路 / 416 |
 | 下游缓存 | 合成 200/206 使用 Cache-Control: no-cache；内部逐块判断 freshness |
 
-每块发送前检查失效；已发/网络缓冲字节不可撤回。manifest 被淘汰只表示版本未知，不直接视为换版；后续补块仍受强 ETag 约束。提交不等于逐块 fsync，恢复边界见 [存储文档](CACHE_STORAGE_FORMAT.md)。底层活跃 Writer API 不是当前 HTTP RWW 路径。
+每块发送前检查失效；已发/网络缓冲字节不可撤回。manifest 被淘汰只表示版本未知，不直接视为换版；后续补块仍受强 ETag 约束。提交不等于逐块 fsync，恢复边界见 [存储文档](cache_storage_format.md)。底层活跃 Writer API 不是当前 HTTP RWW 路径。
 
 ## 配置与回归
 

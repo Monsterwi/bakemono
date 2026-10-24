@@ -1,6 +1,6 @@
 # 实现状态
 
-本页描述当前源码；发布、合并与任务验收以 [GitHub Issues](https://github.com/Monsterwi/razor/issues) 和 Git 记录为准，#1 保持打开。设计入口：[UML 架构](ARCHITECTURE.md)。
+本页描述当前源码；发布、合并与任务验收以 [GitHub Issues](https://github.com/Monsterwi/razor/issues) 和 Git 记录为准，#1 保持打开。设计入口：[UML 架构](architecture.md)。
 
 ## 能力
 
@@ -30,11 +30,11 @@
 | 持久性 | 提交不等于逐块 fsync；异常退出可冷 MISS，不截断旧文件；同缓存 inode 不跨进程共享 |
 | 未支持 | 未提交字节级 HTTP RWW、多 Range 块缓存、跨节点合并/一致性/PURGE、HTTP/3、io_uring/native AIO |
 
-完整边界：[填充/失效](CACHE_FILL_DESIGN.md)、[RWW](RWW_IMPLEMENTATION.md)、[RAM](RAM_CACHE.md)、[存储](CACHE_STORAGE_FORMAT.md)。
+完整边界：[填充/失效](cache_fill_design.md)、[RWW](rww_implementation.md)、[RAM](ram_cache.md)、[存储](cache_storage_format.md)。
 
 ## 最新压测
 
-仅保留 [2026-10-24 结果](benchmarks/ATS_COMPARISON_2026-10-24.md)，测量源码 `8581267`。
+仅保留 [2026-10-24 结果](benchmarks/ats_comparison_2026-10-24.md)，测量源码 `8581267`。
 
 | 范围 | 结果 |
 | --- | --- |

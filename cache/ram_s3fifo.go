@@ -3,7 +3,7 @@
 // https://www.apache.org/licenses/LICENSE-2.0 . Provided AS IS, without warranties.
 //
 // Go adaptation of ATS 10.2.0 RamCacheS3FIFO.cc at b1df7334b39a878971c376da849e8da4984918b6.
-// The adaptation charges payload separately from bounded metadata; see docs/RAM_CACHE.md.
+// The adaptation charges payload separately from bounded metadata; see docs/ram_cache.md.
 package cache
 
 import (

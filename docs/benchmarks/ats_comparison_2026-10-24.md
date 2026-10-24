@@ -10,7 +10,7 @@
 
 Razor / ATS native 吞吐比：C32 **74.5%**，C100 **75.1%**。Razor 吞吐高于 Slice，但其 P99 更高，不能概括为全指标胜出。
 
-**方法**：[专机环境](../TEST_ENVIRONMENT.md)，HTTP/1.1 loopback、无 TLS、identity；服务 GOMAXPROCS/网络线程为 8，hey cpus=8，不绑核；每产品独立 1 GiB 磁盘/10 MiB RAM，两端访问日志开启。三种服务轮换顺序，各并发 **3×10 秒**，表中为各轮指标中位数；P99 不是混合全部请求后的分位数。
+**方法**：[专机环境](../test_environment.md)，HTTP/1.1 loopback、无 TLS、identity；服务 GOMAXPROCS/网络线程为 8，hey cpus=8，不绑核；每产品独立 1 GiB 磁盘/10 MiB RAM，两端访问日志开启。三种服务轮换顺序，各并发 **3×10 秒**，表中为各轮指标中位数；P99 不是混合全部请求后的分位数。
 
 **校验**：18 组共 **5,507,780 次**请求，正文错误、回源、进程实际读盘均为 **0**；逐响应检查状态/实际长度/读取错误，每组前后 SHA256。使用新实验缓存，旧缓存保留。
 
@@ -18,4 +18,4 @@ Razor / ATS native 吞吐比：C32 **74.5%**，C100 **75.1%**。Razor 吞吐高�
 
 **限制**：只更新 256 KiB 热 HIT；SSD 承载缓存文件，但测量阶段零实际读盘，不代表磁盘性能。ATS 默认关闭 checksum，Razor 保留 CRC；线程配置相近不等于相同硬 CPU 配额。本轮未覆盖大文件、HDD、冷缓存、TLS/H2 或长测，不能外推这些场景。
 
-附件：[摘要/版本与 SHA](ATS_COMPARISON_2026-10-24.json) · [三轮原值、配置及复现脚本](ATS_COMPARISON_2026-10-24.raw.tar.gz)。
+附件：[摘要/版本与 SHA](ats_comparison_2026-10-24.json) · [三轮原值、配置及复现脚本](ats_comparison_2026-10-24.raw.tar.gz)。

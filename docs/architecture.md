@@ -30,10 +30,14 @@
 | 内存 | 请求、生产者、读写者和缓冲分别限额；不是统一 RSS 硬上限 |
 | I/O | 普通 ReadAt/WriteAt 与聚合写；无 io_uring/native AIO；提交不等于 fsync |
 
-设计入口：[合并与块缓存](CACHE_FILL_DESIGN.md) · [RWW](RWW_IMPLEMENTATION.md) · [RAM](RAM_CACHE.md) · [存储恢复](CACHE_STORAGE_FORMAT.md)。
+原项目技术设计保留于 [cache_design.md](cache_design.md)，当前实现以本页及下列模块文档为准。
+
+设计入口：[合并与块缓存](cache_fill_design.md) · [RWW](rww_implementation.md) · [RAM](ram_cache.md) · [存储恢复](cache_storage_format.md)。
 
 [PlantUML 图源与 SVG](diagrams/)同目录保存（渲染工具 1.2026.9）；修改图源后重新生成。仅在本机渲染，不依赖在线 UML 服务：
 
 ```bash
 java -jar "$PLANTUML_JAR" -charset UTF-8 -tsvg -nometadata -failfast2 docs/diagrams/*.puml
 ```
+
+文档文件名使用小写下划线；报告日期采用 YYYY-MM-DD，图源与图片同名。根目录 README.md、LICENSE 等保留通用命名。
