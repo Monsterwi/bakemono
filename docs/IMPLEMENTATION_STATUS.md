@@ -1,6 +1,6 @@
 # 实现状态
 
-本页描述 `perf/http-hotpath`；已发布/合并状态与 [GitHub Issues](https://github.com/Monsterwi/razor/issues) 分开记录，#1 保持打开。设计入口：[UML 架构](ARCHITECTURE.md)。
+本页描述当前源码；发布、合并与任务验收以 [GitHub Issues](https://github.com/Monsterwi/razor/issues) 和 Git 记录为准，#1 保持打开。设计入口：[UML 架构](ARCHITECTURE.md)。
 
 ## 能力
 
@@ -41,6 +41,6 @@
 | e1b158a / [#18](benchmarks/PERFORMANCE_2026-10-23.md) | 同轮 C32/C100 吞吐 2.30/2.48 倍；C100 P99 +10.8%，不是全指标改善 |
 | 77e5186 / [#29](benchmarks/HTTP_HOTPATH_2026-10-23.md) | 对上一版 C100 QPS +7.5%、P99 −7.1%；100 MiB 吞吐 −1.5%～−4.1%；功能/旧缓存恢复通过 |
 
-1964fa3 的 [构建与测试](https://github.com/Monsterwi/razor/actions/runs/40073588676) / [coverage](https://github.com/Monsterwi/razor/actions/runs/40073588666) 均通过；#29 未关闭，性能分支未合并 main。图文修订以后续提交为准，不能称为重新压测。
+1964fa3 的 [构建与测试](https://github.com/Monsterwi/razor/actions/runs/40073588676) / [coverage](https://github.com/Monsterwi/razor/actions/runs/40073588666) 均通过；后续 CI、合并与验收记录见 [#29](https://github.com/Monsterwi/razor/issues/29)。图文修订及合并前回归修复不代表重新压测。
 
 所有结果绑定报告内版本和工况；同机 HTTP/1.1 与两小时长测不是公网/TLS/H2 容量或长期生产保证。旧报告的“RWW 待实施、离线失败”等只适用于对应历史版本。

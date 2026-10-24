@@ -1,6 +1,6 @@
 # Razor HTTP 热路径优化（2026-10-23）
 
-跟踪 [#29](https://github.com/Monsterwi/razor/issues/29)，分支 `perf/http-hotpath`，从 `3277d9a` 继续。测量源码 **`77e5186`**，对照为上一轮优化源码 **`e1b158a`**。本轮实现活动发送缓冲预算、已解析 HTTP 元数据复用及重复工作消除；未合并 main，#29/#1 保持打开。
+跟踪 [#29](https://github.com/Monsterwi/razor/issues/29)，分支 `perf/http-hotpath`，从 `3277d9a` 继续。测量源码 **`77e5186`**，对照为上一轮优化源码 **`e1b158a`**。本轮实现活动发送缓冲预算、已解析 HTTP 元数据复用及重复工作消除；后续合并/验收见 [#29](https://github.com/Monsterwi/razor/issues/29)，#1 保持打开。
 
 **256 KiB 饱和 C100 吞吐提高 7.5%，完整响应 P99 降低 7.1%；固定 16k RPS 的完整响应 P99 降低 13.1%。100 MiB 吞吐有 1.5%–4.1% 回退，不能称为全场景提升。** 本轮没有重跑 ATS，不能用旧 ATS 成绩计算新的追平比例。
 
@@ -89,7 +89,7 @@
 
 ## 交付与限制
 
-分支已推送至 Monsterwi/razor。后续文档提交 `1964fa3` 的 [构建与测试](https://github.com/Monsterwi/razor/actions/runs/40073588676) / [coverage](https://github.com/Monsterwi/razor/actions/runs/40073588666) 均通过；测量源码仍为 `77e5186`，#29 未关闭，main 未合并。本轮没有新增依赖或正式调试监听。未重跑两小时 soak、TLS/H2/真实网卡、物理断电或完整 ATS 矩阵；短期同机结果不能当作生产容量或长期稳定性保证。大文件回退与轻微 RSS 增长是保留的代价，建议先审查分支，再决定是否接受或继续优化大文件路径。
+分支已推送至 Monsterwi/razor。后续文档提交 `1964fa3` 的 [构建与测试](https://github.com/Monsterwi/razor/actions/runs/40073588676) / [coverage](https://github.com/Monsterwi/razor/actions/runs/40073588666) 均通过；测量源码仍为 `77e5186`，后续合并及失败元数据刷新修复见 [#29](https://github.com/Monsterwi/razor/issues/29)，不计作重新压测。本轮没有新增依赖或正式调试监听。未重跑两小时 soak、TLS/H2/真实网卡、物理断电或完整 ATS 矩阵；短期同机结果不能当作生产容量或长期稳定性保证。大文件回退与轻微 RSS 增长是保留的代价，建议先审查分支，再决定是否接受或继续优化大文件路径。
 
 - [结构化结果](HTTP_HOTPATH_2026-10-23.json)
 - [原始测量、配置、剖析、trace、脚本与本地测试日志](HTTP_HOTPATH_2026-10-23.raw.tar.gz)

@@ -262,10 +262,12 @@ func (c *Cache) UpdateHTTPInfo(ctx context.Context, token *FillToken, source *Ca
 	if r.writer != nil || r.Info == nil || r.fragmentIndex != 0 || r.totalRead != 0 || r.offset != 0 {
 		return ErrInvalidated
 	}
-	doc, err := r.parseDocFromBuf()
+	cachedDoc, err := r.parseDocFromBuf()
 	if err != nil {
 		return err
 	}
+	// Failed refreshes must leave the reader's original fragment header intact.
+	doc := *cachedDoc
 	s := source.Stripe
 	type retained struct {
 		key        []byte

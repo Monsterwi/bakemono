@@ -354,3 +354,44 @@ func TestUnsafePolicyRetiresPreviousPhaseHeadAfterCleanReopen(t *testing.T) {
 		}
 	}
 }
+
+func TestFailedMetadataRefreshPreservesSourceReader(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		name := "read"
+		if retry {
+			name = "retry"
+		}
+		t.Run(name, func(t *testing.T) {
+			c, _, key := metadataObject(t, "otter")
+			token, err := c.BeginFill(key, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := c.OpenReadCommitted(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			old, err := r.LoadHTTPInfo()
+			if err != nil {
+				t.Fatal(err)
+			}
+			updated := old.clone()
+			updated.ResponseHeaders.Set("X-Larger", string(bytes.Repeat([]byte("x"), 512)))
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err = c.UpdateHTTPInfo(ctx, token, r, updated); !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancelled update: %v", err)
+			}
+			if retry {
+				if err = c.UpdateHTTPInfo(context.Background(), token, r, updated); err != nil {
+					t.Fatalf("retry update: %v", err)
+				}
+			}
+			body, err := io.ReadAll(r)
+			if err != nil || string(body) != "body" {
+				t.Fatalf("source body after failed refresh: %q, %v", body, err)
+			}
+		})
+	}
+}
