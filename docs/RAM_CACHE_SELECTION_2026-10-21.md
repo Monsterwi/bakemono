@@ -22,4 +22,4 @@
 
 源码移植须固定版本并保留许可；不从“论文公开”推断 artifact 可复制。[ATS 来源及归属](../THIRD_PARTY_NOTICES.md)、[libCacheSim Apache-2.0](https://github.com/1a1a11a/libCacheSim/blob/93529a1faef2c57bbdb9323213b78cad2adec1cd/LICENSE)。条目数限额的库不能未经适配就当字节缓存。
 
-后续已完成的本项目策略验收见 [#19 报告](benchmarks/CDN_ACCEPTANCE_2026-10-21.md)；它不构成所有候选库之间的性能排名。
+本文不提供候选库公平跑分；当前保留的 [热命中结果](benchmarks/ATS_COMPARISON_2026-10-24.md)不能用作全部 RAM 策略的性能排名。

@@ -15,7 +15,7 @@ RAM 是磁盘之上的可淘汰加速层；默认 Otter v2.2.1（adaptive W-Tiny
 | S3-FIFO | Put 返回前收敛；resident ≤min(容量字节数, 65,536) 条 |
 | Ghost | 无 value；条数同上，历史权重 ≤容量；key/node 估算 ≤max(128, 容量/10) 字节 |
 
-预算不等于 RSS：key/node/map/allocator/runtime 另占内存，读者可持有已淘汰 value。S3 resident 最坏 key/node 估算可近 `65536 × (128 + 65536)` B；Otter 空项最小权重只约束稳态条数，不限制总进程内存。历史 Otter 超 10 MiB 采样及异步快照边界见 [验收报告](benchmarks/CDN_ACCEPTANCE_2026-10-21.md)。
+预算不等于 RSS：key/node/map/allocator/runtime 另占内存，读者可持有已淘汰 value。S3 resident 最坏 key/node 估算可近 `65536 × (128 + 65536)` B；Otter 空项最小权重只约束稳态条数，不限制总进程内存。Otter 异步维护及统计快照不保证同一时刻的精确驻留量。
 
 ## S3-FIFO 状态
 
@@ -45,7 +45,7 @@ RAM 是磁盘之上的可淘汰加速层；默认 Otter v2.2.1（adaptive W-Tiny
 | ResponseBufferInUseBytes | 当前活动租约字节 |
 | ResponseBufferTotalAllocatedBytes | 各 runtime 创建以来累计新分配；GC 清池后可超过容量，移除旧 runtime 后可下降 |
 
-额度等待可取消，结束归还；空闲 sync.Pool 由 GC 管理，无硬空闲/RSS 上限。此预算独立于 CacheWriteBufferBytes/BufferReserved。实测及大文件代价见 [热路径报告](benchmarks/HTTP_HOTPATH_2026-10-23.md)。
+额度等待可取消，结束归还；空闲 sync.Pool 由 GC 管理，无硬空闲/RSS 上限。此预算独立于 CacheWriteBufferBytes/BufferReserved。该预算不代表实际驻留量。
 
 ## 验证
 
@@ -55,4 +55,4 @@ go test -race ./cache -run 'TestRAM|TestS3FIFO' -count=1
 go test ./cache -run '^$' -bench '^BenchmarkRAMTrace$' -benchmem -benchtime=2s -count=3
 ```
 
-10 MiB、256 B/256 KiB/1 MiB/4 MiB、0.5/1/4 倍工作集，覆盖扫描/热点切换/混合读写。逻辑 MB/s 不复制全部正文，不能当 HTTP 或磁盘吞吐。报告：[开发机轨迹](benchmarks/RAM_POLICY_2026-10-21.md)、[专机/两策略各两小时](benchmarks/CDN_ACCEPTANCE_2026-10-21.md)。
+10 MiB、256 B/256 KiB/1 MiB/4 MiB、0.5/1/4 倍工作集，覆盖扫描/热点切换/混合读写。逻辑 MB/s 不复制全部正文，不能当 HTTP 或磁盘吞吐。当前仅保留 [最新热命中压测](benchmarks/ATS_COMPARISON_2026-10-24.md)，不能据此比较淘汰策略或长测稳定性。

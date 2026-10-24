@@ -40,6 +40,6 @@ make test-race
 go vet ./...
 ```
 
-[CDN 验收](docs/benchmarks/CDN_ACCEPTANCE_2026-10-21.md)覆盖 HDD/SSD、256 KiB/100 MiB、200 MiB 回归及两策略各两小时 SSD 长测。[ATS 对比](docs/benchmarks/ATS_COMPARISON_2026-10-24.md)与[后续优化](docs/benchmarks/HTTP_HOTPATH_2026-10-23.md)保留版本、收益和回退；同机结果不代表公网生产容量。
+[最新压测](docs/benchmarks/ATS_COMPARISON_2026-10-24.md)：源码 `8581267`，256 KiB 热命中，C32/C100；三轮原值和配置随报告附带。本轮未覆盖大文件、HDD 或长测，同机结果不代表公网生产容量。
 
 块路径要求强 ETag、identity；普通整对象等完整提交。不支持多 Range 块缓存、未提交字节级 RWW、跨节点一致性或 io_uring；提交不等于逐块 fsync。

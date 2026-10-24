@@ -32,16 +32,14 @@
 
 完整边界：[填充/失效](CACHE_FILL_DESIGN.md)、[RWW](RWW_IMPLEMENTATION.md)、[RAM](RAM_CACHE.md)、[存储](CACHE_STORAGE_FORMAT.md)。
 
-## 验收证据
+## 最新压测
 
-| 源码 / 报告 | 结果与范围 |
+仅保留 [2026-10-24 结果](benchmarks/ATS_COMPARISON_2026-10-24.md)，测量源码 `8581267`。
+
+| 范围 | 结果 |
 | --- | --- |
-| 5ccf32c / [#19](benchmarks/CDN_ACCEPTANCE_2026-10-21.md) | HDD/SSD，256 KiB/100 MiB、200 MiB 回归；26 项通过，Otter/S3-FIFO 各全新两小时 SSD 长测，共 245,762 业务 GET |
-| 193fe7d / [ATS 对照](benchmarks/ATS_COMPARISON_2026-10-22.md) | ATS 10.2.1 native/Slice，72 热压测组、18 混合组、18 冷读；小文件仍落后 |
-| 8581267 / [当前 ATS 热命中](benchmarks/ATS_COMPARISON_2026-10-24.md) | 256 KiB C32/C100 对照 ATS 10.2.1；吞吐约 75%，P99 仍高；只重测热 HIT |
-| e1b158a / [#18](benchmarks/PERFORMANCE_2026-10-23.md) | 同轮 C32/C100 吞吐 2.30/2.48 倍；C100 P99 +10.8%，不是全指标改善 |
-| 77e5186 / [#29](benchmarks/HTTP_HOTPATH_2026-10-23.md) | 对上一版 C100 QPS +7.5%、P99 −7.1%；100 MiB 吞吐 −1.5%～−4.1%；功能/旧缓存恢复通过 |
+| 256 KiB 热 HIT，C32/C100 | Razor 吞吐为 ATS 10.2.1 native 的 74.5% / 75.1%；P99 仍更高 |
+| 18 组、5,507,780 次请求 | 正文错误、回源、进程实际读盘均为 0 |
+| 未覆盖 | 大文件、HDD、冷缓存、TLS/H2 压力及长测；不引用历史跑分补齐 |
 
-1964fa3 的 [构建与测试](https://github.com/Monsterwi/razor/actions/runs/40073588676) / [coverage](https://github.com/Monsterwi/razor/actions/runs/40073588666) 均通过；后续 CI、合并与验收记录见 [#29](https://github.com/Monsterwi/razor/issues/29)。图文修订及合并前回归修复不代表重新压测。
-
-所有结果绑定报告内版本和工况；同机 HTTP/1.1 与两小时长测不是公网/TLS/H2 容量或长期生产保证。旧报告的“RWW 待实施、离线失败”等只适用于对应历史版本。
+功能与边界依据当前代码；压测仅证明上述范围，不等于全功能或长期生产验收。

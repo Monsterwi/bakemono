@@ -38,4 +38,4 @@
 | 交付 | normal/race/vet/build、工具/真实二进制、双轴审查及 CI；专机 HDD/SSD 三轮、256 KiB/100 MiB、200 MiB 回归 |
 | 长测 | SSD 每策略全新至少 2 小时，验证正文、排空和资源趋势；不等于长期生产稳定 |
 
-历史验收：源码 `5ccf32c`，24 项矩阵 + 两次长测共 26 项通过，详见 [#19 报告](benchmarks/CDN_ACCEPTANCE_2026-10-21.md)。当前范围与限制见 [实现状态](IMPLEMENTATION_STATUS.md)。
+当前保留的实测仅覆盖 [256 KiB 热命中](benchmarks/ATS_COMPARISON_2026-10-24.md)；上表是验收标准，不是本轮已测清单。实现边界见 [实现状态](IMPLEMENTATION_STATUS.md)。
