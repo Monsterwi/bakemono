@@ -27,7 +27,8 @@ Dependency notices remain with their respective modules in `go.mod` and `go.sum`
 
 ## Upstream cache design documentation
 
-[docs/cache_design.md](docs/cache_design.md) preserves the Tech Design section and four diagrams from
+[docs/cache_design.md](docs/cache_design.md) adapts the compact-directory and circular-write design described in
 [bocchi-the-cache/bakemono README](https://github.com/bocchi-the-cache/bakemono/blob/5279a99634d0c8ca7298f8b63b645de518fbe190/README.md),
 fixed at `5279a99634d0c8ca7298f8b63b645de518fbe190`, under Apache-2.0 (see [LICENSE](LICENSE)).
-Headings, whitespace and image paths were adjusted; a reference-only scope note was added.
+The text and diagrams were rewritten for current Razor. The original imported section and four diagrams remain available in
+[Git history](https://github.com/Monsterwi/razor/blob/d073c27085f39c87d1041e108835c2029a11b6d2/docs/cache_design.md).

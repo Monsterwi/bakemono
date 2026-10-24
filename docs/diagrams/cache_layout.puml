@@ -1,0 +1,37 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Noto Serif CJK SC
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam ArrowColor #334155
+skinparam componentBackgroundColor #EFF6FF
+skinparam stateBackgroundColor #EFF6FF
+top to bottom direction
+component "Cache / CacheReader / CacheWriter" as C
+package "一个 Stripe：Path、Skip、Len" {
+  component "DirManager / DirTrie\nsegment、bucket、完整键映射\nDir：10 B，offset / approxSize / phase" as I
+  component "RAM\nOtter 或 S3-FIFO\n不可变 Doc fragment" as R
+  component "AggregateWriteBuffer\n2 × 4 MiB\n分配 offset / generation" as A
+  artifact "数据文件中的 Stripe 区间" as D
+  artifact "<Path>.<Skip>.checkpoint\nclean / geometry / session\n目录、键映射、写位置" as P
+}
+C --> I : 读：按对象键 CRC32 选 stripe\n片键 MD5 定位目录
+I --> R : 目录有效后先查 RAM
+I --> D : RAM MISS：ReadAt(offset)\n先头、再完整 fragment
+C --> A : 写：序列化 fragment
+A --> D : 单 worker / WriteAt\n按实际记录长度追加
+C ..> I : 写入完成后复核围栏并发布\nfragment 0 最后提交
+C ..> R : 写入 / 元数据更新 / 迁移后填充
+I ..> P : 排空关闭后保存目录与映射
+D ..> P : 先 sync 数据，再发布 clean 检查点
+note bottom of D
+  Skip：24 B session marker
+  目录保留区 + 512 B 边界填充
+  Start：环形数据区
+  [Doc 72 B | 元数据 | 正文] ...
+  WritePos：已完成写入的尾部
+  Skip + Len：区间末尾，放不下记录则回卷
+  各 fragment 可不连续、不保证逐条扇区对齐
+end note
+@enduml
