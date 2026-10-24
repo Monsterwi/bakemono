@@ -89,9 +89,9 @@
 
 ## 交付与限制
 
-实现和证据已在本地分支保存。GitHub CI **尚未运行**，等待分支推送授权；#29 未关闭，main 未合并。本轮没有新增依赖或正式调试监听。未重跑两小时 soak、TLS/H2/真实网卡、物理断电或完整 ATS 矩阵；短期同机结果不能当作生产容量或长期稳定性保证。大文件回退与轻微 RSS 增长是保留的代价，建议先审查分支，再决定是否接受或继续优化大文件路径。
+分支已推送至 Monsterwi/razor。后续文档提交 `1964fa3` 的 [构建与测试](https://github.com/Monsterwi/razor/actions/runs/40073588676) / [coverage](https://github.com/Monsterwi/razor/actions/runs/40073588666) 均通过；测量源码仍为 `77e5186`，#29 未关闭，main 未合并。本轮没有新增依赖或正式调试监听。未重跑两小时 soak、TLS/H2/真实网卡、物理断电或完整 ATS 矩阵；短期同机结果不能当作生产容量或长期稳定性保证。大文件回退与轻微 RSS 增长是保留的代价，建议先审查分支，再决定是否接受或继续优化大文件路径。
 
 - [结构化结果](HTTP_HOTPATH_2026-10-23.json)
 - [原始测量、配置、剖析、trace、脚本与本地测试日志](HTTP_HOTPATH_2026-10-23.raw.tar.gz)
 
-证据包不含二进制和缓存文件；`delivery-manifest-final.json` 记录生产/诊断二进制 SHA256。`delivery-large-paired` 是正式大文件对照。重现先按 Git 版本构建，使用包内 `run_delivery.py`、`delivery_large_paired.py`、既有测试工具及 fixtures；更换机器须调整实验绝对路径和 CPU 布局。诊断构建仅临时加入包内 `local-validation/profile_probe.go`，监听 localhost，不能混入正式构建。
+JSON/证据包保留测量时快照，CI 后续结果见上文。证据包不含二进制和缓存文件；`delivery-manifest-final.json` 记录生产/诊断二进制 SHA256。`delivery-large-paired` 是正式大文件对照。重现先按 Git 版本构建，使用包内 `run_delivery.py`、`delivery_large_paired.py`、既有测试工具及 fixtures；更换机器须调整实验绝对路径和 CPU 布局。诊断构建仅临时加入包内 `local-validation/profile_probe.go`，监听 localhost，不能混入正式构建。

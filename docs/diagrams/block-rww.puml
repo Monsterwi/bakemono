@@ -1,0 +1,44 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Noto Serif CJK SC
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam ArrowColor #334155
+skinparam componentBackgroundColor #EFF6FF
+skinparam stateBackgroundColor #EFF6FF
+hide footbox
+actor "客户端 A" as A
+actor "客户端 B" as B
+participant "Razor 请求处理器" as R
+participant "fillGroup / 块生产者" as F
+participant "固定源站" as O
+database "块缓存" as K
+note over R,K : fresh manifest 已存在，块大小 1 MiB
+A -> R : Range [0, 2 MiB)
+R -> F : 块 0 MISS，创建任务
+F -> O : Range 块 0 + If-Match
+B -> R : Range [0.5 MiB, 1.5 MiB)
+R -> F : 加入块 0 任务
+O --> F : 完整块 0
+F -> K : 校验并提交块 0
+F --> R : 唤醒订阅者
+R -> K : 各自读取已提交块 0
+par 发送当前块所需部分
+  R --> A : 206 / 块 0 全部
+  R --> B : 206 / 块 0 后半部分
+else 每请求最多准备下一块
+  R -> F : 确保块 1，共享在途任务
+  F -> O : Range 块 1 + If-Match
+  O --> F : 完整块 1
+  F -> K : 校验并提交块 1
+  F --> R : 块 1 完成
+end
+R -> K : 各自在需要时读取块 1
+R --> A : 块 1 全部，完成
+R --> B : 块 1 前半部分，完成
+note over A,K
+块 0 提交即可发送，不等整对象
+预取额度不足时退回按需获取
+end note
+@enduml

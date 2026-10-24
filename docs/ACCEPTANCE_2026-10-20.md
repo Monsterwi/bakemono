@@ -1,5 +1,7 @@
 # 真实二进制端到端与容量验证：2026-10-20
 
+> 历史版本测量：数字与限制仅适用于文内源码，不代表当前能力。当前状态见 [实现状态](IMPLEMENTATION_STATUS.md)。
+
 关联 [Issue #14](https://github.com/Monsterwi/bakemono/issues/14)，总计划 [#1](https://github.com/Monsterwi/bakemono/issues/1) 保持打开。
 
 本机上线前验证完成：256 KiB 和 200 MiB 对象、真实磁盘缓存、实际主程序与流式 HTTP client 均已执行。正式测量 **64 批、49,480 请求，非预期错误 0**；其中 30 个 503 是刻意设置 `max_requests=2 / queue=0` 后的预期拒绝。追加跨偏移重叠 Range 的 40 个请求单列，不计入此分母。最终功能记录 **19 PASS、1 个已确认的可用性限制**。允许有条件进入可回滚的小流量试用；没有进行生产部署，也不把这次有限时长测试称为长期生产验收。

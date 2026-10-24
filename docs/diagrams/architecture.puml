@@ -1,0 +1,35 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Noto Serif CJK SC
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam ArrowColor #334155
+skinparam componentBackgroundColor #EFF6FF
+skinparam stateBackgroundColor #EFF6FF
+top to bottom direction
+actor "客户端" as C
+package "Razor 单进程" {
+  component "server\nHTTP / TLS / H2" as H
+  component "runtimeSnapshot\n配置租约 / 请求额度" as R
+  component "fillGroup\n任务合并 / 取消 / 期限" as F
+  component "proxy\n源站选择 / 请求规范化" as P
+  component "cache\n身份 / CRC / PURGE 围栏" as K
+  component "RAM\nOtter 或 S3-FIFO" as M
+  component "Stripe\n目录 / 环写 / 聚合写" as S
+}
+database "缓存文件 / 检查点" as D
+cloud "源站" as O
+C --> H : GET / Range / PURGE
+H --> R : 持有不可变快照
+H --> K : 查询 / 读取 / 失效
+H --> F : MISS 加入任务
+H --> P : 不可缓存请求旁路
+F --> R : 生产者独立租约
+F --> P : 唯一生产者回源
+P --> O : GET / HEAD / 对齐 Range
+F --> K : 校验后提交
+K --> M : 内存加速
+K --> S : 完整对象 / manifest / 块
+S --> D : ReadAt / WriteAt
+@enduml

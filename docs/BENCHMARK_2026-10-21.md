@@ -1,5 +1,7 @@
 # Razor 0.1.0-rc.1：100 MiB CDN 场景验证与压力报告
 
+> 历史版本测量：数字与限制仅适用于文内源码，不代表当前能力。当前状态见 [实现状态](IMPLEMENTATION_STATUS.md)。
+
 日期：2026-10-21 UTC。关联 [#15](https://github.com/Monsterwi/bakemono/issues/15)，总计划 [#1](https://github.com/Monsterwi/bakemono/issues/1) 保持打开。
 
 ## 结果与统计口径

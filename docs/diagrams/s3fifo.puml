@@ -1,0 +1,22 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Noto Serif CJK SC
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam ArrowColor #334155
+skinparam componentBackgroundColor #EFF6FF
+skinparam stateBackgroundColor #EFF6FF
+hide empty description
+state "Small FIFO" as Small
+state "Main FIFO" as Main
+state "Ghost\n仅保留历史身份与权重" as Ghost
+[*] --> Small : 新项
+Small --> Small : 命中：计数加一，上限 3
+Small --> Main : 回收时计数至少 2；晋升并清零
+Small --> Ghost : 回收时计数不足 2；丢弃 value
+Ghost --> Main : 再入缓存
+Main --> Main : 命中 +1（上限 3）\n回收遇正计数则减一并轮转
+Main --> [*] : 回收时计数为 0
+Ghost --> [*] : 历史预算或条数超限
+@enduml

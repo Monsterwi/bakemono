@@ -1,49 +1,46 @@
-# Razor 实现状态
+# 实现状态
 
-当前集成实现新增 query 顺序无关身份（HTTP 键 v3），其余能力以已合并 main 的源码 `c93f4d7` 为基线。需求与验收由 [总计划 #1](https://github.com/Monsterwi/razor/issues/1) 及子 Issue 管理；#1 保持打开；#18 的本分支验收状态见文末。已有测试和阶段验收不代表完成长期生产试用，也不代表与 ATS 磁盘格式兼容。
+本页描述 `perf/http-hotpath`；已发布/合并状态与 [GitHub Issues](https://github.com/Monsterwi/razor/issues) 分开记录，#1 保持打开。设计入口：[UML 架构](ARCHITECTURE.md)。
 
-## HTTP 与缓存能力
+## 能力
 
-- **HTTP 主路径（#2–#5）**：标准库服务、正确的回源 URL/头处理与取消、完整缓存身份、完整 GET 提交、有界连接/请求/回源/写者额度、排空和计数。真实二进制入口见 `tools/acceptance.py`。
-- **磁盘提交、校验与恢复（#6–#8）**：数据写入确认后发布目录，完整对象头最后提交；Doc 头/正文 CRC、片段身份/覆盖代次防止混读。只恢复完整验证的干净检查点；同文件所有权、失效与生命周期有回归。见 [存储格式与恢复](CACHE_STORAGE_FORMAT.md)。
-- **共享缓存语义（#9）**：明确的准入、Age/Date/freshness、`s-maxage`、请求 `no-cache`/`max-age`/`min-fresh`、过期重验证和 304 元数据刷新；条件 GET/HEAD 与支持的 Vary 维度保持一致。Vary 仅支持 Accept-Encoding、Accept-Language 及其组合，每 URL 最多 16 个普通表示。
-- **TLS/H2、健康检查与重载（#10–#11）**：TLS/ALPN、回源证书校验、自定义 CA、HEAD 健康探测；每个请求/独立生产者持有不可变 runtime。热更新原子安装，失败保留当前配置，最多保留一个未排空旧 runtime。存储、监听/证书、公共模式、块大小和 RAM 策略等配置须重启。
-- **整对象合并回源（#12）**：回源前原子加入有界任务，首客户端取消不影响其余订阅者，最后订阅者离开取消生产者；整对象完整提交后独立读取。不可共享响应只交给仍在等待的创建者，其他订阅者受控失败且不自动重试。
-- **原生部分对象缓存（#13/#20）**：单 Range 对齐固定块，仅补缺块；manifest 与块独立提交、校验、淘汰。固定完整源站身份、强 ETag、变体、随机 Incarnation 和布局，逐块校验 206/区间/长度/编码/EOF；合格公共大 GET 与 Range 共用块。
-- **fresh Range 离线读取（#16）**：在仍配置的固定源站上，manifest 与整个所需区间均 fresh、完整且可读取时，即使全源站不健康也可零回源服务。缺块/过期/损坏不承诺离线成功，不提供 stale-if-error。
-- **跨客户端公共合并（#17）**：显式开启公共模式后，规范化 IP/UA/追踪身份并用于任务和实际回源；保留有效 scheme/Host、变体与未知头隔离，query 仅在身份中按原始参数项排序，回源保留原字节。Authorization/Cookie 等仍旁路；默认保守模式不变。
-- **块级 RWW（#20）**：首个所需块完整校验并提交后发送，发送当前块时最多准备下一块；只覆盖本次区间，额度不足可放弃预取。块大小默认 1 MiB，64 KiB–8 MiB 的 2 次幂；小对象、普通整对象仍等完整提交。见 [RWW 实现](RWW_IMPLEMENTATION.md)。
-- **RAM 策略（#21）**：Otter 默认，S3-FIFO 可选，统一按序列化 value 字节加已解码 HTTP 元数据的保守估算计费；不是进程 RSS 硬上限，不改变 HTTP 身份或磁盘失效。见 [RAM 缓存](RAM_CACHE.md)。
-- **Query 顺序统一**：源站已保证参数项顺序无关；整对象、manifest/块、合并任务与 PURGE 共用排序后的根键。不解码/重编码或删除参数，保留重复数量、空项、值与编码差异；HTTP 键 v3 隔离旧身份，旧缓存安全 MISS，原文件保留。
-- **HTTP/2 生命周期修复**：请求体关闭后不再让迟到的回源读取/重复关闭访问已失效的 ResponseWriter；有关闭中断与并发 late Read/Close 回归。
+| 能力 | 当前行为 / 边界 |
+| --- | --- |
+| HTTP | 标准库代理、TLS/H2、可信转发、源站证书校验、健康探测、取消和排空 |
+| 共享缓存语义 | 显式 freshness、Age/Date、s-maxage、请求约束、条件 GET/HEAD、304 更新；不提供启发式 freshness |
+| Vary / 准入 | 仅 Accept-Encoding/Accept-Language 及组合，每 URL 最多 16 普通表示；私有/未知语义保守旁路 |
+| 合并回源 | 回源前原子 join；独立生产者/取消/期限；普通对象完整提交后独立读取 |
+| 部分对象 | manifest + 独立固定块，Range/合格公共大 GET 共用；强 ETag、固定源站和布局，不混版 |
+| RWW | 首块完整校验并提交后发送，同时最多准备下一块；默认 1 MiB，可配 64 KiB–8 MiB |
+| 离线 Range | 同一仍配置源站的 manifest 和整个所需区间均 fresh、完整可读时零回源；不是 stale-if-error |
+| RAM | Otter 默认、S3-FIFO 可选；序列化 value + 解码元数据估算计费，非 RSS 硬上限 |
+| 磁盘 | CRC/身份/覆盖代次校验；头片段最后发布；只恢复验证通过的干净检查点 |
+| Query | 原始参数项排序，缓存/任务/PURGE 同规则；源站保证顺序无关，实际回源不重排 |
+| 重载 | 不可变 runtime 租约，原子替换，最多一个未排空旧 runtime；部分设置须重启 |
 
-完整链路与源码索引见 [合并回源与部分对象缓存](CACHE_FILL_DESIGN.md)。
+## 运行边界
 
-## 失效、容量与协议边界
+| 类别 | 限制 |
+| --- | --- |
+| PURGE | 默认关闭；Bearer token 启用；精确/路径前缀失效普通表示与 Range 家族；旧 token 不复活，当前代次可保守影响其他在途任务 |
+| Range | HEAD/总长/强 ETag/identity；多 Range、弱 ETag 等旁路；合成下游响应 no-cache；后块失败中断流 |
+| 容量 | max_object_bytes 默认 64 MiB；大对象测试须调大；块按必要窗口，不要求磁盘容纳整文件 |
+| 索引 | 每 stripe 至多 min(目录容量, 65,536) 映射、16 MiB 键/selector 字符串、每键/selector 16 KiB；URL manifest 快照上限 64 |
+| 任务/资源 | 默认 16 生产任务、每任务 256 订阅者、300 秒；请求/源站/写者/读者/队列另限额，非总 RSS 预算 |
+| 持久性 | 提交不等于逐块 fsync；异常退出可冷 MISS，不截断旧文件；同缓存 inode 不跨进程共享 |
+| 未支持 | 未提交字节级 HTTP RWW、多 Range 块缓存、跨节点合并/一致性/PURGE、HTTP/3、io_uring/native AIO |
 
-- HTTP PURGE 默认关闭；配置 `proxy.config.http.purge_token` 后用 Bearer token 鉴权。无 query、以 `/` 结尾的路径按 selector 前缀失效，其他为精确失效。同 URL 普通表示与 Range 家族一起移除，相邻 URL 的已提交对象保留。
-- 回源前的 `FillToken` 必须一直传递到 manifest/块发布，旧任务不能在 PURGE 后重捕凭证复活。目前采用单进程保守代次，可能使无关在途操作也失败；已发出的字节不能撤回。
-- 普通整对象源站池假设副本可互换；块响应固定一个完整源站身份，整次响应不跨源拼接。新命名空间和 runtime version 隔离换源/重载任务，旧租约到释放后才关闭。
-- 块缓存要求 HEAD 提供总长、强 ETag 与可缓存的 identity 表示。弱/缺失 ETag、非 identity 编码、多 Range、部分前置条件等保守旁路。If-Range 不匹配按完整表示处理；错误 206/版本变化不能发布新块。
-- 总对象仍受 `max_object_bytes` 限制（默认 64 MiB，100/200 MiB 测试须调大）；磁盘只需必要块窗口，不要求容纳整对象。准备后的块仍可被并发环形写入淘汰，允许受控重取；无法继续时必须返回错误或中断已开始的流。
-- 合并默认最多 16 个活动生产任务、每任务 256 个订阅者（含创建者）、300 秒总期限；回源/写者/读者与队列另有限额，日志和 Stats 分别记录请求、合并、块与回源口径。预留缓冲不等于 RSS 上限。
-- 每条带目录映射还受目录容量、65,536 条目、16 MiB 键/selector 字符串总量与每键 16 KiB 限制。块各用独立 selector，不占普通 16 变体额度；URL manifest 快照仍有 64 个上限。
-- 合成块响应对下游采用 `Cache-Control: no-cache`，内部按各块 freshness 复用。HTTP 仅实现明确共享缓存子集，Authorization/Cookie/Set-Cookie、未知缓存指令和不支持的 Vary 保守处理，不提供启发式 freshness。
-- 块级提交不等于逐块 fsync。旧格式/异常退出/损坏检查点允许冷 MISS，不删除或截断原文件；正常环形写入仍复用旧空间。不能用不同进程共享同一个缓存文件，即使区域不重叠。
-- 尚不支持未提交字节级 HTTP RWW、多 Range 块缓存、跨节点一致性、分布式合并/PURGE、io_uring/native AIO 和 HTTP/3；未验收物理断电与长期生产部署。
+完整边界：[填充/失效](CACHE_FILL_DESIGN.md)、[RWW](RWW_IMPLEMENTATION.md)、[RAM](RAM_CACHE.md)、[存储](CACHE_STORAGE_FORMAT.md)。
 
-## 测试与验收
+## 验收证据
 
-`make test`、`make test-race` 强制运行回归，`make build` 构建实际主程序。测试包括整对象共享、不同客户端公共规范化、私有响应、取消/限额、Vary/304/HEAD、重叠缺块、首块提前到达、后续错误、版本/布局/PURGE/重载、离线、干净重启、损坏与缓存回卷；HTTP/2 使用真实二进制测试。
+| 源码 / 报告 | 结果与范围 |
+| --- | --- |
+| 5ccf32c / [#19](benchmarks/CDN_ACCEPTANCE_2026-10-21.md) | HDD/SSD，256 KiB/100 MiB、200 MiB 回归；26 项通过，Otter/S3-FIFO 各全新两小时 SSD 长测，共 245,762 业务 GET |
+| 193fe7d / [ATS 对照](benchmarks/ATS_COMPARISON_2026-10-22.md) | ATS 10.2.1 native/Slice，72 热压测组、18 混合组、18 冷读；小文件仍落后 |
+| e1b158a / [#18](benchmarks/PERFORMANCE_2026-10-23.md) | 同轮 C32/C100 吞吐 2.30/2.48 倍；C100 P99 +10.8%，不是全指标改善 |
+| 77e5186 / [#29](benchmarks/HTTP_HOTPATH_2026-10-23.md) | 对上一版 C100 QPS +7.5%、P99 −7.1%；100 MiB 吞吐 −1.5%～−4.1%；功能/旧缓存恢复通过 |
 
-[#19 正式验收报告](benchmarks/CDN_ACCEPTANCE_2026-10-21.md) 针对测量源码 `5ccf32c`，覆盖 256 KiB 与 100 MiB 主场景、200 MiB 回归、HDD/SSD，26 项通过；Otter/S3-FIFO 各完成一次全新至少两小时 SSD soak，合计 245,762 次业务 GET。该实测是同机 HTTP/1.1，不能等同公网/TLS/H2 容量。后续代码与交付提交的 CI 以 Git/Issue 为证据，不把历史报告冒充新提交重测。
+1964fa3 的 [构建与测试](https://github.com/Monsterwi/razor/actions/runs/40073588676) / [coverage](https://github.com/Monsterwi/razor/actions/runs/40073588666) 均通过；#29 未关闭，性能分支未合并 main。图文修订以后续提交为准，不能称为重新压测。
 
-[ATS 10.2.1 对比报告](benchmarks/ATS_COMPARISON_2026-10-22.md) 固定当前 `193fe7d`，覆盖 HDD/SSD、72 组热缓存压力、18 组混合热点/长尾、18 次文件冷读及 200 MiB 回归。小文件热命中仍落后 ATS；Razor 的原生块级合并在本轮未出现重复块回源。报告分别列出 ATS 原生、Slice 及预取敏感性，不把页缓存优势等同磁盘优势。
-
-[2026-10-20 报告](ACCEPTANCE_2026-10-20.md) 和 [旧候选报告](BENCHMARK_2026-10-21.md) 保留对应版本的原始结论；其中“Range 全源站离线失败”“等待全部块”“RWW 待实施”等历史限制不能代表当前实现。
-
-## 性能剖析分支验收
-
-`perf/18-hot-hit` 的 `e1b158a` 已完成 #18 的剖析与优化验收，尚未合并 main。256 KiB C32/C100 同轮对照吞吐提高 2.30/2.48 倍，达到 ATS 10.2.1 原生缓存约 70%/72%；C100 P99 增加约 10.8%，RSS 也增加。HDD/SSD 功能各 18/18、200 MiB 兼容及 CI 通过。详见[性能报告与原始证据](benchmarks/PERFORMANCE_2026-10-23.md)，不能替代长期生产试用。
-
-`perf/http-hotpath` 从 `3277d9a` 继续，测量源码 `77e5186`：增加 RAM HTTP 元数据复用、请求内缓存策略复用和每 runtime 活动发送缓冲预算。256 KiB C100 吞吐 +7.5%、P99 −7.1%；100 MiB 吞吐回退 1.5%–4.1%。本地普通/race/vet、20 项工具测试、HDD/SSD 功能及旧缓存恢复通过；GitHub CI 待推送授权，#29 未关闭、main 未合并。边界与原始证据见[本轮报告](benchmarks/HTTP_HOTPATH_2026-10-23.md)。
+所有结果绑定报告内版本和工况；同机 HTTP/1.1 与两小时长测不是公网/TLS/H2 容量或长期生产保证。旧报告的“RWW 待实施、离线失败”等只适用于对应历史版本。

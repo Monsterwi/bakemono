@@ -1,0 +1,34 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Noto Serif CJK SC
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam ArrowColor #334155
+skinparam componentBackgroundColor #EFF6FF
+skinparam stateBackgroundColor #EFF6FF
+hide footbox
+participant CacheReader as R
+participant EvacuationTable as T
+participant Stripe as S
+participant "evacuate 协程" as E
+database "磁盘 / 目录" as D
+R -> T : 窗口内命中：按 offset 去重注册
+S -> T : 获取待覆盖范围的候选
+T --> S : 桶内候选（非全目录扫描）
+S -> D : 检查目录 / 片段身份 / CRC
+S -> S : 保存 generation 与 PURGE 代次
+S -> D : 正常环形写入
+alt 队列有额度
+  S -> E : 提交候选
+  E -> D : 分配新位置、写入并等待完成
+  E -> E : 复核目录所有权和所有代次
+  alt 围栏仍有效
+    E -> D : 发布新目录映射
+  else 已失效 / 已被替换
+    E -> E : 不发布旧记录
+  end
+else 队列过载
+  S -> S : 放弃迁移，允许后续 MISS
+end
+@enduml

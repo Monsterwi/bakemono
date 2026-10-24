@@ -1,16 +1,15 @@
 # Razor
 
-用 Go 实现的 HTTP 缓存代理，借鉴 Apache Traffic Server 的缓存架构，面向文件下载与分发。重点是**合并回源**和**原生部分对象缓存**。
+Go HTTP 缓存代理，重点是**合并回源**和**原生部分对象缓存**。
 
-## 核心能力
+| 能力 | 行为 |
+| --- | --- |
+| 合并回源 | 等价并发 MISS 共享生产者，独立取消、限额与超时 |
+| 部分对象 / RWW | GET/单 Range 共用固定块；只补缺块，完整块提交后发送 |
+| 存储 | CRC、检查点恢复、PURGE；RAM 默认 Otter，可选 S3-FIFO |
+| HTTP | 缓存新鲜度/重验证、TLS/H2、配置重载和排空 |
 
-- **合并回源**：等价并发请求共享填充任务；客户端独立取消，回源、等待者和缓冲均有额度限制。
-- **部分对象缓存**：单 Range 与合格公共静态大 GET 共用块，重叠区间只补缺块，按源站、变体、版本和失效代次隔离。
-- **块级 RWW**：块完整校验并提交后即可发送，同时最多预取下一块；默认 1 MiB，可配置 64 KiB–8 MiB。
-- **磁盘与 RAM 缓存**：CRC 校验、检查点恢复、PURGE 失效；RAM 默认 Otter，可选 S3-FIFO。完整 fresh Range 可在源站离线时读取。
-- **HTTP 与运行治理**：新鲜度、条件重验证、TLS/HTTP/2、配置热更新、有界排队和优雅排空。
-
-## 快速开始
+## 运行
 
 要求 Go **1.26.10**。
 
@@ -19,9 +18,9 @@ make build
 ./razor -c /path/to/conf
 ```
 
-配置目录须包含 [records.config](conf/records.config) 和 [storage.config](conf/storage.config)。先按环境设置监听端口、源站、日志目录与缓存文件路径；仓库中的配置是示例。缓存身份忽略 query 参数项顺序，要求源站保证顺序无关；回源保留原始 query。
+目录包含 [records.config](conf/records.config) 和 [storage.config](conf/storage.config)；先设置端口、源站、日志和缓存文件路径。Query 项顺序不影响缓存身份，源站必须保证顺序无关。
 
-仅当源站内容不随客户端身份变化时，开启公共静态模式。以下配置允许缓存 100/200 MiB 对象，并使用默认 1 MiB 块：
+公共静态大 GET 与单 Range 共用块时，配置示例：
 
 ```text
 CONFIG proxy.config.cache.shared_fill_public_static INT 1
@@ -29,9 +28,11 @@ CONFIG proxy.config.cache.max_object_bytes INT 268435456
 CONFIG proxy.config.cache.range_block_bytes INT 1048576
 ```
 
-公共模式、块大小和 RAM 策略修改均需重启；`-c` 接收目录，不是单个配置文件。
+公共模式要求资源不随客户端身份变化；公共模式、块大小和 RAM 策略修改须重启。[配置与约束](docs/FEATURE_PLAN.md)。
 
-## 测试与验收
+## 文档与验证
+
+[UML 架构](docs/ARCHITECTURE.md) · [合并回源时序](docs/CACHE_FILL_DESIGN.md) · [RWW](docs/RWW_IMPLEMENTATION.md) · [实现状态](docs/IMPLEMENTATION_STATUS.md)
 
 ```bash
 make test
@@ -39,15 +40,6 @@ make test-race
 go vet ./...
 ```
 
-已验收源码 `5ccf32c`：HDD/SSD 覆盖 256 KiB、100 MiB 主场景及 200 MiB 兼容回归，**26 项实测通过**。Otter 与 S3-FIFO 各完成一次全新 **2 小时 SSD 混合长测**，合计 **245,762 次业务 GET**，正文长度与 SHA 校验通过。
+[CDN 验收](docs/benchmarks/CDN_ACCEPTANCE_2026-10-21.md)覆盖 HDD/SSD、256 KiB/100 MiB、200 MiB 回归及两策略各两小时 SSD 长测。[ATS 对比](docs/benchmarks/ATS_COMPARISON_2026-10-22.md)与[后续优化](docs/benchmarks/HTTP_HOTPATH_2026-10-23.md)保留版本、收益和回退；同机结果不代表公网生产容量。
 
-实测为同机 HTTP/1.1，不能直接当作公网生产容量。三轮压力原值、吞吐/P99、资源数据及已知限制见[完整验收报告](docs/benchmarks/CDN_ACCEPTANCE_2026-10-21.md)。 与 ATS 10.2.1 的实机对照见[基准报告](docs/benchmarks/ATS_COMPARISON_2026-10-22.md)，后续改进见[性能剖析](docs/benchmarks/PERFORMANCE_2026-10-23.md)。
-
-## 文档与边界
-
-- [合并回源、部分对象缓存与 RWW](docs/CACHE_FILL_DESIGN.md)
-- [功能与配置契约](docs/FEATURE_PLAN.md)
-- [RAM 缓存策略](docs/RAM_CACHE.md)
-- [磁盘格式与恢复](docs/CACHE_STORAGE_FORMAT.md)
-
-块缓存面向强 ETag、identity 编码的单 Range；不读取未校验或未提交的块。普通整对象路径等待完整提交。当前不支持多 Range 块缓存、跨节点一致性或 io_uring；提交也不等于逐块 fsync。
+块路径要求强 ETag、identity；普通整对象等完整提交。不支持多 Range 块缓存、未提交字节级 RWW、跨节点一致性或 io_uring；提交不等于逐块 fsync。

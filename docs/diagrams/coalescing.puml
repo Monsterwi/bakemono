@@ -1,0 +1,36 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Noto Serif CJK SC
+skinparam defaultFontSize 14
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam ArrowColor #334155
+skinparam componentBackgroundColor #EFF6FF
+skinparam stateBackgroundColor #EFF6FF
+hide footbox
+actor "客户端 A" as A
+actor "客户端 B" as B
+participant "Razor 请求处理器" as R
+participant "fillGroup / 独立生产者" as F
+participant "源站" as O
+database "缓存" as K
+A -> R : GET，MISS
+R -> F : join：创建任务
+note over R,F : 无聚合等待窗口，立即启动
+F -> O : 再查缓存仍 MISS，发起 GET
+B -> R : 等价 GET，仍 MISS
+R -> F : join：订阅在途任务
+note over F,O : 不重复 GET，不延长期限
+O --> F : 响应头及完整正文
+F -> K : 校验、写入、提交
+K --> F : 已提交可读
+F --> R : 发布结果，唤醒各处理器
+par A 独立读取
+  R -> K : 为 A 打开已提交对象
+  R --> A : 200 / 正文
+else B 独立读取
+  R -> K : 为 B 打开已提交对象
+  R --> B : 200 / 正文
+end
+note over A,B : 独立游标和取消，不等待对方读完
+@enduml
