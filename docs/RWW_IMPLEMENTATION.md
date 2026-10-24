@@ -15,6 +15,8 @@ RWW（Read While Write）在当前 HTTP 服务中表示：**完整对象尚未�
 
 ## 管线时序
 
+两个重叠 Range 如何加入同一缺块任务，见[缺块合并与 RWW 时序](CACHE_FILL_DESIGN.md#缺块合并与-rww-时序)；下面聚焦单个请求的逐块发送管线。
+
 ```mermaid
 sequenceDiagram
     participant C as 客户端

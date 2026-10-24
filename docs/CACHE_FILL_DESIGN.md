@@ -25,6 +25,43 @@
 
 任务协调与存储所有权是两层机制：`fillGroup` 合并等价请求，缓存层 `OpenDir` 保证同一缓存对象的活动写入所有权。二者不能互相替代；没有 Writer 时，也需要协调尚在等待源站响应头的请求。
 
+### 整对象合并时序
+
+下图展示可缓存、身份等价的成功路径。`Razor` 代表各请求独立的处理器；`fillGroup / 生产者` 合并展示任务协调和独立下载协程。图中省略资源排队及失败分支。
+
+```mermaid
+sequenceDiagram
+    participant A as 客户端 A
+    participant B as 客户端 B
+    participant R as Razor
+    participant F as fillGroup / 生产者
+    participant O as 源站
+    participant K as 缓存
+    A->>R: GET，缓存 MISS
+    R->>F: join，创建任务并订阅
+    Note over R,F: 无聚合等待窗口，立即启动生产者
+    F->>O: GET（再次查缓存仍 MISS）
+    B->>R: 等价 GET，缓存仍 MISS
+    R->>F: join 已有任务，增加订阅者
+    Note over F,O: 继续原回源，不重发 GET，不重置期限
+    O-->>F: 响应头及完整正文
+    F->>K: 校验、写入并提交整对象
+    K-->>F: 已提交，可独立读取
+    F-->>R: 发布完成结果，唤醒 A、B 的处理器
+    par A 独立读取和发送
+        R->>K: 为 A 打开已提交对象
+        R-->>A: 200 / 正文
+    and B 独立读取和发送
+        R->>K: 为 B 打开已提交对象
+        R-->>B: 200 / 正文
+    end
+    Note over A,B: 不共享读取游标，慢客户端不要求其他客户端等它读完
+```
+
+**先来的请求不等后来的请求。** 合并没有固定时间间隔；窗口自然覆盖同一有效任务的在途时间。任务提交完成后的请求通常直接命中缓存。假设 A 在 0 ms 创建任务，B 在 20 ms 加入，100 ms 时完成提交，则两者等待约 100 ms、80 ms，而不是为 B 额外延迟 A。这只是时间线示例，不是实测延迟。
+
+`shared_fill_timeout` 默认 **300 秒**，从任务创建时计算，后加入不会续期。它是生产任务总期限，不是攒请求的窗口，也不是每位订阅者重新获得 300 秒；资源排队、回源及写入超时可能更早失败。每个订阅者可独立取消；最后一个订阅者离开才取消共享生产者。
+
 ### 什么请求可以合并
 
 缓存身份与在途任务身份不同：
@@ -92,6 +129,47 @@ block 键 = 根键 + hash(源站, 变体, 强 ETag, Incarnation, 布局, 块大�
 7. 写入前检查版本和原始失效凭证；通过完整对象提交路径提交该块，再由读者独立读取已提交数据。
 
 完整 GET 与 Range 共享块要求相同源站、版本、布局和变体，并且请求经规范化后的其他头等价。原始 `Accept-Encoding` 缺省与显式 `identity` 仍是不同变体身份。
+
+### 缺块合并与 RWW 时序
+
+与整对象路径不同，块路径的共享单位是 **manifest 或一个缺块**。下例假设 fresh manifest 已存在，块大小 1 MiB，A 请求 `[0, 2 MiB)`，B 请求 `[0.5 MiB, 1.5 MiB)`；两者均需块 0、1，且其他任务身份等价。区间使用左闭右开记法。
+
+```mermaid
+sequenceDiagram
+    participant A as 客户端 A
+    participant B as 客户端 B
+    participant R as Razor
+    participant F as fillGroup / 块生产者
+    participant O as 固定源站
+    participant K as 块缓存
+    A->>R: Range [0, 2 MiB)
+    R->>F: 块 0 MISS，创建任务
+    F->>O: Range 块 0 + If-Match
+    B->>R: Range [0.5 MiB, 1.5 MiB)
+    R->>F: 加入在途块 0 任务
+    O-->>F: 完整块 0
+    F->>K: 校验并提交块 0
+    F-->>R: 块 0 完成，唤醒订阅者
+    R->>K: A、B 各自读取已提交块 0
+    par 发送当前块的所需部分
+        R-->>A: 206 / 块 0 的全部 1 MiB
+        R-->>B: 206 / 块 0 的后半部分
+    and 每请求最多准备下一块
+        R->>F: A、B 确保块 1，共享一个在途任务
+        F->>O: Range 块 1 + If-Match
+        O-->>F: 完整块 1
+        F->>K: 校验并提交块 1
+        F-->>R: 块 1 完成
+    end
+    R->>K: 各自在需要时读取已提交块 1
+    R-->>A: 块 1 的全部 1 MiB，完成
+    R-->>B: 块 1 的前半部分，完成
+    Note over A,K: 块 0 提交即可发送，无须等待块 1 或完整对象
+```
+
+图示假设下一块预取获得额度；不足时可放弃预取，发送当前块后再按需获取。若后一个请求到达时块已提交，则直接读取有效缓存，不必加入任务；两客户端的发送先后不作保证。manifest 缺失时，先共享 HEAD 探测并提交 manifest，再执行图中的逐块流程。
+
+300 秒总期限按每个 manifest/块任务分别计算，不是整次大文件下载统一倒计时。首块发送前须完整校验并提交；不会把同一块的未提交字节广播给客户端。更完整的管线、背压和错误边界见 [RWW 实现](RWW_IMPLEMENTATION.md#管线时序)。
 
 ### 重叠区间示例
 
