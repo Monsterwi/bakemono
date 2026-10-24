@@ -38,6 +38,7 @@
 | --- | --- |
 | 5ccf32c / [#19](benchmarks/CDN_ACCEPTANCE_2026-10-21.md) | HDD/SSD，256 KiB/100 MiB、200 MiB 回归；26 项通过，Otter/S3-FIFO 各全新两小时 SSD 长测，共 245,762 业务 GET |
 | 193fe7d / [ATS 对照](benchmarks/ATS_COMPARISON_2026-10-22.md) | ATS 10.2.1 native/Slice，72 热压测组、18 混合组、18 冷读；小文件仍落后 |
+| 8581267 / [当前 ATS 热命中](benchmarks/ATS_COMPARISON_2026-10-24.md) | 256 KiB C32/C100 对照 ATS 10.2.1；吞吐约 75%，P99 仍高；只重测热 HIT |
 | e1b158a / [#18](benchmarks/PERFORMANCE_2026-10-23.md) | 同轮 C32/C100 吞吐 2.30/2.48 倍；C100 P99 +10.8%，不是全指标改善 |
 | 77e5186 / [#29](benchmarks/HTTP_HOTPATH_2026-10-23.md) | 对上一版 C100 QPS +7.5%、P99 −7.1%；100 MiB 吞吐 −1.5%～−4.1%；功能/旧缓存恢复通过 |
 

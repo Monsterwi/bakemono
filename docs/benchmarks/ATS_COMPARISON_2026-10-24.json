@@ -1,0 +1,113 @@
+{
+  "manifest": {
+    "source_commit": "85812672199e8e4afbaa45d4106a2fc709453906",
+    "ats_version": "10.2.1",
+    "start_utc": "2026-10-24T09:48:43Z",
+    "binary_sha256": "9634d8bd2059f8fe58d987ee0fc7bacaacb35ede7c25c0f8beec10a32a529b56",
+    "ats_sha256": "6a15fe1db1307719771d1465a85179310e72f9bcee838e0a2194b2d68d231e23",
+    "hey_build": {
+      "upstream": "github.com/rakyll/hey@v0.1.4",
+      "module_sum": "h1:hhc8GIqHN4+rPFZvkM9lkCQGi7da0sINM83xxpFkbPA=",
+      "variant": "razor-bodycheck",
+      "patch": {
+        "before": "\t\tio.Copy(ioutil.Discard, resp.Body)",
+        "after": "\t\tsize, err = io.Copy(ioutil.Discard, resp.Body)"
+      },
+      "sha256": "4c5a989bac71a5879309f7b656f26ac4477a0ab2b3d06882c3c273e0c5fe9f26",
+      "go": "go version go1.26.10 linux/amd64"
+    },
+    "fixture_sha256": {
+      "small-v1.bin": "aa65f2c70f23be4dc7a42679993d2bd1a7b1bde694ba18575aa32ff6fe593883",
+      "small-v2.bin": "0ae90a16df3e3d50b70b9c1171a3f3877ac4ef6399cea27695da71e3eefd0e86",
+      "large-v1.bin": "7c872c016adb3bbe27ba37e591041a249818c664a1aea877db6603e7400e0749",
+      "large-v2.bin": "13b1599b3f7ff69f1a8e87ed61debb3d2f5635f59332e3d1bed7401b8e2a7f1a"
+    },
+    "harness_sha256": "a7b8d66c9bf7142b166e5e828740de0b1a80125e8cdf31cbd0fdc027f524b250",
+    "script_sha256": "32030342378329c2b2c4239275627f5522eb246c61ffc69150961c4af87aba1c",
+    "protocol": "HTTP/1.1 loopback keepalive identity; no TLS",
+    "object_bytes": 262144,
+    "server_GOMAXPROCS_or_threads": 8,
+    "hey_cpus": 8,
+    "affinity": "unpinned",
+    "seconds_per_run": 10,
+    "rounds": 3,
+    "variants": [
+      "razor",
+      "ats-native",
+      "ats-slice"
+    ],
+    "medium": "SSD; RAM hot HIT; verify actual read_bytes",
+    "cache_bytes": 1073741824,
+    "RAM_bytes": 10485760,
+    "logging": true,
+    "note": "Three products resident, one load active at a time; rotate order. CRC enabled in Razor, ATS default checksum=0."
+  },
+  "results": {
+    "razor": {
+      "32": {
+        "qps": 30231.5474245276,
+        "completion_p99_ms": 3.703003,
+        "cpu_us_request": 270.2470291348193,
+        "rss_peak_mib": 37.1484375,
+        "errors": 0,
+        "requests": 908815,
+        "origin_requests": 0,
+        "read_bytes": 0
+      },
+      "100": {
+        "qps": 29266.66401484033,
+        "completion_p99_ms": 14.86642,
+        "cpu_us_request": 280.66460613719033,
+        "rss_peak_mib": 45.8828125,
+        "errors": 0,
+        "requests": 882311,
+        "origin_requests": 0,
+        "read_bytes": 0
+      }
+    },
+    "ats-native": {
+      "32": {
+        "qps": 40597.270655796405,
+        "completion_p99_ms": 1.772931,
+        "cpu_us_request": 189.14934394810555,
+        "rss_peak_mib": 57.625,
+        "errors": 0,
+        "requests": 1213443,
+        "origin_requests": 0,
+        "read_bytes": 0
+      },
+      "100": {
+        "qps": 38957.32860726328,
+        "completion_p99_ms": 8.206889,
+        "cpu_us_request": 194.48168937976456,
+        "rss_peak_mib": 61.265625,
+        "errors": 0,
+        "requests": 1172955,
+        "origin_requests": 0,
+        "read_bytes": 0
+      }
+    },
+    "ats-slice": {
+      "32": {
+        "qps": 21856.506430670783,
+        "completion_p99_ms": 2.149321,
+        "cpu_us_request": 367.4035171189635,
+        "rss_peak_mib": 78.19921875,
+        "errors": 0,
+        "requests": 657625,
+        "origin_requests": 0,
+        "read_bytes": 0
+      },
+      "100": {
+        "qps": 22352.339959575173,
+        "completion_p99_ms": 6.823893,
+        "cpu_us_request": 359.0468353071665,
+        "rss_peak_mib": 87.85546875,
+        "errors": 0,
+        "requests": 672631,
+        "origin_requests": 0,
+        "read_bytes": 0
+      }
+    }
+  }
+}
